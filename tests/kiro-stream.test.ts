@@ -809,6 +809,26 @@ describe("kiro adapter — parseStream", () => {
     });
   });
 
+  test("authoritative turn usage floors a smaller payload context estimate", async () => {
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "hi" }]));
+    const done = await doneUsage(
+      adapter,
+      eventFrame({ content: "answer" }),
+      eventFrame({
+        tokenUsage: {
+          uncachedInputTokens: 500,
+          outputTokens: 4,
+          totalTokens: 504,
+        },
+      }, "metadataEvent"),
+    );
+
+    expect(done.inputTokens).toBe(500);
+    expect(done.outputTokens).toBe(4);
+    expect(done.contextTotalTokens).toBe(504);
+  });
+
   test("invalid provider token usage is rejected instead of replacing estimates", async () => {
     const adapter = createKiroAdapter(provider);
     await adapter.buildRequest(parsedWith([{ role: "user", content: "hi" }]));
@@ -860,6 +880,14 @@ describe("kiro adapter — parseStream", () => {
     expect(done.outputTokens).toBe(100);
     expect(done.totalTokens).toBeUndefined();
     expect(done.estimated).toBe(true);
+    expect(done.contextTotalTokens).toBe(50_000);
+  });
+
+  test("Kiro context percentage uses the native model window instead of a configured client cap", async () => {
+    const adapter = createKiroAdapter({ ...provider, contextWindow: 1_000_000 });
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "hi" }], undefined, "claude-sonnet-4.5"));
+    const done = await doneUsage(adapter, eventFrame({ content: "ok" }), eventFrame({ contextUsagePercentage: 25 }));
+
     expect(done.contextTotalTokens).toBe(50_000);
   });
 
@@ -917,6 +945,21 @@ describe("kiro adapter — parseStream", () => {
     expect(request.body).not.toContain(privateReasoning);
     expect(request.usageLog?.inputTokens).toBeGreaterThan((usage.contextTotalTokens ?? 0) + 1000);
     expect(usage.contextTotalTokens).toBeLessThan(1000);
+  });
+
+  test("normalized images contribute conservative context tokens", async () => {
+    const onePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{
+      role: "user",
+      content: [
+        { type: "text", text: "inspect" },
+        { type: "image", imageUrl: `data:image/png;base64,${onePixelPng}` },
+      ],
+    }]));
+    const usage = await doneUsage(adapter, eventFrame({ content: "ok" }));
+
+    expect(usage.contextTotalTokens).toBeGreaterThanOrEqual(256 + usage.outputTokens);
   });
 
   test("request log usage estimates the full Codex context while SSE usage stays current-turn", async () => {

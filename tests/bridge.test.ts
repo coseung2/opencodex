@@ -190,6 +190,28 @@ describe("Responses bridge reasoning and usage parity", () => {
     });
   });
 
+  test("absolute context projection keeps cache details within derived input", async () => {
+    const frames = await collectSse(bridgeToResponsesSSE(replay([{
+      type: "done",
+      usage: {
+        inputTokens: 200,
+        outputTokens: 10,
+        contextTotalTokens: 100,
+        cachedInputTokens: 150,
+        cacheReadInputTokens: 150,
+        cacheCreationInputTokens: 50,
+      },
+    }]), "kiro/claude-opus-5"));
+
+    const completed = frames.find(f => f.event === "response.completed")?.data.response as Record<string, unknown>;
+    expect(completed.usage).toMatchObject({
+      input_tokens: 90,
+      output_tokens: 10,
+      total_tokens: 100,
+      input_tokens_details: { cached_tokens: 90, cache_write_tokens: 0 },
+    });
+  });
+
   test("adapter heartbeat is non-visual in streaming and non-streaming responses", async () => {
     const events: AdapterEvent[] = [
       { type: "heartbeat" },

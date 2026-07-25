@@ -30,10 +30,14 @@ function responsesUsage(usage: OcxUsage | undefined): Record<string, unknown> {
   const inputDetails: Record<string, number> = {};
   if (usage.cachedInputTokens !== undefined) {
     // cached_tokens carries cache READS only, matching OpenAI semantics.
-    inputDetails.cached_tokens = usage.cachedInputTokens;
+    inputDetails.cached_tokens = Math.min(usage.cachedInputTokens, inputTokens);
   }
   if (usage.cacheCreationInputTokens !== undefined) {
-    inputDetails.cache_write_tokens = usage.cacheCreationInputTokens;
+    const cacheRead = inputDetails.cached_tokens ?? 0;
+    inputDetails.cache_write_tokens = Math.min(
+      usage.cacheCreationInputTokens,
+      Math.max(0, inputTokens - cacheRead),
+    );
   }
   if (Object.keys(inputDetails).length > 0) {
     out.input_tokens_details = inputDetails;
