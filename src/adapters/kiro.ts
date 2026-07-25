@@ -144,6 +144,10 @@ function estimateKiroImageTokens(image: KiroImage): number {
   return Math.max(256, Math.ceil(decodedBytes / 512));
 }
 
+function estimateKiroTokens(text: string, modelId?: string): number {
+  return estimateTokens(text, modelId ? `kiro/${modelId}` : "kiro");
+}
+
 function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelId: string): number {
   const conversationState = (payload as {
     conversationState?: {
@@ -174,7 +178,7 @@ function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelI
       if (assistant.toolUses?.length) parts.push(serializeForUsage(assistant.toolUses));
     }
   }
-  return estimateTokens(parts.join("\n"), modelId) + imageTokens;
+  return estimateKiroTokens(parts.join("\n"), modelId) + imageTokens;
 }
 
 function shouldCountStablePromptOverhead(parsed: OcxParsedRequest): boolean {
@@ -191,14 +195,14 @@ function estimateKiroInputTokens(parsed: OcxParsedRequest): number {
     if (parsed.context.tools?.length) parts.push(serializeForUsage(parsed.context.tools));
   }
 
-  return estimateTokens(parts.join("\n"), parsed.modelId);
+  return estimateKiroTokens(parts.join("\n"), parsed.modelId);
 }
 
 function estimateKiroLogInputTokens(parsed: OcxParsedRequest): number {
   const parts = parsed.context.messages.map(messageLogText).filter(Boolean);
   if (parsed.context.systemPrompt?.length) parts.push(...parsed.context.systemPrompt);
   if (parsed.context.tools?.length) parts.push(serializeForUsage(parsed.context.tools));
-  return Math.max(estimateKiroInputTokens(parsed), estimateTokens(parts.join("\n"), parsed.modelId));
+  return Math.max(estimateKiroInputTokens(parsed), estimateKiroTokens(parts.join("\n"), parsed.modelId));
 }
 
 function kiroUpstreamContextWindow(modelId: string | undefined): number | undefined {
@@ -631,7 +635,7 @@ async function* parseKiroAttempt(
   const usage = (): OcxUsage => {
     const base = authoritativeUsage ?? {
       inputTokens,
-      outputTokens: estimateTokens(outputChars, modelId),
+      outputTokens: estimateKiroTokens(outputChars, modelId),
       estimated: true,
     };
     const estimatedContextTotal = contextInputEstimate !== undefined

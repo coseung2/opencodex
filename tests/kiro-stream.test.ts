@@ -953,6 +953,16 @@ describe("kiro adapter — parseStream", () => {
     expect(done.contextTotalTokens).toBe(50_000);
   });
 
+  test("Kiro GPT routes use the Kiro token ratio without context percentage", async () => {
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "x".repeat(3500) }], undefined, "gpt-5.6-sol"));
+    const done = await doneUsage(adapter, eventFrame({ content: "y".repeat(3500) }));
+
+    expect(done.inputTokens).toBe(1000);
+    expect(done.outputTokens).toBe(1000);
+    expect(done.contextTotalTokens).toBe(2000);
+  });
+
   test("fresh payload includes history while usage counts only the current turn", async () => {
     const latest = "please summarize recent commits";
     const shortMessages = [
