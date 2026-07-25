@@ -539,15 +539,17 @@ function mergeKiroUsage(
   const carriedContextTotal = preserveFirstContextGrowth && typeof first.contextTotalTokens === "number"
     ? first.contextTotalTokens + second.outputTokens
     : undefined;
+  const combinedOutputTokens = first.outputTokens + second.outputTokens;
   return {
     inputTokens: first.inputTokens + second.inputTokens,
-    outputTokens: first.outputTokens + second.outputTokens,
+    outputTokens: combinedOutputTokens,
     ...(typeof first.contextTotalTokens === "number" || typeof second.contextTotalTokens === "number"
       ? {
           contextTotalTokens: Math.max(
             first.contextTotalTokens ?? 0,
             second.contextTotalTokens ?? 0,
             carriedContextTotal ?? 0,
+            combinedOutputTokens,
           ),
         }
       : {}),

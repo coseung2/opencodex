@@ -388,6 +388,24 @@ describe("kiro adapter — parseStream", () => {
     expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
   });
 
+  test("reasoning-only fallback keeps absolute context above combined output", async () => {
+    const reasoning = "r".repeat(14_000);
+    const finalText = "f".repeat(14_000);
+    globalThis.fetch = (async () => new Response(streamOf(eventFrame({ content: finalText })))) as typeof fetch;
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "solve" }], [bashTool]));
+
+    const events = await collectAdapterEvents(adapter.parseStream(new Response(streamOf(
+      eventFrame({ content: `<thinking>${reasoning}</thinking>` }),
+    ))));
+    const done = events.at(-1);
+
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") {
+      expect(done.usage?.contextTotalTokens).toBeGreaterThanOrEqual(done.usage?.outputTokens ?? 0);
+    }
+  });
+
   test("normal Responses cancellation aborts the adapter-owned fallback without another replay", async () => {
     const abort = new AbortController();
     let fetches = 0;
