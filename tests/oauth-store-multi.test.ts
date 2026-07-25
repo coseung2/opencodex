@@ -103,6 +103,11 @@ describe("multi-account auth store", () => {
       apiRegion: "us-east-1",
       clientSecret: "secret-a",
     });
+    expect(set.accounts.find(account => account.credential.accountId === "profile-b")?.credential.kiro).toMatchObject({
+      profileArn: "profile-b",
+      apiRegion: "eu-west-1",
+      clientSecret: "secret-b",
+    });
     expect(getCredential("kiro")).toMatchObject({ accountId: "profile-b", access: "kiro-b" });
   });
 

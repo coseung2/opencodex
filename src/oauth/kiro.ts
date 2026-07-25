@@ -10,12 +10,15 @@
  */
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import {
+  discardKiroCliSessionRecovery,
   inferRegionFromProfileArn,
   inspectKiroCliSqliteSources,
   normalizeKiroRegion,
+  persistKiroCliSessionRecovery,
   readImportedKiroCredential,
   readKiroCliSqliteCredential,
   restoreKiroCliSession,
+  restoreStaleKiroCliSessionRecovery,
   requireKiroRegion,
   snapshotKiroCliSession,
   type ImportedKiroCredential,
@@ -70,14 +73,16 @@ const pendingKiroLoginTransactions = new WeakMap<OAuthCredentials, KiroCliSessio
 export function settleKiroLoginTransaction(credential: OAuthCredentials, persisted: boolean): void {
   const snapshot = pendingKiroLoginTransactions.get(credential);
   if (!snapshot) return;
-  pendingKiroLoginTransactions.delete(credential);
   if (!persisted) restoreKiroCliSession(snapshot);
+  discardKiroCliSessionRecovery(snapshot);
+  pendingKiroLoginTransactions.delete(credential);
 }
 
 function restoreKiroLoginOrThrow(snapshot: KiroCliSessionSnapshot | null, cause: unknown): never {
   if (snapshot) {
     try {
       restoreKiroCliSession(snapshot);
+      discardKiroCliSessionRecovery(snapshot);
     } catch (restoreError) {
       throw new AggregateError(
         [cause, restoreError],
@@ -187,6 +192,9 @@ export function readKiroCliSqlite(): ImportedKiroToken | null {
  */
 export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions = {}): Promise<OAuthCredentials> {
   const runner = options.cliRunner ?? defaultKiroCliRunner;
+  // A prior process may have exited after switching the external CLI account but before
+  // settlement. Recover that durable transaction before either importing or switching again.
+  restoreStaleKiroCliSessionRecovery();
   if (options.forceLogin) {
     throwIfKiroLoginCancelled(ctrl.signal);
     ctrl.onAuth?.({
@@ -195,6 +203,7 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
     });
     ctrl.onProgress?.("Opening a fresh Kiro CLI browser login.");
     const previousSession = snapshotKiroCliSession();
+    if (previousSession) persistKiroCliSessionRecovery(previousSession);
     try {
       const logout = await runner(["logout"], ctrl.signal);
       throwIfKiroLoginCancelled(ctrl.signal);

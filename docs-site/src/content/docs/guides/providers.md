@@ -80,7 +80,7 @@ ocx logout <provider>
 | `xai` | `openai-chat` | `https://api.x.ai/v1` | Live-first Grok catalog; `grok-4.5` is the fallback default. |
 | `anthropic` | `anthropic` | `https://api.anthropic.com` | Claude models; live model list fetched from `/v1/models`. |
 | `kimi` | `openai-chat` | `https://api.kimi.com/coding/v1` | Kimi K2.7/K2.6/K2.5 coding models. |
-| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed `kiro-cli` session; **Add account** logs `kiro-cli` out, starts a fresh browser login (switching the account `kiro-cli` itself uses), and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved. |
+| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed `kiro-cli` session; **Add account** logs `kiro-cli` out, starts a fresh browser login (switching the account `kiro-cli` itself uses), and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved, and cancellation or failure restores the previous `kiro-cli` session. |
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
@@ -91,22 +91,29 @@ You can also start OAuth from the [web dashboard](/guides/web-dashboard/).
 
 OAuth providers whose credentials include a stable account id or email can keep more than one
 login. The Providers page shows those accounts in a dropdown, lets you add another, and switches the
-active account without logging the others out. Identity-less Kimi and Kiro credentials replace their
-active slot, while `chatgpt` is always single-slot because Codex pool accounts have a separate ledger.
+active account without logging the others out. Only identity-less Kimi credentials replace the
+active slot; Kiro accounts are keyed by profile ARN. `chatgpt` is always single-slot because Codex
+pool accounts have a separate ledger.
 Tokens stay in `~/.opencodex/auth.json`; `/api/oauth/accounts` returns masked metadata only.
 
 ### Kiro credential import
 
-`ocx login kiro` searches the platform Kiro CLI stores and opens SQLite databases read-only. Two
-environment variables make selection explicit without copying credentials into opencodex:
+The `ocx login kiro` import path searches the platform Kiro CLI stores and opens SQLite databases
+read-only. Two environment variables make selection explicit without copying credentials into
+opencodex:
 
 - `KIROCLI_DB_PATH` selects a nonstandard Kiro CLI SQLite database. The path must already exist;
-  opencodex does not create it or modify the database, WAL, or SHM files.
+  during this import path, opencodex does not create or modify the database, WAL, or SHM files.
 - `KIROCLI_TOKEN_KEY` selects the exact `auth_kv` token key when a database contains multiple
   otherwise ambiguous token rows. A missing selection fails login instead of guessing.
 
 Keep these variables and the selected database private. Do not attach database files or raw login
 diagnostics to bug reports.
+
+**Add account** is a separate write workflow: it snapshots the current session, logs `kiro-cli` out,
+and imports the fresh browser login. If the login is cancelled or fails, including while OpenCodex
+persists the credential, rollback replaces the Kiro CLI database and removes its current WAL, SHM,
+and journal sidecars before publishing the previous session snapshot.
 
 ## 3. API-key catalog
 

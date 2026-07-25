@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OAUTH_PROVIDERS, runLogin } from "../src/oauth";
-import { inspectKiroCliSqlite, loginKiro, readKiroCliSqlite, refreshKiroToken, resolveKiroApiRegion, resolveKiroProfileArn, resolveKiroRegion } from "../src/oauth/kiro";
+import { inspectKiroCliSqlite, loginKiro, readKiroCliSqlite, refreshKiroToken, resolveKiroApiRegion, resolveKiroProfileArn, resolveKiroRegion, settleKiroLoginTransaction } from "../src/oauth/kiro";
 
 // Windows CI cold runners take 5-7s for the real SQLite create/inspect cycles here
 // (same flake class as 810fa115); the default 5s harness timeout is too tight.
@@ -98,8 +98,28 @@ function seedKiroCliRawValue(value: string) {
 }
 
 function removeKiroCliDb(): void {
-  const path = join(tmp, "Library", "Application Support", "kiro-cli", "data.sqlite3");
+  const path = kiroCliDbPath();
   for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${path}${suffix}`, { force: true });
+}
+
+function kiroCliDbPath(): string {
+  return join(tmp, "Library", "Application Support", "kiro-cli", "data.sqlite3");
+}
+
+function kiroCliRecoveryPath(): string {
+  return `${kiroCliDbPath()}.opencodex-recovery`;
+}
+
+function rewriteKiroCliRecoveryOwner(ownerPid: number): void {
+  const path = kiroCliRecoveryPath();
+  const payload = readFileSync(path);
+  const firstLineEnd = payload.indexOf(0x0a);
+  const ownerLineEnd = payload.indexOf(0x0a, firstLineEnd + 1);
+  writeFileSync(path, Buffer.concat([
+    payload.subarray(0, firstLineEnd + 1),
+    Buffer.from(`${ownerPid}\n`, "utf8"),
+    payload.subarray(ownerLineEnd + 1),
+  ]), { mode: 0o600 });
 }
 
 function seedCustomTokenDb(path: string, rows: Array<[string, Record<string, unknown>]>): void {
@@ -232,6 +252,96 @@ describe("kiro oauth — import-first", () => {
     expect(cred.source).toBe("local-cli");
   });
 
+  test("force login durably records the prior session before logout and deletes it after successful settlement", async () => {
+    seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
+    let recoveryExistedBeforeLogout = false;
+    let recoveryModeBeforeLogout: number | undefined;
+    const runner = async (args: string[]) => {
+      if (args[0] === "logout") {
+        recoveryExistedBeforeLogout = existsSync(kiroCliRecoveryPath());
+        recoveryModeBeforeLogout = statSync(kiroCliRecoveryPath()).mode & 0o777;
+        removeKiroCliDb();
+      }
+      if (args[0] === "login") {
+        seedKiroCliDb({
+          access_token: "aoa-new",
+          refresh_token: "rt-new",
+          profile_arn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/new",
+        });
+      }
+      if (args[0] === "whoami") return { exitCode: 0, stdout: JSON.stringify({ email: "new@example.com" }) };
+      return { exitCode: 0, stdout: "" };
+    };
+
+    const pending = await loginKiro({}, { forceLogin: true, cliRunner: runner });
+
+    expect(recoveryExistedBeforeLogout).toBe(true);
+    if (process.platform !== "win32") expect(recoveryModeBeforeLogout).toBe(0o600);
+    expect(existsSync(kiroCliRecoveryPath())).toBe(true);
+    settleKiroLoginTransaction(pending, true);
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
+    expect(readKiroCliSqlite()?.access).toBe("aoa-new");
+  });
+
+  test("next ordinary login restores stale crash recovery before importing SQLite", async () => {
+    seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
+    const firstRunner = async (args: string[]) => {
+      if (args[0] === "logout") removeKiroCliDb();
+      if (args[0] === "login") {
+        seedKiroCliDb({
+          access_token: "aoa-abandoned",
+          refresh_token: "rt-abandoned",
+          profile_arn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/abandoned",
+        });
+      }
+      if (args[0] === "whoami") {
+        for (const suffix of ["-wal", "-shm", "-journal"]) writeFileSync(`${kiroCliDbPath()}${suffix}`, `abandoned${suffix}`);
+        return { exitCode: 0, stdout: JSON.stringify({ email: "abandoned@example.com" }) };
+      }
+      return { exitCode: 0, stdout: "" };
+    };
+
+    const abandoned = await loginKiro({}, { forceLogin: true, cliRunner: firstRunner });
+    expect(abandoned.access).toBe("aoa-abandoned");
+    expect(existsSync(kiroCliRecoveryPath())).toBe(true);
+    const liveTransactionFiles = ["", "-wal", "-shm", "-journal", ".opencodex-recovery"]
+      .map(suffix => readFileSync(`${kiroCliDbPath()}${suffix}`));
+
+    let liveOwnerRunnerCalled = false;
+    await expect(loginKiro({}, {
+      cliRunner: async () => {
+        liveOwnerRunnerCalled = true;
+        return { exitCode: 0, stdout: "" };
+      },
+    })).rejects.toThrow(/still in progress/i);
+    expect(liveOwnerRunnerCalled).toBe(false);
+    expect(existsSync(kiroCliRecoveryPath())).toBe(true);
+    expect(["", "-wal", "-shm", "-journal", ".opencodex-recovery"]
+      .map((suffix, index) => readFileSync(`${kiroCliDbPath()}${suffix}`).equals(liveTransactionFiles[index]!)))
+      .toEqual([true, true, true, true, true]);
+
+    const exitedOwner = Bun.spawn([process.execPath, "-e", ""]);
+    await exitedOwner.exited;
+    rewriteKiroCliRecoveryOwner(exitedOwner.pid);
+
+    // This call stands in for a fresh process: it deliberately never settles or otherwise uses
+    // the in-memory transaction above. Ordinary import must recover the stale transaction first.
+    const calls: string[][] = [];
+    const secondRunner = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "whoami") return { exitCode: 0, stdout: JSON.stringify({ email: "prior@example.com" }) };
+      throw new Error(`unexpected Kiro CLI command: ${args[0]}`);
+    };
+
+    const restored = await loginKiro({}, { cliRunner: secondRunner });
+
+    expect(restored).toMatchObject({ access: "aoa-prior", refresh: "rt-prior", email: "prior@example.com" });
+    expect(calls).toEqual([["whoami", "--format", "json"]]);
+    expect(["-wal", "-shm", "-journal"].map(suffix => existsSync(`${kiroCliDbPath()}${suffix}`))).toEqual([false, false, false]);
+    expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
+  });
+
   test("force login cancellation during browser login restores the prior Kiro CLI session", async () => {
     seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
     const controller = new AbortController();
@@ -250,6 +360,7 @@ describe("kiro oauth — import-first", () => {
     await expect(loginKiro({ signal: controller.signal }, { forceLogin: true, cliRunner: runner })).rejects.toThrow(/cancelled/i);
     expect(calls).toEqual([["logout"], ["login"]]);
     expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
   });
 
   test("force login callback failure restores the prior Kiro CLI session", async () => {
@@ -265,6 +376,7 @@ describe("kiro oauth — import-first", () => {
 
     expect(calls).toEqual([["logout"], ["login"]]);
     expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
   });
 
   test("credential persistence failure restores the prior Kiro CLI session", async () => {
@@ -295,6 +407,7 @@ describe("kiro oauth — import-first", () => {
     }
 
     expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
   });
 
   test("loginKiro imports JSON credentials and resolver metadata", async () => {

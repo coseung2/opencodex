@@ -179,12 +179,14 @@ function accessSnapshot(provider: string, accountId: string, cred: OAuthCredenti
     accountId,
     generation: credentialGeneration(cred),
     accessToken: cred.access,
-    ...(provider === "kiro" && cred.kiro
+    // Presence is the account-scope marker: an empty object means this selected account has no
+    // stored routing metadata and must not borrow metadata from the local Kiro CLI/environment.
+    ...(provider === "kiro"
       ? {
           kiro: {
-            ...(cred.kiro.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
-            ...(cred.kiro.apiRegion ? { apiRegion: cred.kiro.apiRegion } : {}),
-            ...(cred.kiro.ssoRegion ? { ssoRegion: cred.kiro.ssoRegion } : {}),
+            ...(cred.kiro?.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
+            ...(cred.kiro?.apiRegion ? { apiRegion: cred.kiro.apiRegion } : {}),
+            ...(cred.kiro?.ssoRegion ? { ssoRegion: cred.kiro.ssoRegion } : {}),
           },
         }
       : {}),
@@ -368,13 +370,11 @@ async function refreshAndPersistAccessToken(
     const fresh = provider === "kiro"
       ? await refreshKiroToken(cred.refresh, undefined, cred)
       : await def.refresh(cred.refresh);
-    const detachedLocalCli = provider === "xai" && cred.source === "local-cli";
-    if (detachedLocalCli) console.warn(XAI_LOCAL_CLI_DETACH_WARNING);
     // Persist to THIS account (rotation-safe: new refresh token hits disk before use) without
     // touching activeAccountId.
     const next: OAuthCredentials = {
       ...fresh,
-      source: detachedLocalCli ? "oauth" : fresh.source ?? cred.source ?? "oauth",
+      source: fresh.source ?? cred.source ?? "oauth",
       // Preserve a previously-discovered project id when a refresh-time re-discovery comes back empty
       // (e.g. a transient network blip), so Antigravity does not lose its CCA project across refresh.
       ...(fresh.projectId === undefined && cred.projectId ? { projectId: cred.projectId } : {}),
@@ -528,6 +528,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
 interface RunLoginDeps {
   saveCredential?: typeof saveCredential;
   saveAccountCredential?: typeof saveAccountCredential;
+  settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
 }
 
 /** Run the login flow, persist the credential + upsert the provider entry to disk, return cred. */
@@ -539,8 +540,11 @@ export async function runLogin(
 ): Promise<OAuthCredentials> {
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
+  // loginKiro keys its pending CLI-session transaction by object identity. Keep this exact object
+  // for settlement even when source normalization below creates a derived credential object.
   const rawCred = await def.login(ctrl, opts);
   const cred: OAuthCredentials = rawCred.source ? rawCred : { ...rawCred, source: "oauth" };
+  const settleKiroTransaction = deps.settleKiroLoginTransaction ?? settleKiroLoginTransaction;
   try {
     if (opts?.reauthAccountId) {
       const existing = getAccountCredential(provider, opts.reauthAccountId);
@@ -561,7 +565,7 @@ export async function runLogin(
     }
   } catch (error) {
     try {
-      settleKiroLoginTransaction(rawCred, false);
+      settleKiroTransaction(rawCred, false);
     } catch (restoreError) {
       throw new AggregateError(
         [error, restoreError],
@@ -570,7 +574,7 @@ export async function runLogin(
     }
     throw error;
   }
-  settleKiroLoginTransaction(rawCred, true);
+  settleKiroTransaction(rawCred, true);
   if (provider === "chatgpt") return cred;
   const config = loadConfig();
   upsertOAuthProvider(config, provider);

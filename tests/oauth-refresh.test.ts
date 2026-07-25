@@ -218,7 +218,12 @@ describe("oauth refresh hardening", () => {
       }),
     ]);
 
-    await expect(getValidAccessToken("kiro")).rejects.toBeInstanceOf(OAuthLoginRequiredError);
+    const error = await getValidAccessToken("kiro").then(
+      () => undefined,
+      reason => reason,
+    );
+    expect(error).toBeInstanceOf(OAuthLoginRequiredError);
+    expect(String(error)).not.toContain("do not surface this detail");
     expect(getAccountSet("kiro")?.accounts[0]?.needsReauth).toBe(true);
   });
 

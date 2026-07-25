@@ -1,3 +1,5 @@
+import type { KiroOAuthMetadata } from "./oauth/types";
+
 export interface OcxParsedRequest {
   modelId: string;
   previousResponseId?: string;
@@ -24,7 +26,7 @@ export interface OcxParsedRequest {
    */
   _cursorIsolateConversation?: boolean;
   /** Account-scoped, non-secret Kiro request metadata selected with the OAuth access token. */
-  _kiroAuthContext?: { profileArn?: string; apiRegion?: string; ssoRegion?: string };
+  _kiroAuthContext?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion">;
   /** Provider-private continuation metadata resolved from the Responses previous_response_id chain. */
   _providerContinuation?: OcxProviderContinuationState;
   /**

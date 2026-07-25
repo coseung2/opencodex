@@ -889,7 +889,9 @@ export async function handleResponses(
       if (isOAuth401ReplayProvider) sentOAuthSnapshot = resolved;
       route.provider = { ...route.provider, apiKey: resolved.accessToken };
       if (route.providerName === "kiro") {
-        parsed._kiroAuthContext = resolved.kiro ? { ...resolved.kiro } : undefined;
+        // `{}` is intentional: this is an account-scoped request with no stored routing metadata.
+        // Only genuinely accountless adapter calls leave the context undefined and use local/env fallback.
+        parsed._kiroAuthContext = { ...(resolved.kiro ?? {}) };
       }
       // Antigravity (cloud-code-assist) needs the discovered Cloud Code Assist project id in the
       // CCA envelope; the server injects only the bare token, so pull project from the credential.
@@ -1577,7 +1579,7 @@ export async function handleResponses(
         }
         sentOAuthSnapshot = refreshed;
         if (route.providerName === "kiro") {
-          parsed._kiroAuthContext = refreshed.kiro ? { ...refreshed.kiro } : undefined;
+          parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
         }
         const refreshedProvider = resolveProviderTransport(
           route.providerName,
