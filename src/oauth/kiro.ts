@@ -80,6 +80,8 @@ async function defaultKiroCliRunner(args: string[], signal?: AbortSignal): Promi
   }
   const abort = () => child.kill();
   signal?.addEventListener("abort", abort, { once: true });
+  // AbortSignal does not replay an abort that lands between the pre-check and listener registration.
+  if (signal?.aborted) abort();
   try {
     const [exitCode, stdout] = await Promise.all([
       child.exited,
@@ -277,13 +279,18 @@ async function readTokenResponse(res: Response, oldRefresh: string): Promise<OAu
   };
 }
 
+function kiroRefreshSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(30_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 async function refreshKiroDesktopToken(refresh: string, signal?: AbortSignal, metadata?: KiroOAuthMetadata): Promise<OAuthCredentials> {
   const region = resolveKiroRegion(metadata);
   const res = await fetch(REFRESH_URL.replace("{region}", region), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refreshToken: refresh }),
-    signal: signal ?? AbortSignal.timeout(30_000),
+    signal: kiroRefreshSignal(signal),
   });
   if (!res.ok) throw await kiroTokenRefreshError(res);
   return readTokenResponse(res, refresh);
@@ -312,11 +319,53 @@ async function refreshAwsSsoOidcToken(
       clientSecret,
       refreshToken,
     }),
-    signal: signal ?? AbortSignal.timeout(30_000),
+    signal: kiroRefreshSignal(signal),
   });
   const res = await run(refresh);
   if (!res.ok) throw await kiroTokenRefreshError(res);
   return readTokenResponse(res, refresh);
+}
+
+function matchingRotatedKiroCliCredential(
+  refresh: string,
+  credential?: OAuthCredentials,
+): ImportedKiroCredential | undefined {
+  const storedIdentities = [credential?.kiro?.profileArn, credential?.accountId]
+    .filter((value): value is string => Boolean(value));
+  if (storedIdentities.length === 0 || new Set(storedIdentities).size !== 1) return undefined;
+  try {
+    const local = readKiroCliSqliteCredential();
+    if (!local?.profileArn || storedIdentities.some(identity => identity !== local.profileArn)) return undefined;
+    if (!local.refresh || local.refresh === refresh) return undefined;
+    return local;
+  } catch {
+    // An unrelated or malformed local store must not block the stored OCX account.
+    return undefined;
+  }
+}
+
+function metadataForRotatedKiroCliCredential(
+  credential: OAuthCredentials,
+  local: ImportedKiroCredential,
+): KiroOAuthMetadata {
+  const {
+    clientId: _storedClientId,
+    clientSecret: _storedClientSecret,
+    ...storedRouting
+  } = credential.kiro ?? {};
+  const localMetadata = metadataFromImported(local) ?? {};
+  const {
+    clientId: _localClientId,
+    clientSecret: _localClientSecret,
+    ...localRouting
+  } = localMetadata;
+  return {
+    ...storedRouting,
+    ...localRouting,
+    ...(local.authType === "aws_sso_oidc" && local.clientId && local.clientSecret
+      ? { clientId: local.clientId, clientSecret: local.clientSecret }
+      : {}),
+  };
 }
 
 export async function refreshKiroToken(
@@ -325,5 +374,19 @@ export async function refreshKiroToken(
   credential?: OAuthCredentials,
 ): Promise<OAuthCredentials> {
   if (!refresh) throw new Error("Kiro: no refresh token available (re-run `kiro-cli login`).");
-  return refreshAwsSsoOidcToken(refresh, signal, credential);
+  try {
+    return await refreshAwsSsoOidcToken(refresh, signal, credential);
+  } catch (error) {
+    if (!(error instanceof KiroTokenRefreshError) || error.httpStatus !== 400) throw error;
+    if (!credential) throw error;
+    const local = matchingRotatedKiroCliCredential(refresh, credential);
+    if (!local) throw error;
+    const retryMetadata = metadataForRotatedKiroCliCredential(credential, local);
+    const fresh = await refreshAwsSsoOidcToken(local.refresh, signal, {
+      ...credential,
+      refresh: local.refresh,
+      kiro: retryMetadata,
+    });
+    return { ...fresh, kiro: retryMetadata };
+  }
 }

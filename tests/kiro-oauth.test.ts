@@ -231,10 +231,7 @@ describe("kiro oauth — import-first", () => {
     const calls: string[][] = [];
     const runner = async (args: string[]) => {
       calls.push(args);
-      if (args[0] === "logout") {
-        controller.abort();
-        throw new Error("Kiro login cancelled.");
-      }
+      if (args[0] === "logout") controller.abort();
       return { exitCode: 0, stdout: "" };
     };
 
@@ -557,6 +554,135 @@ describe("kiro oauth — import-first", () => {
         clientSecret: "stored-secret",
       },
     })).resolves.toMatchObject({ access: "aoa-stored-new", refresh: "rt-stored" });
+  });
+
+  test("refreshKiroToken retries a rotated local refresh only for the same profile", async () => {
+    const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/same";
+    seedKiroCliDb({
+      access_token: "aoa-local-new",
+      refresh_token: "rt-local-new",
+      profile_arn: profileArn,
+      region: "eu-west-1",
+    });
+    const refreshRequests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input, init) => {
+      refreshRequests.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      if (refreshRequests.length === 1) {
+        return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ accessToken: "aoa-recovered", expiresIn: 60 }), { status: 200 });
+    }) as typeof fetch;
+
+    const fresh = await refreshKiroToken("rt-stored-old", undefined, {
+      access: "aoa-stored-old",
+      refresh: "rt-stored-old",
+      expires: 0,
+      accountId: profileArn,
+      source: "local-cli",
+      kiro: {
+        profileArn,
+        ssoRegion: "eu-west-1",
+        clientId: "stale-client",
+        clientSecret: "stale-secret",
+      },
+    });
+
+    expect(refreshRequests).toEqual([
+      {
+        url: "https://oidc.eu-west-1.amazonaws.com/token",
+        body: {
+          grantType: "refresh_token",
+          clientId: "stale-client",
+          clientSecret: "stale-secret",
+          refreshToken: "rt-stored-old",
+        },
+      },
+      {
+        url: "https://prod.eu-west-1.auth.desktop.kiro.dev/refreshToken",
+        body: { refreshToken: "rt-local-new" },
+      },
+    ]);
+    expect(fresh).toMatchObject({ access: "aoa-recovered", refresh: "rt-local-new", kiro: { profileArn } });
+    expect(fresh.kiro?.clientId).toBeUndefined();
+    expect(fresh.kiro?.clientSecret).toBeUndefined();
+  });
+
+  test("refreshKiroToken never retries a rotated local refresh from another profile", async () => {
+    seedKiroCliDb({
+      access_token: "aoa-other",
+      refresh_token: "rt-other-new",
+      profile_arn: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/other",
+      region: "eu-west-1",
+    });
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    }) as typeof fetch;
+
+    await expect(refreshKiroToken("rt-stored-old", undefined, {
+      access: "aoa-stored-old",
+      refresh: "rt-stored-old",
+      expires: 0,
+      accountId: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/stored",
+      source: "local-cli",
+      kiro: {
+        profileArn: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/stored",
+        ssoRegion: "eu-west-1",
+      },
+    })).rejects.toBeInstanceOf(Error);
+    expect(calls).toBe(1);
+  });
+
+  test("refreshKiroToken rejects conflicting stored profile identities before local recovery", async () => {
+    const localProfile = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/local";
+    seedKiroCliDb({
+      access_token: "aoa-local",
+      refresh_token: "rt-local-new",
+      profile_arn: localProfile,
+      region: "eu-west-1",
+    });
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    }) as typeof fetch;
+
+    await expect(refreshKiroToken("rt-stored-old", undefined, {
+      access: "aoa-stored-old",
+      refresh: "rt-stored-old",
+      expires: 0,
+      accountId: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/different",
+      source: "local-cli",
+      kiro: { profileArn: localProfile, ssoRegion: "eu-west-1" },
+    })).rejects.toBeInstanceOf(Error);
+    expect(calls).toBe(1);
+  });
+
+  test("refreshKiroToken composes caller cancellation with its request timeout", async () => {
+    const controller = new AbortController();
+    const timeout = spyOn(AbortSignal, "timeout");
+    let requestSignal: AbortSignal | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Response(JSON.stringify({ accessToken: "aoa-new", expiresIn: 60 }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await refreshKiroToken("rt-old", controller.signal, {
+        access: "aoa-old",
+        refresh: "rt-old",
+        expires: 0,
+        kiro: { ssoRegion: "us-east-1" },
+      });
+      expect(timeout).toHaveBeenCalledWith(30_000);
+      expect(requestSignal).not.toBe(controller.signal);
+      expect(requestSignal?.aborted).toBe(false);
+      controller.abort();
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   test("refreshKiroToken maps the desktop refresh response to credentials", async () => {

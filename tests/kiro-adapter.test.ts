@@ -88,6 +88,23 @@ describe("kiro adapter — buildRequest", () => {
     expect(body.profileArn).toBe(parsed._kiroAuthContext.profileArn);
   });
 
+  test("legacy requests without account metadata still honor Kiro environment overrides", async () => {
+    const previousApiRegion = process.env.KIRO_API_REGION;
+    const previousProfileArn = process.env.KIRO_PROFILE_ARN;
+    process.env.KIRO_API_REGION = "ap-northeast-1";
+    process.env.KIRO_PROFILE_ARN = "arn:aws:codewhisperer:ap-northeast-1:123456789012:profile/env";
+    try {
+      const request = await createKiroAdapter(provider).buildRequest(parsedWith([{ role: "user", content: "hi" }]));
+      expect(request.url).toBe("https://runtime.ap-northeast-1.kiro.dev/");
+      expect(request.headers["x-amzn-kiro-profile-arn"]).toBe(process.env.KIRO_PROFILE_ARN);
+    } finally {
+      if (previousApiRegion === undefined) delete process.env.KIRO_API_REGION;
+      else process.env.KIRO_API_REGION = previousApiRegion;
+      if (previousProfileArn === undefined) delete process.env.KIRO_PROFILE_ARN;
+      else process.env.KIRO_PROFILE_ARN = previousProfileArn;
+    }
+  });
+
   test("a genuinely custom Kiro base URL is honored", async () => {
     const custom = { ...provider, baseUrl: "https://kiro.internal.example/custom/generate" };
     const { url } = await createKiroAdapter(custom).buildRequest(parsedWith([{ role: "user", content: "hi" }]));

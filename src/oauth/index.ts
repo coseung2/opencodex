@@ -544,7 +544,9 @@ export async function runLogin(provider: string, ctrl: OAuthController, opts?: L
     }
     await saveAccountCredential(provider, opts.reauthAccountId, cred);
   } else {
-    await saveCredential(provider, cred);
+    await saveCredential(provider, cred, {
+      preserveIdentityless: provider === "kiro" && opts?.forceLogin === true,
+    });
   }
   if (provider === "chatgpt") return cred;
   const config = loadConfig();

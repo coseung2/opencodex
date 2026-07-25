@@ -109,6 +109,33 @@ describe("OAuth account-scoped reauth", () => {
     expect(getAccountSet("xai")?.accounts).toHaveLength(1);
   });
 
+  test("forced Kiro add-account preserves a legacy identity-less account", async () => {
+    await saveCredential("kiro", {
+      access: "legacy-access",
+      refresh: "legacy-refresh",
+      expires: Date.now() + 60_000,
+      source: "local-cli",
+    });
+    const original = OAUTH_PROVIDERS.kiro.login;
+    OAUTH_PROVIDERS.kiro.login = async () => ({
+      access: "identified-access",
+      refresh: "identified-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "arn:aws:codewhisperer:us-east-1:123456789012:profile/new",
+      source: "local-cli",
+    });
+    try {
+      await runLogin("kiro", {} as OAuthController, { forceLogin: true });
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = original;
+    }
+
+    const set = getAccountSet("kiro")!;
+    expect(set.accounts).toHaveLength(2);
+    expect(set.accounts.some(account => account.credential.access === "legacy-access")).toBe(true);
+    expect(getAccountCredential("kiro", set.activeAccountId)?.access).toBe("identified-access");
+  });
+
   test("management login passes reauthAccountId into startLoginFlow", async () => {
     const source = await Bun.file("src/server/management/oauth-account-routes.ts").text();
     expect(source).toContain("reauthAccountId: accountId");

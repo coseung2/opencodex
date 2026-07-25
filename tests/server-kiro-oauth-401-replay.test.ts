@@ -166,6 +166,9 @@ describe("Kiro OAuth upstream 401 replay", () => {
           headers: { "content-type": "application/vnd.amazon.eventstream" },
         });
       }
+      if (/^https:\/\/runtime\.[a-z0-9-]+\.kiro\.dev\//.test(url)) {
+        throw new Error(`unexpected Kiro runtime host: ${url}`);
+      }
       return originalFetch(input, init);
     }) as typeof fetch;
 

@@ -266,7 +266,11 @@ export function getCredential(provider: string): OAuthCredentials | null {
  * (rotating refresh tokens would fabricate duplicates) and single-slot providers replace the
  * active slot / whole set instead.
  */
-export async function saveCredential(provider: string, cred: OAuthCredentials): Promise<void> {
+export async function saveCredential(
+  provider: string,
+  cred: OAuthCredentials,
+  opts: { preserveIdentityless?: boolean } = {},
+): Promise<void> {
   const safe = normalizeCredential(cred);
   if (!safe) return;
   await mutateStore(store => {
@@ -290,7 +294,7 @@ export async function saveCredential(provider: string, cred: OAuthCredentials): 
       // active identity-less row in place prevents a stale duplicate that stays selectable
       // and would re-refresh into a second row with the same identity.
       const active = set.accounts.find(a => a.id === set.activeAccountId);
-      if (active && active.credential.accountId === undefined && active.credential.email === undefined) {
+      if (!opts.preserveIdentityless && active && active.credential.accountId === undefined && active.credential.email === undefined) {
         active.credential = safe;
         delete active.needsReauth;
         return;

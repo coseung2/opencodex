@@ -10,6 +10,9 @@ import { credentialGeneration, getAccountCredential, getAccountSet, getAuthRefre
 const origHome = process.env.HOME;
 const origOcxHome = process.env.OPENCODEX_HOME;
 const origRegion = process.env.KIRO_REGION;
+const origCliDbFile = process.env.KIRO_CLI_DB_FILE;
+const origCliDbPath = process.env.KIROCLI_DB_PATH;
+const origCliTokenKey = process.env.KIROCLI_TOKEN_KEY;
 const origClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
 const origFetch = globalThis.fetch;
 const origWarn = console.warn;
@@ -21,6 +24,9 @@ beforeEach(() => {
   process.env.HOME = tmp;
   process.env.OPENCODEX_HOME = join(tmp, "ocx");
   process.env.KIRO_REGION = "us-east-1";
+  delete process.env.KIRO_CLI_DB_FILE;
+  delete process.env.KIROCLI_DB_PATH;
+  delete process.env.KIROCLI_TOKEN_KEY;
   process.env.CLAUDE_CONFIG_DIR = join(tmp, ".claude");
 });
 
@@ -28,13 +34,22 @@ afterEach(() => {
   if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
   if (origOcxHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = origOcxHome;
   if (origRegion === undefined) delete process.env.KIRO_REGION; else process.env.KIRO_REGION = origRegion;
+  if (origCliDbFile === undefined) delete process.env.KIRO_CLI_DB_FILE; else process.env.KIRO_CLI_DB_FILE = origCliDbFile;
+  if (origCliDbPath === undefined) delete process.env.KIROCLI_DB_PATH; else process.env.KIROCLI_DB_PATH = origCliDbPath;
+  if (origCliTokenKey === undefined) delete process.env.KIROCLI_TOKEN_KEY; else process.env.KIROCLI_TOKEN_KEY = origCliTokenKey;
   if (origClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = origClaudeConfigDir;
   globalThis.fetch = origFetch;
   console.warn = origWarn;
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function seedKiroCliDb(token: { access_token: string; refresh_token?: string; expires_at?: string }) {
+function seedKiroCliDb(token: {
+  access_token: string;
+  refresh_token?: string;
+  expires_at?: string;
+  profile_arn?: string;
+  region?: string;
+}) {
   const dir = join(tmp, "Library", "Application Support", "kiro-cli");
   mkdirSync(dir, { recursive: true });
   const db = new Database(join(dir, "data.sqlite3"));
@@ -205,6 +220,50 @@ describe("oauth refresh hardening", () => {
 
     await expect(getValidAccessToken("kiro")).rejects.toBeInstanceOf(OAuthLoginRequiredError);
     expect(getAccountSet("kiro")?.accounts[0]?.needsReauth).toBe(true);
+  });
+
+  test("same-profile local rotation persists the recovered desktop generation without stale registration", async () => {
+    const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/persisted";
+    seedKiroCliDb({
+      access_token: "aoa-local",
+      refresh_token: "rt-local-new",
+      expires_at: "2099-01-01T00:00:00Z",
+      profile_arn: profileArn,
+      region: "eu-west-1",
+    });
+    await saveCredential("kiro", {
+      access: "aoa-stored",
+      refresh: "rt-stored-old",
+      expires: Date.now() - 1,
+      accountId: profileArn,
+      source: "local-cli",
+      kiro: {
+        profileArn,
+        ssoRegion: "eu-west-1",
+        clientId: "stale-client",
+        clientSecret: "stale-secret",
+      },
+    });
+    const urls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      urls.push(String(input));
+      if (urls.length === 1) return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      return new Response(JSON.stringify({ accessToken: "aoa-recovered", expiresIn: 3600 }), { status: 200 });
+    }) as typeof fetch;
+
+    const access = await getValidAccessToken("kiro");
+    expect(access).toBe("aoa-recovered");
+    expect(urls).toEqual([
+      "https://oidc.eu-west-1.amazonaws.com/token",
+      "https://prod.eu-west-1.auth.desktop.kiro.dev/refreshToken",
+    ]);
+    expect(getCredential("kiro")).toMatchObject({
+      access: "aoa-recovered",
+      refresh: "rt-local-new",
+      kiro: { profileArn, ssoRegion: "eu-west-1" },
+    });
+    expect(getCredential("kiro")?.kiro?.clientId).toBeUndefined();
+    expect(getCredential("kiro")?.kiro?.clientSecret).toBeUndefined();
   });
 
   test("refresh preserves existing credential source metadata", async () => {
