@@ -15,15 +15,16 @@ function sseEvent(name: string, data: Record<string, unknown>): string {
 
 function responsesUsage(usage: OcxUsage | undefined): Record<string, unknown> {
   if (!usage) return { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-  // Stateful providers may report per-turn billing usage separately from whole-conversation
-  // context pressure. Responses clients use input_tokens to trigger compaction, so prefer the
-  // latter on the wire while persistence/cost accounting keeps using inputTokens.
-  const inputTokens = Math.max(usage.inputTokens, usage.contextInputTokens ?? 0);
+  // Stateful providers may report an absolute active-context checkpoint separately from their
+  // per-attempt usage. Split that checkpoint into input + output without adding output twice.
+  const inputTokens = usage.contextTotalTokens !== undefined
+    ? Math.max(0, usage.contextTotalTokens - usage.outputTokens)
+    : usage.inputTokens;
   const out: Record<string, unknown> = {
     input_tokens: inputTokens,
     output_tokens: usage.outputTokens,
-    total_tokens: usage.contextInputTokens !== undefined
-      ? inputTokens + usage.outputTokens
+    total_tokens: usage.contextTotalTokens !== undefined
+      ? usage.contextTotalTokens
       : usageDisplayTotalTokens(usage) ?? inputTokens + usage.outputTokens,
   };
   const inputDetails: Record<string, number> = {};

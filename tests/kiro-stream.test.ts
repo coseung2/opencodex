@@ -312,6 +312,29 @@ describe("kiro adapter — parseStream", () => {
     });
   });
 
+  test("bounded fallback uses its rebuilt context estimate for the final absolute checkpoint", async () => {
+    const firstText = "p".repeat(7000);
+    const finalText = "f".repeat(3500);
+    globalThis.fetch = (async () => new Response(streamOf(eventFrame({ content: finalText })))) as typeof fetch;
+    const adapter = createKiroAdapter(provider);
+    const request = await adapter.buildRequest(parsedWith([{ role: "user", content: "do it" }], [bashTool]));
+    const initialContextEstimate = request.usageLog?.inputTokens ?? 0;
+
+    const events = await collectAdapterEvents(adapter.parseStream(new Response(streamOf(
+      eventFrame({ content: firstText }),
+    ))));
+    const done = events.at(-1);
+    expect(done?.type).toBe("done");
+    const usage = done?.type === "done" ? done.usage : undefined;
+    expect(usage?.outputTokens).toBe(estimateTokens(firstText, "claude-sonnet-4.5") + estimateTokens(finalText, "claude-sonnet-4.5"));
+    expect(usage?.contextTotalTokens).toBeGreaterThan(
+      initialContextEstimate + Math.max(
+        estimateTokens(firstText, "claude-sonnet-4.5"),
+        estimateTokens(finalText, "claude-sonnet-4.5"),
+      ),
+    );
+  });
+
   test("keeps a private-completion fallback after reasoning-only output as the final answer", async () => {
     globalThis.fetch = (async () => new Response(streamOf(...completionFrames("Done.")))) as typeof fetch;
     const adapter = createKiroAdapter(provider);
@@ -777,7 +800,7 @@ describe("kiro adapter — parseStream", () => {
     );
     expect(done).toEqual({
       inputTokens: 15,
-      contextInputTokens: 200,
+      contextTotalTokens: 204,
       cachedInputTokens: 3,
       cacheReadInputTokens: 3,
       cacheCreationInputTokens: 2,
@@ -837,7 +860,7 @@ describe("kiro adapter — parseStream", () => {
     expect(done.outputTokens).toBe(100);
     expect(done.totalTokens).toBeUndefined();
     expect(done.estimated).toBe(true);
-    expect(done.contextInputTokens).toBe(50_000);
+    expect(done.contextTotalTokens).toBe(50_000);
   });
 
   test("Kiro auto ignores provider-level context window and falls back to heuristic totals", async () => {
@@ -852,6 +875,7 @@ describe("kiro adapter — parseStream", () => {
     expect(done.inputTokens).toBe(200);
     expect(done.outputTokens).toBe(100);
     expect(done.totalTokens).toBeUndefined();
+    expect(done.contextTotalTokens).toBe(300);
   });
 
   test("fresh payload includes history while usage counts only the current turn", async () => {
@@ -877,7 +901,7 @@ describe("kiro adapter — parseStream", () => {
     expect(longBody.length).toBeGreaterThan(shortBody.length + 10_000);
     expect(longUsage.inputTokens).toBe(shortUsage.inputTokens);
     expect(longUsage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
-    expect(longUsage.contextInputTokens).toBeGreaterThan(shortUsage.contextInputTokens ?? 0);
+    expect(longUsage.contextTotalTokens).toBeGreaterThan(shortUsage.contextTotalTokens ?? 0);
   });
 
   test("request log usage estimates the full Codex context while SSE usage stays current-turn", async () => {
@@ -894,7 +918,7 @@ describe("kiro adapter — parseStream", () => {
     expect(usage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
     expect(request.usageLog?.estimated).toBe(true);
     expect(request.usageLog?.inputTokens).toBeGreaterThan(usage.inputTokens + 4000);
-    expect(usage.contextInputTokens).toBe(request.usageLog?.inputTokens);
+    expect(usage.contextTotalTokens).toBe((request.usageLog?.inputTokens ?? 0) + usage.outputTokens);
   });
 
   test("resumed payload preserves the complete locally expanded history", async () => {

@@ -309,12 +309,11 @@ export interface OcxUsage {
   inputTokens: number;
   outputTokens: number;
   /**
-   * Provider-private context pressure for clients that trigger compaction from Responses usage.
-   * This is intentionally separate from `inputTokens`: stateful providers such as Kiro bill/report
-   * only the current turn while also exposing the whole conversation's context occupancy.
-   * Persistence and cost accounting must continue to use `inputTokens`.
+   * Absolute active-context size after the response. Stateful providers can expose this separately
+   * from their per-attempt usage. Responses serialization derives the input side from
+   * `contextTotalTokens - outputTokens` so output is never added to an absolute checkpoint twice.
    */
-  contextInputTokens?: number;
+  contextTotalTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
