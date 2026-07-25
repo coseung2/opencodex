@@ -23,6 +23,8 @@ export interface OcxParsedRequest {
    * derived from the parent thread id.
    */
   _cursorIsolateConversation?: boolean;
+  /** Account-scoped, non-secret Kiro request metadata selected with the OAuth access token. */
+  _kiroAuthContext?: { profileArn?: string; apiRegion?: string; ssoRegion?: string };
   /** Provider-private continuation metadata resolved from the Responses previous_response_id chain. */
   _providerContinuation?: OcxProviderContinuationState;
   /**

@@ -10,7 +10,7 @@
  * Exceptions:
  * - `chatgpt` stays single-slot (always replaced): codex-auth-api uses it as a scratch slot
  *   for Codex pool logins, which have their own ledger (codex-accounts.json).
- * - Credentials without identity (no accountId/email — e.g. kiro) replace the active slot
+ * - Credentials without identity (no accountId/email) replace the active slot
  *   instead of appending: their refresh tokens rotate, so a derived id would duplicate the
  *   same human on every re-login. Kimi extracts JWT `user_id`/`sub` as accountId; Cursor
  *   extracts JWT `sub` — both append distinct accounts under multiauth.
@@ -156,6 +156,28 @@ function normalizeCredential(cred: unknown): OAuthCredentials | null {
     // become an SSRF springboard across reloads.
     const validated = validateCopilotApiBaseUrl(candidate.apiBaseUrl);
     if (validated) normalized.apiBaseUrl = validated;
+  }
+  if (candidate.kiro && typeof candidate.kiro === "object") {
+    const kiro = candidate.kiro;
+    const clean = (value: unknown, max: number): string | undefined => {
+      if (typeof value !== "string") return undefined;
+      const trimmed = value.trim();
+      return trimmed && trimmed.length <= max && !/[\x00-\x1f\x7f]/.test(trimmed) ? trimmed : undefined;
+    };
+    const profileArn = clean(kiro.profileArn, 1024);
+    const ssoRegion = clean(kiro.ssoRegion, 64);
+    const apiRegion = clean(kiro.apiRegion, 64);
+    const clientId = clean(kiro.clientId, 4096);
+    const clientSecret = clean(kiro.clientSecret, 4096);
+    if (profileArn || ssoRegion || apiRegion || clientId || clientSecret) {
+      normalized.kiro = {
+        ...(profileArn ? { profileArn } : {}),
+        ...(ssoRegion ? { ssoRegion } : {}),
+        ...(apiRegion ? { apiRegion } : {}),
+        ...(clientId ? { clientId } : {}),
+        ...(clientSecret ? { clientSecret } : {}),
+      };
+    }
   }
   return normalized;
 }

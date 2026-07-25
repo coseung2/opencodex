@@ -1,13 +1,13 @@
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
 import { loadConfig, resolveEnvValue, saveConfig } from "../config";
 import { maskEmail } from "../lib/privacy";
-import { getAccountCredential, getAccountSet, saveAccountCredential, saveCredential, markAccountNeedsReauth, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, clearOAuthRefreshIntent } from "./store";
+import { getAccountCredential, getAccountSet, saveAccountCredential, saveCredential, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, clearOAuthRefreshIntent } from "./store";
 import { loginXai, refreshXaiToken, XAI_LOCAL_CLI_DETACH_WARNING, XaiTokenRequestError } from "./xai";
 import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthropicToken } from "./anthropic";
 import { loginKimi, refreshKimiToken } from "./kimi";
-import { loginKiro, readKiroCliSqlite, refreshKiroToken } from "./kiro";
+import { KiroTokenRefreshError, loginKiro, refreshKiroToken } from "./kiro";
 import { loginChatGPT, refreshChatGPTToken } from "./chatgpt";
 import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
@@ -23,6 +23,8 @@ export interface OAuthAccessSnapshot {
   accountId: string;
   generation: string;
   accessToken: string;
+  /** Safe request-routing subset; refresh-only Kiro client secrets never leave the credential store. */
+  kiro?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion">;
 }
 
 const tokenRefreshes = new Map<string, Promise<OAuthAccessSnapshot>>();
@@ -85,7 +87,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     defaultModel: oauthDefaultModel("kimi"),
   },
   kiro: {
-    login: (ctrl) => loginKiro(ctrl),
+    login: (ctrl, opts) => loginKiro(ctrl, { forceLogin: opts?.forceLogin }),
     refresh: (rt, signal) => refreshKiroToken(rt, signal),
     providerConfig: oauthConfig("kiro"),
     defaultModel: oauthDefaultModel("kiro"),
@@ -177,6 +179,15 @@ function accessSnapshot(provider: string, accountId: string, cred: OAuthCredenti
     accountId,
     generation: credentialGeneration(cred),
     accessToken: cred.access,
+    ...(provider === "kiro" && cred.kiro
+      ? {
+          kiro: {
+            ...(cred.kiro.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
+            ...(cred.kiro.apiRegion ? { apiRegion: cred.kiro.apiRegion } : {}),
+            ...(cred.kiro.ssoRegion ? { ssoRegion: cred.kiro.ssoRegion } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -242,12 +253,6 @@ export async function getValidAccessTokenForAccount(provider: string, accountId:
   return (await resolveAccessSnapshotForAccount(provider, accountId)).accessToken;
 }
 
-function readFreshKiroCliCredential(): OAuthCredentials | undefined {
-  const imported = readKiroCliSqlite();
-  if (!imported || imported.expires <= Date.now() + REFRESH_SKEW_MS) return undefined;
-  return { access: imported.access, refresh: imported.refresh, expires: imported.expires, source: "local-cli" };
-}
-
 /** Terminal refresh failures (revoked/rotated-away grants) — retrying cannot succeed. */
 function isTerminalRefreshError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
@@ -261,6 +266,7 @@ function isTerminalRefreshError(err: unknown): boolean {
 function terminal(error:unknown):boolean{
   if(error instanceof XaiTokenRequestError)return ["invalid_grant","refresh_token_reused","revoked_token"].includes(error.oauthError??"");
   if(error instanceof AnthropicTokenError)return (error.httpStatus===400||error.httpStatus===401)&&["invalid_grant","refresh_token_reused","revoked","revoked_token","refresh_token_revoked"].includes(error.oauthError??"");
+  if(error instanceof KiroTokenRefreshError)return (error.httpStatus===400||error.httpStatus===401)&&error.oauthError!==undefined;
   return isTerminalRefreshError(error);
 }
 function authoritative(stored:OAuthCredentials,active:boolean,now:()=>number):OAuthCredentials{if(stored.source!=="local-cli")return stored;const disk=detectGrokCliToken();if(!disk)return stored;const allowed=isSameGrokIdentity(stored,disk)||(active&&!hasComparableGrokIdentity(stored,disk));return allowed&&shouldAdoptGrokGeneration(stored,disk,now(),REFRESH_SKEW_MS)?disk:stored;}
@@ -355,25 +361,18 @@ async function refreshAndPersistAccessToken(
   def: OAuthProviderDef,
   cred: OAuthCredentials,
 ): Promise<string> {
-  // Local-CLI import fallback only for the ACTIVE account: importing another identity's
-  // token under a background account id would silently contaminate that account.
-  const isActive = getAccountSet(provider)?.activeAccountId === accountId;
-  if (provider === "kiro" && isActive) {
-    const imported = readFreshKiroCliCredential();
-    if (imported) {
-      await saveCredential(provider, imported);
-      return imported.access;
-    }
-  }
   if (provider === "xai") return refreshXaiAccountWithLock(provider, accountId, def, cred);
   if (provider === "anthropic") return refreshAnthropicAccountWithLock(provider, accountId, def, cred);
+  const generation = credentialGeneration(cred);
   try {
-    const fresh = await def.refresh(cred.refresh);
+    const fresh = provider === "kiro"
+      ? await refreshKiroToken(cred.refresh, undefined, cred)
+      : await def.refresh(cred.refresh);
     const detachedLocalCli = provider === "xai" && cred.source === "local-cli";
     if (detachedLocalCli) console.warn(XAI_LOCAL_CLI_DETACH_WARNING);
     // Persist to THIS account (rotation-safe: new refresh token hits disk before use) without
     // touching activeAccountId.
-    await saveAccountCredential(provider, accountId, {
+    const next: OAuthCredentials = {
       ...fresh,
       source: detachedLocalCli ? "oauth" : fresh.source ?? cred.source ?? "oauth",
       // Preserve a previously-discovered project id when a refresh-time re-discovery comes back empty
@@ -383,18 +382,17 @@ async function refreshAndPersistAccessToken(
       // Preserve identity fields the refresh response may omit, so identity matching stays stable.
       ...(fresh.email === undefined && cred.email ? { email: cred.email } : {}),
       ...(fresh.accountId === undefined && cred.accountId ? { accountId: cred.accountId } : {}),
-    });
-    return fresh.access;
-  } catch (err) {
-    if (provider === "kiro" && isActive) {
-      const imported = readFreshKiroCliCredential();
-      if (imported) {
-        await saveCredential(provider, imported);
-        return imported.access;
-      }
+      ...(fresh.kiro === undefined && cred.kiro ? { kiro: cred.kiro } : {}),
+    };
+    const outcome = await mergeAccountCredential(provider, accountId, next, { expectedGeneration: generation });
+    if (outcome.superseded) {
+      if (outcome.stored.expires > Date.now() + REFRESH_SKEW_MS) return outcome.stored.access;
+      throw new OAuthLoginRequiredError(provider);
     }
-    if (isTerminalRefreshError(err)) {
-      await markAccountNeedsReauth(provider, accountId, true);
+    return next.access;
+  } catch (err) {
+    if (terminal(err)) {
+      await markAccountNeedsReauthIfGeneration(provider, accountId, generation);
       throw new OAuthLoginRequiredError(provider);
     }
     throw err;

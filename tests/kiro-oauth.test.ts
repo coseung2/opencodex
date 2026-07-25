@@ -157,10 +157,89 @@ describe("kiro oauth — import-first", () => {
 
   test("loginKiro returns imported SQLite credentials", async () => {
     seedKiroCliDb({ access_token: "aoa-xyz", refresh_token: "rt-2" });
-    const cred = await loginKiro({});
+    const cred = await loginKiro({}, { cliRunner: async () => ({ exitCode: 1, stdout: "" }) });
     expect(cred.access).toBe("aoa-xyz");
     expect(cred.refresh).toBe("rt-2");
     expect(cred.source).toBe("local-cli");
+  });
+
+  test("force login switches Kiro CLI identity and imports a distinct account", async () => {
+    const calls: string[][] = [];
+    const auth: Array<{ url: string; instructions?: string }> = [];
+    const runner = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "login") {
+        seedKiroCliDb({
+          access_token: "aoa-second",
+          refresh_token: "rt-second",
+          expires_at: "2099-01-01T00:00:00Z",
+          region: "eu-west-1",
+        });
+      }
+      if (args[0] === "whoami") return { exitCode: 0, stdout: JSON.stringify({ email: "Second@Example.com" }) };
+      return { exitCode: 0, stdout: "" };
+    };
+
+    const cred = await loginKiro({ onAuth: info => auth.push(info) }, { forceLogin: true, cliRunner: runner });
+
+    expect(calls).toEqual([
+      ["logout"],
+      ["login"],
+      ["whoami", "--format", "json"],
+    ]);
+    expect(auth).toEqual([expect.objectContaining({ url: "", instructions: expect.stringContaining("fresh browser login") })]);
+    expect(cred).toMatchObject({
+      access: "aoa-second",
+      refresh: "rt-second",
+      email: "second@example.com",
+      source: "local-cli",
+      kiro: { ssoRegion: "eu-west-1" },
+    });
+  });
+
+  test("force login imports only the newly authenticated CLI account, not a configured credential file", async () => {
+    const file = join(tmp, "old-account.json");
+    writeFileSync(file, JSON.stringify({
+      accessToken: "aoa-old-json",
+      refreshToken: "rt-old-json",
+      profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/old",
+    }));
+    process.env.KIRO_CREDS_FILE = file;
+    const runner = async (args: string[]) => {
+      if (args[0] === "login") {
+        seedKiroCliDb({
+          access_token: "aoa-new-cli",
+          refresh_token: "rt-new-cli",
+          profile_arn: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/new",
+        });
+      }
+      if (args[0] === "whoami") return { exitCode: 0, stdout: JSON.stringify({ email: "new@example.com" }) };
+      return { exitCode: 0, stdout: "" };
+    };
+
+    const cred = await loginKiro({}, { forceLogin: true, cliRunner: runner });
+
+    expect(cred.access).toBe("aoa-new-cli");
+    expect(cred.refresh).toBe("rt-new-cli");
+    expect(cred.accountId).toBe("arn:aws:codewhisperer:eu-west-1:123456789012:profile/new");
+    expect(cred.email).toBe("new@example.com");
+    expect(cred.source).toBe("local-cli");
+  });
+
+  test("force login cancellation during logout never starts browser login", async () => {
+    const controller = new AbortController();
+    const calls: string[][] = [];
+    const runner = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "logout") {
+        controller.abort();
+        throw new Error("Kiro login cancelled.");
+      }
+      return { exitCode: 0, stdout: "" };
+    };
+
+    await expect(loginKiro({ signal: controller.signal }, { forceLogin: true, cliRunner: runner })).rejects.toThrow(/cancelled/i);
+    expect(calls).toEqual([["logout"]]);
   });
 
   test("loginKiro imports JSON credentials and resolver metadata", async () => {
@@ -180,6 +259,12 @@ describe("kiro oauth — import-first", () => {
     expect(cred.access).toBe("aoa-json");
     expect(cred.refresh).toBe("rt-json");
     expect(cred.source).toBe("credential-file");
+    expect(cred.accountId).toBe("arn:aws:codewhisperer:ap-northeast-1:123456789012:profile/demo");
+    expect(cred.kiro).toMatchObject({
+      profileArn: "arn:aws:codewhisperer:ap-northeast-1:123456789012:profile/demo",
+      ssoRegion: "us-west-2",
+      apiRegion: "eu-central-1",
+    });
     expect(resolveKiroProfileArn()).toBe("arn:aws:codewhisperer:ap-northeast-1:123456789012:profile/demo");
     expect(resolveKiroRegion()).toBe("us-west-2");
     expect(resolveKiroApiRegion()).toBe("eu-central-1");
@@ -415,6 +500,65 @@ describe("kiro oauth — import-first", () => {
     });
   });
 
+  test("refreshKiroToken uses stored account metadata instead of another local Kiro session", async () => {
+    const file = join(tmp, "other-local-account.json");
+    writeFileSync(file, JSON.stringify({
+      accessToken: "aoa-other",
+      refreshToken: "rt-other",
+      region: "ap-southeast-1",
+      clientId: "other-client",
+      clientSecret: "other-secret",
+    }));
+    process.env.KIRO_CREDS_FILE = file;
+    let captured: { url: string; body: Record<string, unknown> } | undefined;
+    globalThis.fetch = (async (input, init) => {
+      captured = { url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> };
+      return new Response(JSON.stringify({ accessToken: "aoa-stored-new", expiresIn: 60 }), { status: 200 });
+    }) as typeof fetch;
+
+    await refreshKiroToken("rt-stored", undefined, {
+      access: "aoa-stored",
+      refresh: "rt-stored",
+      expires: 0,
+      accountId: "profile-stored",
+      kiro: {
+        profileArn: "profile-stored",
+        ssoRegion: "eu-west-1",
+        clientId: "stored-client",
+        clientSecret: "stored-secret",
+      },
+    });
+
+    expect(captured?.url).toBe("https://oidc.eu-west-1.amazonaws.com/token");
+    expect(captured?.body).toMatchObject({
+      clientId: "stored-client",
+      clientSecret: "stored-secret",
+      refreshToken: "rt-stored",
+    });
+  });
+
+  test("stored refresh metadata does not inspect an unrelated ambiguous local CLI store", async () => {
+    const path = join(tmp, "ambiguous-refresh", "credentials.sqlite3");
+    seedCustomTokenDb(path, [
+      ["custom:a:token", { access_token: "aoa-a", refresh_token: "rt-a" }],
+      ["custom:b:token", { access_token: "aoa-b", refresh_token: "rt-b" }],
+    ]);
+    process.env.KIROCLI_DB_PATH = path;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ accessToken: "aoa-stored-new", expiresIn: 60 }), { status: 200 })) as typeof fetch;
+
+    await expect(refreshKiroToken("rt-stored", undefined, {
+      access: "aoa-stored",
+      refresh: "rt-stored",
+      expires: 0,
+      kiro: {
+        ssoRegion: "eu-west-1",
+        clientId: "stored-client",
+        clientSecret: "stored-secret",
+      },
+    })).resolves.toMatchObject({ access: "aoa-stored-new", refresh: "rt-stored" });
+  });
+
   test("refreshKiroToken maps the desktop refresh response to credentials", async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ accessToken: "aoa-new", refreshToken: "rt-new", expiresIn: 1000 }), {
@@ -440,6 +584,36 @@ describe("kiro oauth — import-first", () => {
 });
 
 describe("kiro oauth — adapter-time resolvers (profileArn / region)", () => {
+  test("account-scoped resolution never borrows another local Kiro identity", () => {
+    const file = join(tmp, "local-other-account.json");
+    writeFileSync(file, JSON.stringify({
+      accessToken: "aoa-other",
+      refreshToken: "rt-other",
+      profileArn: "arn:aws:codewhisperer:eu-central-1:123456789012:profile/other",
+      region: "eu-central-1",
+    }));
+    process.env.KIRO_CREDS_FILE = file;
+
+    expect(resolveKiroProfileArn({})).toBeUndefined();
+    expect(resolveKiroRegion({})).toBe("us-east-1");
+    expect(resolveKiroApiRegion({})).toBe("us-east-1");
+  });
+
+  test("account-scoped resolution is not overridden by another account's environment metadata", () => {
+    process.env.KIRO_PROFILE_ARN = "arn:environment-account";
+    process.env.KIRO_REGION = "ap-southeast-1";
+    process.env.KIRO_API_REGION = "ap-northeast-1";
+    const account = {
+      profileArn: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/account-b",
+      ssoRegion: "eu-west-1",
+      apiRegion: "eu-central-1",
+    };
+
+    expect(resolveKiroProfileArn(account)).toBe(account.profileArn);
+    expect(resolveKiroRegion(account)).toBe("eu-west-1");
+    expect(resolveKiroApiRegion(account)).toBe("eu-central-1");
+  });
+
   test("resolveKiroProfileArn: KIRO_PROFILE_ARN env wins over SQLite", () => {
     process.env.KIRO_PROFILE_ARN = "arn:env";
     seedKiroCliDb({ access_token: "aoa", profile_arn: "arn:sqlite" });

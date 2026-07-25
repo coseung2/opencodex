@@ -888,6 +888,9 @@ export async function handleResponses(
       const resolved = await getValidAccessTokenSnapshot(route.providerName);
       if (isOAuth401ReplayProvider) sentOAuthSnapshot = resolved;
       route.provider = { ...route.provider, apiKey: resolved.accessToken };
+      if (route.providerName === "kiro") {
+        parsed._kiroAuthContext = resolved.kiro ? { ...resolved.kiro } : undefined;
+      }
       // Antigravity (cloud-code-assist) needs the discovered Cloud Code Assist project id in the
       // CCA envelope; the server injects only the bare token, so pull project from the credential.
       if (route.provider.googleMode === "cloud-code-assist" && !route.provider.project) {
@@ -1573,6 +1576,9 @@ export async function handleResponses(
           return formatErrorResponse(401, "authentication_error", err instanceof Error ? err.message : String(err));
         }
         sentOAuthSnapshot = refreshed;
+        if (route.providerName === "kiro") {
+          parsed._kiroAuthContext = refreshed.kiro ? { ...refreshed.kiro } : undefined;
+        }
         const refreshedProvider = resolveProviderTransport(
           route.providerName,
           { ...route.provider, apiKey: refreshed.accessToken },

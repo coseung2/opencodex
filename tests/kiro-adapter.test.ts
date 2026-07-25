@@ -73,6 +73,21 @@ describe("kiro adapter — buildRequest", () => {
     expect(url).toBe("https://runtime.ap-northeast-2.kiro.dev/");
   });
 
+  test("account-scoped OAuth metadata selects the matching Kiro region and profile", async () => {
+    const parsed = parsedWith([{ role: "user", content: "hi" }]);
+    parsed._kiroAuthContext = {
+      apiRegion: "eu-central-1",
+      profileArn: "arn:aws:codewhisperer:eu-central-1:123456789012:profile/account-b",
+    };
+
+    const request = await createKiroAdapter(provider).buildRequest(parsed);
+    const body = JSON.parse(request.body) as { profileArn?: string };
+
+    expect(request.url).toBe("https://runtime.eu-central-1.kiro.dev/");
+    expect(request.headers["x-amzn-kiro-profile-arn"]).toBe(parsed._kiroAuthContext.profileArn);
+    expect(body.profileArn).toBe(parsed._kiroAuthContext.profileArn);
+  });
+
   test("a genuinely custom Kiro base URL is honored", async () => {
     const custom = { ...provider, baseUrl: "https://kiro.internal.example/custom/generate" };
     const { url } = await createKiroAdapter(custom).buildRequest(parsedWith([{ role: "user", content: "hi" }]));
