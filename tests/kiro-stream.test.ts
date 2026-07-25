@@ -904,6 +904,21 @@ describe("kiro adapter — parseStream", () => {
     expect(longUsage.contextTotalTokens).toBeGreaterThan(shortUsage.contextTotalTokens ?? 0);
   });
 
+  test("context pressure follows the normalized Kiro payload while logs retain dropped reasoning", async () => {
+    const privateReasoning = "private-plan-".repeat(1000);
+    const adapter = createKiroAdapter(provider);
+    const request = await adapter.buildRequest(parsedWith([
+      { role: "user", content: "old question" },
+      { role: "assistant", content: [{ type: "thinking", thinking: privateReasoning }] },
+      { role: "user", content: "latest question" },
+    ]));
+    const usage = await doneUsage(adapter, eventFrame({ content: "ok" }));
+
+    expect(request.body).not.toContain(privateReasoning);
+    expect(request.usageLog?.inputTokens).toBeGreaterThan((usage.contextTotalTokens ?? 0) + 1000);
+    expect(usage.contextTotalTokens).toBeLessThan(1000);
+  });
+
   test("request log usage estimates the full Codex context while SSE usage stays current-turn", async () => {
     const latest = "please summarize recent commits";
     const messages = [

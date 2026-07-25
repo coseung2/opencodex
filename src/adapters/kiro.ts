@@ -134,6 +134,38 @@ function messageLogText(msg: OcxMessage): string {
   }).filter(Boolean).join("\n");
 }
 
+function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelId: string): number {
+  const conversationState = (payload as {
+    conversationState?: {
+      history?: KiroHistoryEntry[];
+      currentMessage?: KiroHistoryEntry;
+    };
+  }).conversationState;
+  if (!conversationState) return 0;
+
+  const parts: string[] = [];
+  const entries = [
+    ...(conversationState.history ?? []),
+    ...(conversationState.currentMessage ? [conversationState.currentMessage] : []),
+  ];
+  for (const entry of entries) {
+    const user = entry.userInputMessage;
+    if (user) {
+      if (user.content) parts.push(user.content);
+      if (user.images?.length) parts.push(`[images:${user.images.length}]`);
+      const context = user.userInputMessageContext;
+      if (context?.tools?.length) parts.push(serializeForUsage(context.tools));
+      if (context?.toolResults?.length) parts.push(serializeForUsage(context.toolResults));
+    }
+    const assistant = entry.assistantResponseMessage;
+    if (assistant) {
+      if (assistant.content) parts.push(assistant.content);
+      if (assistant.toolUses?.length) parts.push(serializeForUsage(assistant.toolUses));
+    }
+  }
+  return estimateTokens(parts.join("\n"), modelId);
+}
+
 function shouldCountStablePromptOverhead(parsed: OcxParsedRequest): boolean {
   return !parsed.previousResponseId && !parsed.context.messages.some(m => m.role === "assistant");
 }
@@ -1141,6 +1173,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     if (profileArn) headers["x-amzn-kiro-profile-arn"] = profileArn;
     const built = buildKiroPayload(parsed, profileArn, forcedCompletionMode);
     await normalizeKiroImages(built.payload);
+    const contextInputEstimate = estimateKiroPayloadInputTokens(built.payload, parsed.modelId);
     const body = JSON.stringify(built.payload);
     debugProviderDiagnostic("kiro", "request", {
       region,
@@ -1164,7 +1197,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       conversationId: built.conversationId,
       completionMode: built.completionMode,
       inputTokens: estimateKiroInputTokens(parsed),
-      contextInputEstimate: estimateKiroLogInputTokens(parsed),
+      contextInputEstimate,
     };
   };
 
