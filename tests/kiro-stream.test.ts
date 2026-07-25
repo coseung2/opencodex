@@ -335,6 +335,23 @@ describe("kiro adapter — parseStream", () => {
     );
   });
 
+  test("bounded fallback preserves definite growth after an upstream context checkpoint", async () => {
+    const finalText = "f".repeat(3500);
+    const finalOutputTokens = estimateTokens(finalText, "claude-sonnet-4.5");
+    globalThis.fetch = (async () => new Response(streamOf(eventFrame({ content: finalText })))) as typeof fetch;
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "do it" }], [bashTool]));
+
+    const events = await collectAdapterEvents(adapter.parseStream(new Response(streamOf(
+      eventFrame({ content: "I am checking." }),
+      eventFrame({ contextUsagePercentage: 25 }),
+    ))));
+    const done = events.at(-1);
+
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") expect(done.usage?.contextTotalTokens).toBe(50_000 + finalOutputTokens);
+  });
+
   test("keeps a private-completion fallback after reasoning-only output as the final answer", async () => {
     globalThis.fetch = (async () => new Response(streamOf(...completionFrames("Done.")))) as typeof fetch;
     const adapter = createKiroAdapter(provider);
@@ -904,6 +921,18 @@ describe("kiro adapter — parseStream", () => {
     expect(done.outputTokens).toBe(100);
     expect(done.totalTokens).toBeUndefined();
     expect(done.contextTotalTokens).toBe(300);
+  });
+
+  test("Kiro auto uses the concrete response model to decode context percentage", async () => {
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "hi" }], undefined, "kiro-auto"));
+    const done = await doneUsage(
+      adapter,
+      eventFrame({ content: "ok", modelId: "claude-sonnet-4.5" }),
+      eventFrame({ contextUsagePercentage: 25 }),
+    );
+
+    expect(done.contextTotalTokens).toBe(50_000);
   });
 
   test("fresh payload includes history while usage counts only the current turn", async () => {

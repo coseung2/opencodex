@@ -509,13 +509,21 @@ interface KiroFallbackAttempt {
   conversationId: string;
 }
 
+interface KiroContextWindowState {
+  value?: number;
+}
+
 type KiroFallbackFactory = (
   conversationId: string | undefined,
   assistantText: string,
   sawReasoning: boolean,
 ) => Promise<KiroFallbackAttempt>;
 
-function mergeKiroUsage(first: OcxUsage | undefined, second: OcxUsage | undefined): OcxUsage | undefined {
+function mergeKiroUsage(
+  first: OcxUsage | undefined,
+  second: OcxUsage | undefined,
+  preserveFirstContextGrowth = false,
+): OcxUsage | undefined {
   if (!first) return second;
   if (!second) return first;
   const sumOptional = (key: keyof OcxUsage): number | undefined => {
@@ -528,11 +536,20 @@ function mergeKiroUsage(first: OcxUsage | undefined, second: OcxUsage | undefine
   const totalTokens = typeof first.totalTokens === "number" && typeof second.totalTokens === "number"
     ? first.totalTokens + second.totalTokens
     : undefined;
+  const carriedContextTotal = preserveFirstContextGrowth && typeof first.contextTotalTokens === "number"
+    ? first.contextTotalTokens + second.outputTokens
+    : undefined;
   return {
     inputTokens: first.inputTokens + second.inputTokens,
     outputTokens: first.outputTokens + second.outputTokens,
     ...(typeof first.contextTotalTokens === "number" || typeof second.contextTotalTokens === "number"
-      ? { contextTotalTokens: Math.max(first.contextTotalTokens ?? 0, second.contextTotalTokens ?? 0) }
+      ? {
+          contextTotalTokens: Math.max(
+            first.contextTotalTokens ?? 0,
+            second.contextTotalTokens ?? 0,
+            carriedContextTotal ?? 0,
+          ),
+        }
       : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(sumOptional("cachedInputTokens") !== undefined ? { cachedInputTokens: sumOptional("cachedInputTokens") } : {}),
@@ -573,7 +590,7 @@ async function* parseKiroAttempt(
   mode: KiroCompletionMode,
   modelId: string | undefined,
   inputTokens: number,
-  contextWindow: number | undefined,
+  contextWindowState: KiroContextWindowState,
   nameMap: Map<string, string> | undefined,
   conversationId: string | undefined,
   previousAssistantText?: string,
@@ -605,8 +622,8 @@ async function* parseKiroAttempt(
     returnedConversationId ? { kiro: { conversationId: returnedConversationId } } : undefined;
 
   const contextUsageTotalFloor = (): number | undefined => {
-    if (contextUsagePercentage === undefined || !contextWindow) return undefined;
-    const floor = Math.ceil(contextWindow * Math.min(contextUsagePercentage, 100) / 100);
+    if (contextUsagePercentage === undefined || !contextWindowState.value) return undefined;
+    const floor = Math.ceil(contextWindowState.value * Math.min(contextUsagePercentage, 100) / 100);
     return Number.isFinite(floor) && floor > 0 ? floor : undefined;
   };
   const usage = (): OcxUsage => {
@@ -804,6 +821,9 @@ async function* parseKiroAttempt(
           if (isValidKiroConversationId(ev.conversationId)) returnedConversationId = ev.conversationId;
           break;
         case "content":
+          if (ev.modelId) {
+            contextWindowState.value = kiroUpstreamContextWindow(ev.modelId) ?? contextWindowState.value;
+          }
           if (open) {
             open = null;
             return { assistantText, sawReasoning, terminal: protocolTerminal(kiroTruncationErrorMessage("content arrived before tool stop")) };
@@ -904,7 +924,7 @@ async function* parseKiroAttempt(
     if (contextUsagePercentage !== undefined) {
       debugProviderDiagnostic("kiro", "context_usage", {
         contextUsagePercentage,
-        ...(contextWindow ? { configuredContextWindow: contextWindow } : {}),
+        ...(contextWindowState.value ? { upstreamContextWindow: contextWindowState.value } : {}),
       });
     }
     debugProviderDiagnostic("kiro", "attempt_complete", {
@@ -1033,12 +1053,13 @@ export async function* parseKiroStream(
   fallbackFactory?: KiroFallbackFactory,
   contextInputEstimate?: number,
 ): AsyncGenerator<AdapterEvent> {
+  const contextWindowState: KiroContextWindowState = { value: contextWindow };
   const first = parseKiroAttempt(
     response,
     completionMode,
     modelId,
     inputTokens,
-    contextWindow,
+    contextWindowState,
     nameMap,
     conversationId,
     undefined,
@@ -1103,7 +1124,7 @@ export async function* parseKiroStream(
     "text_fallback",
     modelId,
     fallback.inputTokens,
-    contextWindow,
+    contextWindowState,
     fallback.nameMap,
     fallback.conversationId,
     firstResult.assistantText,
@@ -1119,7 +1140,8 @@ export async function* parseKiroStream(
     yield retryableKiroIncomplete(
       "empty_kiro_fallback",
       "Kiro's bounded completion retry ended without a terminal result",
-      mergeKiroUsage(firstResult.usage, secondResult.usage) ?? { inputTokens, outputTokens: 0, estimated: true },
+      mergeKiroUsage(firstResult.usage, secondResult.usage, Boolean(firstResult.assistantText))
+        ?? { inputTokens, outputTokens: 0, estimated: true },
       secondResult.providerState ?? firstResult.providerState,
     );
     return;
@@ -1127,7 +1149,7 @@ export async function* parseKiroStream(
   if (secondResult.terminal.type === "done" || secondResult.terminal.type === "incomplete") {
     yield {
       ...secondResult.terminal,
-      usage: mergeKiroUsage(firstResult.usage, secondResult.terminal.usage),
+      usage: mergeKiroUsage(firstResult.usage, secondResult.terminal.usage, Boolean(firstResult.assistantText)),
       providerState: secondResult.terminal.providerState ?? firstResult.providerState,
     };
     return;
@@ -1135,7 +1157,7 @@ export async function* parseKiroStream(
   yield {
     ...secondResult.terminal,
     ...(secondResult.terminal.type === "error"
-      ? { usage: mergeKiroUsage(firstResult.usage, secondResult.terminal.usage) }
+      ? { usage: mergeKiroUsage(firstResult.usage, secondResult.terminal.usage, Boolean(firstResult.assistantText)) }
       : {}),
   };
 }
