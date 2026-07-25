@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { OAUTH_PROVIDERS, runLogin } from "../src/oauth";
 import { inspectKiroCliSqlite, loginKiro, readKiroCliSqlite, refreshKiroToken, resolveKiroApiRegion, resolveKiroProfileArn, resolveKiroRegion } from "../src/oauth/kiro";
 
 // Windows CI cold runners take 5-7s for the real SQLite create/inspect cycles here
@@ -94,6 +95,11 @@ function seedKiroCliRawValue(value: string) {
   db.run("CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)");
   db.run("INSERT INTO auth_kv (key, value) VALUES (?, ?)", ["kirocli:social:token", value]);
   db.close();
+}
+
+function removeKiroCliDb(): void {
+  const path = join(tmp, "Library", "Application Support", "kiro-cli", "data.sqlite3");
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${path}${suffix}`, { force: true });
 }
 
 function seedCustomTokenDb(path: string, rows: Array<[string, Record<string, unknown>]>): void {
@@ -226,17 +232,69 @@ describe("kiro oauth — import-first", () => {
     expect(cred.source).toBe("local-cli");
   });
 
-  test("force login cancellation during logout never starts browser login", async () => {
+  test("force login cancellation during browser login restores the prior Kiro CLI session", async () => {
+    seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
     const controller = new AbortController();
     const calls: string[][] = [];
     const runner = async (args: string[]) => {
       calls.push(args);
-      if (args[0] === "logout") controller.abort();
+      if (args[0] === "logout") {
+        removeKiroCliDb();
+      }
+      if (args[0] === "login") {
+        controller.abort();
+      }
       return { exitCode: 0, stdout: "" };
     };
 
     await expect(loginKiro({ signal: controller.signal }, { forceLogin: true, cliRunner: runner })).rejects.toThrow(/cancelled/i);
-    expect(calls).toEqual([["logout"]]);
+    expect(calls).toEqual([["logout"], ["login"]]);
+    expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+  });
+
+  test("force login callback failure restores the prior Kiro CLI session", async () => {
+    seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
+    const calls: string[][] = [];
+    const runner = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "logout") removeKiroCliDb();
+      return { exitCode: args[0] === "login" ? 1 : 0, stdout: "" };
+    };
+
+    await expect(loginKiro({}, { forceLogin: true, cliRunner: runner })).rejects.toThrow(/did not complete successfully/i);
+
+    expect(calls).toEqual([["logout"], ["login"]]);
+    expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+  });
+
+  test("credential persistence failure restores the prior Kiro CLI session", async () => {
+    seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
+    const runner = async (args: string[]) => {
+      if (args[0] === "logout") removeKiroCliDb();
+      if (args[0] === "login") {
+        seedKiroCliDb({
+          access_token: "aoa-new",
+          refresh_token: "rt-new",
+          profile_arn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/new",
+        });
+      }
+      if (args[0] === "whoami") return { exitCode: 0, stdout: JSON.stringify({ email: "new@example.com" }) };
+      return { exitCode: 0, stdout: "" };
+    };
+    const pending = await loginKiro({}, { forceLogin: true, cliRunner: runner });
+    expect(readKiroCliSqlite()?.access).toBe("aoa-new");
+
+    const originalLogin = OAUTH_PROVIDERS.kiro.login;
+    OAUTH_PROVIDERS.kiro.login = async () => pending;
+    try {
+      await expect(runLogin("kiro", {}, { forceLogin: true }, {
+        saveCredential: async () => { throw new Error("simulated credential persistence failure"); },
+      })).rejects.toThrow("simulated credential persistence failure");
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = originalLogin;
+    }
+
+    expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
   });
 
   test("loginKiro imports JSON credentials and resolver metadata", async () => {

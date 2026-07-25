@@ -7,7 +7,7 @@ import { getAccountCredential, getAccountSet, saveAccountCredential, saveCredent
 import { loginXai, refreshXaiToken, XAI_LOCAL_CLI_DETACH_WARNING, XaiTokenRequestError } from "./xai";
 import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthropicToken } from "./anthropic";
 import { loginKimi, refreshKimiToken } from "./kimi";
-import { KiroTokenRefreshError, loginKiro, refreshKiroToken } from "./kiro";
+import { KiroTokenRefreshError, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import { loginChatGPT, refreshChatGPTToken } from "./chatgpt";
 import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
@@ -525,29 +525,52 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   config.providers[provider] = { ...def.providerConfig };
 }
 
+interface RunLoginDeps {
+  saveCredential?: typeof saveCredential;
+  saveAccountCredential?: typeof saveAccountCredential;
+}
+
 /** Run the login flow, persist the credential + upsert the provider entry to disk, return cred. */
-export async function runLogin(provider: string, ctrl: OAuthController, opts?: LoginOpts): Promise<OAuthCredentials> {
+export async function runLogin(
+  provider: string,
+  ctrl: OAuthController,
+  opts?: LoginOpts,
+  deps: RunLoginDeps = {},
+): Promise<OAuthCredentials> {
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const rawCred = await def.login(ctrl, opts);
   const cred: OAuthCredentials = rawCred.source ? rawCred : { ...rawCred, source: "oauth" };
-  if (opts?.reauthAccountId) {
-    const existing = getAccountCredential(provider, opts.reauthAccountId);
-    if (!existing) throw new Error(`Unknown account for reauth: ${opts.reauthAccountId}`);
-    const expected = existing.accountId ?? existing.email;
-    const got = cred.accountId ?? cred.email;
-    if (!expected) {
-      throw new Error("Could not verify signed-in account identity for reauth.");
+  try {
+    if (opts?.reauthAccountId) {
+      const existing = getAccountCredential(provider, opts.reauthAccountId);
+      if (!existing) throw new Error(`Unknown account for reauth: ${opts.reauthAccountId}`);
+      const expected = existing.accountId ?? existing.email;
+      const got = cred.accountId ?? cred.email;
+      if (!expected) {
+        throw new Error("Could not verify signed-in account identity for reauth.");
+      }
+      if (!got || expected !== got) {
+        throw new Error("Signed-in account does not match the selected account. Sign in with the same account.");
+      }
+      await (deps.saveAccountCredential ?? saveAccountCredential)(provider, opts.reauthAccountId, cred);
+    } else {
+      await (deps.saveCredential ?? saveCredential)(provider, cred, {
+        preserveIdentityless: provider === "kiro" && opts?.forceLogin === true,
+      });
     }
-    if (!got || expected !== got) {
-      throw new Error("Signed-in account does not match the selected account. Sign in with the same account.");
+  } catch (error) {
+    try {
+      settleKiroLoginTransaction(rawCred, false);
+    } catch (restoreError) {
+      throw new AggregateError(
+        [error, restoreError],
+        "Kiro credential persistence failed and the previous Kiro CLI session could not be restored.",
+      );
     }
-    await saveAccountCredential(provider, opts.reauthAccountId, cred);
-  } else {
-    await saveCredential(provider, cred, {
-      preserveIdentityless: provider === "kiro" && opts?.forceLogin === true,
-    });
+    throw error;
   }
+  settleKiroLoginTransaction(rawCred, true);
   if (provider === "chatgpt") return cred;
   const config = loadConfig();
   upsertOAuthProvider(config, provider);

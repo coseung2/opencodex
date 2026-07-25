@@ -15,8 +15,11 @@ import {
   normalizeKiroRegion,
   readImportedKiroCredential,
   readKiroCliSqliteCredential,
+  restoreKiroCliSession,
   requireKiroRegion,
+  snapshotKiroCliSession,
   type ImportedKiroCredential,
+  type KiroCliSessionSnapshot,
   type KiroImportDiagnostic,
 } from "./kiro-credentials";
 
@@ -59,6 +62,30 @@ export type KiroCliRunner = (args: string[], signal?: AbortSignal) => Promise<Ki
 export interface KiroLoginOptions {
   forceLogin?: boolean;
   cliRunner?: KiroCliRunner;
+}
+
+const pendingKiroLoginTransactions = new WeakMap<OAuthCredentials, KiroCliSessionSnapshot>();
+
+/** Settle the external CLI side of a forced login after OCX credential persistence resolves. */
+export function settleKiroLoginTransaction(credential: OAuthCredentials, persisted: boolean): void {
+  const snapshot = pendingKiroLoginTransactions.get(credential);
+  if (!snapshot) return;
+  pendingKiroLoginTransactions.delete(credential);
+  if (!persisted) restoreKiroCliSession(snapshot);
+}
+
+function restoreKiroLoginOrThrow(snapshot: KiroCliSessionSnapshot | null, cause: unknown): never {
+  if (snapshot) {
+    try {
+      restoreKiroCliSession(snapshot);
+    } catch (restoreError) {
+      throw new AggregateError(
+        [cause, restoreError],
+        "Kiro login failed and the previous Kiro CLI session could not be restored.",
+      );
+    }
+  }
+  throw cause;
 }
 
 function throwIfKiroLoginCancelled(signal?: AbortSignal): void {
@@ -167,20 +194,26 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
       instructions: "Kiro CLI is opening a fresh browser login. This also switches the account used by kiro-cli.",
     });
     ctrl.onProgress?.("Opening a fresh Kiro CLI browser login.");
-    const logout = await runner(["logout"], ctrl.signal);
-    throwIfKiroLoginCancelled(ctrl.signal);
-    if (logout.exitCode !== 0) throw new Error("Kiro CLI could not prepare a fresh login.");
-    const login = await runner(["login"], ctrl.signal);
-    throwIfKiroLoginCancelled(ctrl.signal);
-    if (login.exitCode !== 0) throw new Error("Kiro CLI login did not complete successfully.");
-    const fresh = readKiroCliSqliteCredential();
-    if (!fresh) throw new Error("Kiro CLI login completed but no credential could be imported.");
-    const credential = await oauthCredentialFromImported(fresh, runner, ctrl.signal);
-    throwIfKiroLoginCancelled(ctrl.signal);
-    if (!credential.accountId && !credential.email) {
-      throw new Error("Kiro login completed but OCX could not determine a stable account identity.");
+    const previousSession = snapshotKiroCliSession();
+    try {
+      const logout = await runner(["logout"], ctrl.signal);
+      throwIfKiroLoginCancelled(ctrl.signal);
+      if (logout.exitCode !== 0) throw new Error("Kiro CLI could not prepare a fresh login.");
+      const login = await runner(["login"], ctrl.signal);
+      throwIfKiroLoginCancelled(ctrl.signal);
+      if (login.exitCode !== 0) throw new Error("Kiro CLI login did not complete successfully.");
+      const fresh = readKiroCliSqliteCredential();
+      if (!fresh) throw new Error("Kiro CLI login completed but no credential could be imported.");
+      const credential = await oauthCredentialFromImported(fresh, runner, ctrl.signal);
+      throwIfKiroLoginCancelled(ctrl.signal);
+      if (!credential.accountId && !credential.email) {
+        throw new Error("Kiro login completed but OCX could not determine a stable account identity.");
+      }
+      if (previousSession) pendingKiroLoginTransactions.set(credential, previousSession);
+      return credential;
+    } catch (error) {
+      restoreKiroLoginOrThrow(previousSession, error);
     }
-    return credential;
   }
 
   const imported = readImportedKiroCredential();
