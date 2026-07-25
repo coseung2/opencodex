@@ -129,6 +129,27 @@ describe("Responses bridge reasoning and usage parity", () => {
     });
   });
 
+  test("context input override drives Responses compaction without changing billing usage", async () => {
+    const frames = await collectSse(bridgeToResponsesSSE(replay([
+      {
+        type: "done",
+        usage: {
+          inputTokens: 58,
+          contextInputTokens: 226_000,
+          outputTokens: 12,
+          estimated: true,
+        },
+      },
+    ]), "kiro/claude-opus-5"));
+
+    const completed = frames.find(f => f.event === "response.completed")?.data.response as Record<string, unknown>;
+    expect(completed.usage).toEqual({
+      input_tokens: 226_000,
+      output_tokens: 12,
+      total_tokens: 226_012,
+    });
+  });
+
   test("Anthropic cache read and write tokens pass through Responses usage without re-adding", async () => {
     const frames = await collectSse(bridgeToResponsesSSE(replay([
       {

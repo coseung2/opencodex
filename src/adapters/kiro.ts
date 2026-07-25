@@ -491,6 +491,9 @@ function mergeKiroUsage(first: OcxUsage | undefined, second: OcxUsage | undefine
   return {
     inputTokens: first.inputTokens + second.inputTokens,
     outputTokens: first.outputTokens + second.outputTokens,
+    ...(typeof first.contextInputTokens === "number" || typeof second.contextInputTokens === "number"
+      ? { contextInputTokens: Math.max(first.contextInputTokens ?? 0, second.contextInputTokens ?? 0) }
+      : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(sumOptional("cachedInputTokens") !== undefined ? { cachedInputTokens: sumOptional("cachedInputTokens") } : {}),
     ...(sumOptional("cacheReadInputTokens") !== undefined ? { cacheReadInputTokens: sumOptional("cacheReadInputTokens") } : {}),
@@ -534,6 +537,7 @@ async function* parseKiroAttempt(
   nameMap: Map<string, string> | undefined,
   conversationId: string | undefined,
   previousAssistantText?: string,
+  contextInputTokens?: number,
 ): AsyncGenerator<AdapterEvent, KiroAttemptResult> {
   const emptyResult = (): KiroAttemptResult => ({ assistantText: "", sawReasoning: false });
   if (!response.body) {
@@ -560,11 +564,20 @@ async function* parseKiroAttempt(
   const providerState = (): { kiro: { conversationId: string } } | undefined =>
     returnedConversationId ? { kiro: { conversationId: returnedConversationId } } : undefined;
 
-  const usage = (): OcxUsage => authoritativeUsage ?? ({
+  const contextUsageInputFloor = (): number | undefined => {
+    if (contextUsagePercentage === undefined || !contextWindow) return undefined;
+    const floor = Math.ceil(contextWindow * Math.min(contextUsagePercentage, 100) / 100);
+    return Number.isFinite(floor) && floor > 0 ? floor : undefined;
+  };
+  const usage = (): OcxUsage => {
+    const contextFloor = Math.max(contextInputTokens ?? 0, contextUsageInputFloor() ?? 0);
+    const base = authoritativeUsage ?? {
       inputTokens,
       outputTokens: estimateTokens(outputChars, modelId),
       estimated: true,
-    });
+    };
+    return contextFloor > 0 ? { ...base, contextInputTokens: contextFloor } : base;
+  };
 
   const classifiedTerminal = (failure: KiroErrorClassification): AdapterEvent => ({
     type: "error",
@@ -970,6 +983,7 @@ export async function* parseKiroStream(
   conversationId?: string,
   completionMode: KiroCompletionMode = "disabled",
   fallbackFactory?: KiroFallbackFactory,
+  contextInputTokens?: number,
 ): AsyncGenerator<AdapterEvent> {
   const first = parseKiroAttempt(
     response,
@@ -979,6 +993,8 @@ export async function* parseKiroStream(
     contextWindow,
     nameMap,
     conversationId,
+    undefined,
+    contextInputTokens,
   );
   let firstNext = await first.next();
   while (!firstNext.done) {
@@ -1043,6 +1059,7 @@ export async function* parseKiroStream(
     fallback.nameMap,
     fallback.conversationId,
     firstResult.assistantText,
+    contextInputTokens,
   );
   let secondNext = await second.next();
   while (!secondNext.done) {
@@ -1080,6 +1097,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
   // Per-request closure (resolveAdapter builds a fresh adapter per request — server.ts:440 — so this
   // is race-free) carrying the heuristic input-token estimate from buildRequest into the stream.
   let inputTokens = 0;
+  let contextInputTokens = 0;
   let modelId: string | undefined;
   let contextWindow: number | undefined;
   let toolNameMap: Map<string, string> | undefined;
@@ -1097,6 +1115,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     conversationId: string;
     completionMode: KiroCompletionMode;
     inputTokens: number;
+    contextInputTokens: number;
   }> => {
     if (typeof provider.apiKey !== "string" || provider.apiKey.trim() === "") {
       throw new Error("kiro token missing — run ocx login kiro");
@@ -1141,6 +1160,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       conversationId: built.conversationId,
       completionMode: built.completionMode,
       inputTokens: estimateKiroInputTokens(parsed),
+      contextInputTokens: estimateKiroLogInputTokens(parsed),
     };
   };
 
@@ -1191,6 +1211,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       modelId = parsed.modelId;
       contextWindow = configuredKiroContextWindow(provider, parsed.modelId);
       inputTokens = built.inputTokens;
+      contextInputTokens = built.contextInputTokens;
       toolNameMap = built.nameMap;
       conversationId = built.conversationId;
       completionMode = built.completionMode;
@@ -1209,6 +1230,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
         conversationId,
         completionMode,
         completionMode === "required" ? fallbackFactory : undefined,
+        contextInputTokens,
       );
     },
 
@@ -1239,6 +1261,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
         conversationId,
         completionMode,
         completionMode === "required" ? fallbackFactory : undefined,
+        contextInputTokens,
       )) events.push(e);
       return events;
     },

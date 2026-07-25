@@ -777,6 +777,7 @@ describe("kiro adapter — parseStream", () => {
     );
     expect(done).toEqual({
       inputTokens: 15,
+      contextInputTokens: 200,
       cachedInputTokens: 3,
       cacheReadInputTokens: 3,
       cacheCreationInputTokens: 2,
@@ -823,7 +824,7 @@ describe("kiro adapter — parseStream", () => {
     expect((events[0] as { message: string }).message).toContain("Compact or reduce the history");
   });
 
-  test("Kiro contextUsagePercentage remains diagnostic and does not override totals", async () => {
+  test("Kiro contextUsagePercentage drives context pressure without overriding turn totals", async () => {
     const adapter = createKiroAdapter(provider);
     await adapter.buildRequest(parsedWith([{ role: "user", content: "x".repeat(700) }]));
     const done = await doneUsage(
@@ -836,6 +837,7 @@ describe("kiro adapter — parseStream", () => {
     expect(done.outputTokens).toBe(100);
     expect(done.totalTokens).toBeUndefined();
     expect(done.estimated).toBe(true);
+    expect(done.contextInputTokens).toBe(50_000);
   });
 
   test("Kiro auto ignores provider-level context window and falls back to heuristic totals", async () => {
@@ -875,6 +877,7 @@ describe("kiro adapter — parseStream", () => {
     expect(longBody.length).toBeGreaterThan(shortBody.length + 10_000);
     expect(longUsage.inputTokens).toBe(shortUsage.inputTokens);
     expect(longUsage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
+    expect(longUsage.contextInputTokens).toBeGreaterThan(shortUsage.contextInputTokens ?? 0);
   });
 
   test("request log usage estimates the full Codex context while SSE usage stays current-turn", async () => {
@@ -891,6 +894,7 @@ describe("kiro adapter — parseStream", () => {
     expect(usage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
     expect(request.usageLog?.estimated).toBe(true);
     expect(request.usageLog?.inputTokens).toBeGreaterThan(usage.inputTokens + 4000);
+    expect(usage.contextInputTokens).toBe(request.usageLog?.inputTokens);
   });
 
   test("resumed payload preserves the complete locally expanded history", async () => {

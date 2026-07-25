@@ -306,6 +306,13 @@ export interface OcxUrlCitation {
 export interface OcxUsage {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Provider-private context pressure for clients that trigger compaction from Responses usage.
+   * This is intentionally separate from `inputTokens`: stateful providers such as Kiro bill/report
+   * only the current turn while also exposing the whole conversation's context occupancy.
+   * Persistence and cost accounting must continue to use `inputTokens`.
+   */
+  contextInputTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
