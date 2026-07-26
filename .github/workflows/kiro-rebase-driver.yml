@@ -27,87 +27,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Normalize regression formatting
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("tests/oauth-refresh.test.ts")
-          text = path.read_text(encoding="utf-8")
-          start_marker = '  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {'
-          next_marker = '  test("failed Kiro refresh does not overwrite the stored account from local CLI", async () => {'
-          start = text.index(start_marker)
-          end = text.index(next_marker, start)
-          replacement = '''  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {
-            const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/account-scoped";
-            const urls: string[] = [];
-            const bodies: unknown[] = [];
-            globalThis.fetch = (async (input, init) => {
-              urls.push(String(input));
-              bodies.push(JSON.parse(String(init?.body)));
-              return new Response(JSON.stringify({
-                accessToken: "aoa-oidc-fresh",
-                refreshToken: "rt-oidc-fresh",
-                expiresIn: 3600,
-              }), { status: 200 });
-            }) as typeof fetch;
-            await saveCredential("kiro", {
-              access: "aoa-oidc-old",
-              refresh: "rt-oidc-old",
-              expires: Date.now() - 1,
-              accountId: profileArn,
-              kiro: {
-                profileArn,
-                apiRegion: "eu-west-1",
-                ssoRegion: "eu-west-1",
-                clientId: "stored-client",
-                clientSecret: "stored-secret",
-              },
-            });
-
-            await expect(getValidAccessToken("kiro")).resolves.toBe("aoa-oidc-fresh");
-            expect(urls).toEqual(["https://oidc.eu-west-1.amazonaws.com/token"]);
-            expect(bodies).toEqual([{
-              grantType: "refresh_token",
-              clientId: "stored-client",
-              clientSecret: "stored-secret",
-              refreshToken: "rt-oidc-old",
-            }]);
-            expect(getCredential("kiro")).toMatchObject({
-              access: "aoa-oidc-fresh",
-              refresh: "rt-oidc-fresh",
-              accountId: profileArn,
-              kiro: {
-                profileArn,
-                apiRegion: "eu-west-1",
-                ssoRegion: "eu-west-1",
-                clientId: "stored-client",
-                clientSecret: "stored-secret",
-              },
-            });
-          });
-
-          '''
-          path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
-          PY
-          git diff --check
-
-      - name: Commit formatting cleanup to workspace
+      - name: Build clean rebased branch on current dev
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tests/oauth-refresh.test.ts
-          git commit -m "test(kiro): format account-scoped refresh regression"
-          git push origin HEAD:automation/kiro-merge-work
-
-      - name: Build clean rebased branch on current dev
-        shell: bash
-        run: |
-          set -euo pipefail
           git remote add upstream https://github.com/lidge-jun/opencodex.git 2>/dev/null || true
           git fetch upstream dev
           git diff --binary upstream/dev..HEAD > /tmp/kiro-multiauth.patch
@@ -118,6 +43,73 @@ jobs:
 
           git checkout -B automation/kiro-rebased upstream/dev
           git apply --index /tmp/kiro-multiauth.patch
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/oauth-refresh.test.ts")
+          text = path.read_text(encoding="utf-8")
+          start_marker = '  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {'
+          next_marker = '  test("failed Kiro refresh does not overwrite the stored account from local CLI", async () => {'
+          start = text.index(start_marker)
+          end = text.index(next_marker, start)
+          lines = [
+              '  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {',
+              '    const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/account-scoped";',
+              '    const urls: string[] = [];',
+              '    const bodies: unknown[] = [];',
+              '    globalThis.fetch = (async (input, init) => {',
+              '      urls.push(String(input));',
+              '      bodies.push(JSON.parse(String(init?.body)));',
+              '      return new Response(JSON.stringify({',
+              '        accessToken: "aoa-oidc-fresh",',
+              '        refreshToken: "rt-oidc-fresh",',
+              '        expiresIn: 3600,',
+              '      }), { status: 200 });',
+              '    }) as typeof fetch;',
+              '    await saveCredential("kiro", {',
+              '      access: "aoa-oidc-old",',
+              '      refresh: "rt-oidc-old",',
+              '      expires: Date.now() - 1,',
+              '      accountId: profileArn,',
+              '      kiro: {',
+              '        profileArn,',
+              '        apiRegion: "eu-west-1",',
+              '        ssoRegion: "eu-west-1",',
+              '        clientId: "stored-client",',
+              '        clientSecret: "stored-secret",',
+              '      },',
+              '    });',
+              '',
+              '    await expect(getValidAccessToken("kiro")).resolves.toBe("aoa-oidc-fresh");',
+              '    expect(urls).toEqual(["https://oidc.eu-west-1.amazonaws.com/token"]);',
+              '    expect(bodies).toEqual([{',
+              '      grantType: "refresh_token",',
+              '      clientId: "stored-client",',
+              '      clientSecret: "stored-secret",',
+              '      refreshToken: "rt-oidc-old",',
+              '    }]);',
+              '    expect(getCredential("kiro")).toMatchObject({',
+              '      access: "aoa-oidc-fresh",',
+              '      refresh: "rt-oidc-fresh",',
+              '      accountId: profileArn,',
+              '      kiro: {',
+              '        profileArn,',
+              '        apiRegion: "eu-west-1",',
+              '        ssoRegion: "eu-west-1",',
+              '        clientId: "stored-client",',
+              '        clientSecret: "stored-secret",',
+              '      },',
+              '    });',
+              '  });',
+              '',
+              '',
+          ]
+          replacement = "\n".join(lines)
+          path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+          PY
+
+          git add tests/oauth-refresh.test.ts
           git diff --cached --check
           ! git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- \
             src/oauth/index.ts \
