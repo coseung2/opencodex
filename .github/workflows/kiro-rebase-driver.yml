@@ -9,10 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  resolve:
+  rebase:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out merged workspace
+      - name: Check out resolved workspace
         uses: actions/checkout@v4
         with:
           ref: automation/kiro-merge-work
@@ -27,97 +27,20 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Resolve conflicts and close Kiro refresh footgun
+      - name: Normalize regression formatting
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          def read(path: str) -> str:
-              return Path(path).read_text(encoding="utf-8")
-
-          def write(path: str, text: str) -> None:
-              Path(path).write_text(text, encoding="utf-8")
-
-          def replace_once(text: str, old: str, new: str, label: str) -> str:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{label}: expected one match, found {count}")
-              return text.replace(old, new, 1)
-
-          def resolve_blocks(path: str, replacements: list[str]) -> None:
-              text = read(path)
-              pattern = re.compile(r"<<<<<<< HEAD\n.*?\n=======\n.*?\n>>>>>>> upstream/dev", re.S)
-              found = pattern.findall(text)
-              if len(found) != len(replacements):
-                  raise SystemExit(f"{path}: expected {len(replacements)} conflicts, found {len(found)}")
-              iterator = iter(replacements)
-              text = pattern.sub(lambda _match: next(iterator), text)
-              write(path, text)
-
-          oauth_path = "src/oauth/index.ts"
-          oauth = read(oauth_path)
-          oauth = replace_once(
-              oauth,
-              '  refresh(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials>;',
-              '  refresh(\n    refreshToken: string,\n    signal?: AbortSignal,\n    credential?: OAuthCredentials,\n  ): Promise<OAuthCredentials>;',
-              "OAuth provider refresh signature",
-          )
-          oauth = replace_once(
-              oauth,
-              '    refresh: (rt, signal) => refreshKiroToken(rt, signal),',
-              '    refresh: (rt, signal, credential) => refreshKiroToken(rt, signal, credential),',
-              "Kiro provider refresh registration",
-          )
-          oauth = replace_once(
-              oauth,
-              '    ...(fresh.accountId === undefined && previous.accountId ? { accountId: previous.accountId } : {}),\n  };',
-              '    ...(fresh.accountId === undefined && previous.accountId ? { accountId: previous.accountId } : {}),\n'
-              '    ...(fresh.kiro === undefined && previous.kiro ? { kiro: previous.kiro } : {}),\n'
-              '  };',
-              "Kiro metadata merge preservation",
-          )
-
-          generic_start = oauth.index("export async function refreshGenericAccountWithLock(")
-          generic_end = oauth.index("\nasync function refreshAndPersistAccessToken(", generic_start)
-          generic = oauth[generic_start:generic_end]
-          generic = replace_once(
-              generic,
-              "merged(await def.refresh(stored.refresh), stored)",
-              "merged(await def.refresh(stored.refresh, undefined, stored), stored)",
-              "generic refresh stored credential",
-          )
-          generic = replace_once(
-              generic,
-              "if (!isTerminalRefreshError(error)) throw error;",
-              "if (!terminal(error)) throw error;",
-              "generic structured terminal refresh handling",
-          )
-          oauth = oauth[:generic_start] + generic + oauth[generic_end:]
-
-          refresh_start = oauth.index("async function refreshAndPersistAccessToken(")
-          refresh_end = oauth.index("/**\n * Shared bearer-token resolver", refresh_start)
-          refresh_function = '''async function refreshAndPersistAccessToken(
-            provider: string,
-            accountId: string,
-            def: OAuthProviderDef,
-            cred: OAuthCredentials,
-          ): Promise<string> {
-            if (provider === "xai") return refreshXaiAccountWithLock(provider, accountId, def, cred);
-            if (provider === "anthropic") return refreshAnthropicAccountWithLock(provider, accountId, def, cred);
-            return refreshGenericAccountWithLock(provider, accountId, def, cred);
-          }
-
-          '''
-          oauth = oauth[:refresh_start] + refresh_function + oauth[refresh_end:]
-          write(oauth_path, oauth)
-
-          test_path = "tests/oauth-refresh.test.ts"
-          tests = read(test_path)
-          test_marker = '  test("failed Kiro refresh does not overwrite the stored account from local CLI", async () => {'
-          regression = '''  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {
+          path = Path("tests/oauth-refresh.test.ts")
+          text = path.read_text(encoding="utf-8")
+          start_marker = '  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {'
+          next_marker = '  test("failed Kiro refresh does not overwrite the stored account from local CLI", async () => {'
+          start = text.index(start_marker)
+          end = text.index(next_marker, start)
+          replacement = '''  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {
             const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/account-scoped";
             const urls: string[] = [];
             const bodies: unknown[] = [];
@@ -167,71 +90,46 @@ jobs:
           });
 
           '''
-          tests = replace_once(tests, test_marker, regression + test_marker, "Kiro OIDC regression insertion")
-          write(test_path, tests)
-
-          resolve_blocks(
-              "docs-site/src/content/docs/guides/providers.md",
-              [
-                  '| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed, signed-in `kiro-cli` session (install with `curl -fsSL https://cli.kiro.dev/install | bash`, then run `kiro-cli login`). **Add account** logs `kiro-cli` out, starts a fresh browser login that switches the account used by `kiro-cli`, and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved, and cancellation or failure restores the previous `kiro-cli` session. |',
-                  'Kiro login expects the Kiro CLI: install it (`curl -fsSL https://cli.kiro.dev/install | bash`)\n'
-                  'and sign in with `kiro-cli login` first. Without a `kiro-cli` session, `ocx login kiro` falls\n'
-                  'back to a pasted access token or the `KIRO_ACCESS_TOKEN` environment variable.\n\n'
-                  'The `ocx login kiro` import path searches the platform Kiro CLI stores and opens SQLite databases\n'
-                  'read-only. Two environment variables make the source and token row selection explicit:',
-              ],
-          )
-
-          localized = {
-              "docs-site/src/content/docs/ja/guides/providers.md": {
-                  "row": '| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | 初回ログインは Kiro CLI をインストール（`curl -fsSL https://cli.kiro.dev/install | bash`）し、`kiro-cli login` でサインインした既存セッションを取り込みます。**アカウントを追加**は `kiro-cli` をログアウトして新しいブラウザログインを開始し、`kiro-cli` 自体のアカウントを切り替えてアカウント別プロファイルメタデータを保存します。既存の OpenCodex アカウントは保持され、キャンセルまたは失敗時には以前の `kiro-cli` セッションが復元されます。 |',
-                  "anchor": "### Kiro 認証情報の取り込み\n\n通常の `ocx login kiro` 取り込みは CLI の SQLite データベースを読み取り専用で開き、データベース、WAL、SHM を変更しません。",
-                  "section": "### Kiro 認証情報の取り込み\n\nKiro のログインには Kiro CLI が必要です。`curl -fsSL https://cli.kiro.dev/install | bash` でインストールし、先に `kiro-cli login` でサインインしてください。`kiro-cli` セッションがない場合、`ocx login kiro` は貼り付けたアクセストークンまたは `KIRO_ACCESS_TOKEN` 環境変数にフォールバックします。\n\n通常の `ocx login kiro` 取り込みは CLI の SQLite データベースを読み取り専用で開き、データベース、WAL、SHM を変更しません。",
-              },
-              "docs-site/src/content/docs/ko/guides/providers.md": {
-                  "row": '| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | 최초 로그인은 Kiro CLI를 설치(`curl -fsSL https://cli.kiro.dev/install | bash`)하고 `kiro-cli login`으로 로그인한 기존 세션을 가져옵니다. **계정 추가**는 `kiro-cli`에서 로그아웃한 뒤 새 브라우저 로그인을 시작하여 `kiro-cli` 자체의 계정을 전환하고, 계정별 프로필 메타데이터를 저장합니다. 기존 OpenCodex 계정은 유지되며, 취소되거나 실패하면 이전 `kiro-cli` 세션을 복원합니다. |',
-                  "anchor": "### Kiro 자격 증명 가져오기\n\n일반 `ocx login kiro` 가져오기는 CLI SQLite 데이터베이스를 읽기 전용으로 열며 데이터베이스, WAL, SHM을 수정하지 않습니다.",
-                  "section": "### Kiro 자격 증명 가져오기\n\nKiro 로그인에는 Kiro CLI가 필요합니다. `curl -fsSL https://cli.kiro.dev/install | bash`로 설치하고 먼저 `kiro-cli login`으로 로그인하세요. `kiro-cli` 세션이 없으면 `ocx login kiro`는 붙여 넣은 액세스 토큰이나 `KIRO_ACCESS_TOKEN` 환경 변수로 폴백합니다.\n\n일반 `ocx login kiro` 가져오기는 CLI SQLite 데이터베이스를 읽기 전용으로 열며 데이터베이스, WAL, SHM을 수정하지 않습니다.",
-              },
-              "docs-site/src/content/docs/ru/guides/providers.md": {
-                  "row": '| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Первый вход импортирует существующую сессию после установки Kiro CLI (`curl -fsSL https://cli.kiro.dev/install | bash`) и входа через `kiro-cli login`. **Добавить аккаунт** выполняет выход из `kiro-cli`, запускает новый вход через браузер, переключает аккаунт самого `kiro-cli` и сохраняет метаданные профиля отдельно для каждого аккаунта. Существующие аккаунты OpenCodex сохраняются; при отмене или сбое восстанавливается предыдущая сессия `kiro-cli`. |',
-                  "anchor": "### Импорт учётных данных Kiro\n\nОбычный импорт `ocx login kiro` открывает базу SQLite CLI только для чтения и не изменяет базу, WAL или SHM.",
-                  "section": "### Импорт учётных данных Kiro\n\nДля входа Kiro требуется Kiro CLI: установите его командой `curl -fsSL https://cli.kiro.dev/install | bash` и сначала выполните `kiro-cli login`. Если сессии `kiro-cli` нет, `ocx login kiro` использует вставленный токен доступа или переменную окружения `KIRO_ACCESS_TOKEN`.\n\nОбычный импорт `ocx login kiro` открывает базу SQLite CLI только для чтения и не изменяет базу, WAL или SHM.",
-              },
-              "docs-site/src/content/docs/zh-cn/guides/providers.md": {
-                  "row": '| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | 首次登录会导入已安装并已登录的 Kiro CLI 会话（使用 `curl -fsSL https://cli.kiro.dev/install | bash` 安装，然后运行 `kiro-cli login`）。**添加账户**会先退出 `kiro-cli`，再启动新的浏览器登录，从而切换 `kiro-cli` 自身使用的账户，并保存账户范围的配置文件元数据。现有 OpenCodex 账户会保留；如果取消或失败，则恢复之前的 `kiro-cli` 会话。 |',
-                  "anchor": "### Kiro 凭据导入\n\n普通的 `ocx login kiro` 导入会以只读方式打开 CLI SQLite 数据库，不修改数据库、WAL 或 SHM。",
-                  "section": "### Kiro 凭据导入\n\nKiro 登录需要 Kiro CLI：使用 `curl -fsSL https://cli.kiro.dev/install | bash` 安装，并先运行 `kiro-cli login`。如果没有 `kiro-cli` 会话，`ocx login kiro` 会回退到粘贴的访问令牌或 `KIRO_ACCESS_TOKEN` 环境变量。\n\n普通的 `ocx login kiro` 导入会以只读方式打开 CLI SQLite 数据库，不修改数据库、WAL 或 SHM。",
-              },
-          }
-          for path, values in localized.items():
-              resolve_blocks(path, [values["row"]])
-              text = read(path)
-              text = replace_once(text, values["anchor"], values["section"], f"{path} Kiro prerequisites")
-              write(path, text)
-
-          resolve_blocks(
-              "src/providers/registry.ts",
-              [
-                  '    note: "Import-first: reuses your installed and signed-in Kiro CLI session (requires `kiro-cli login`). Add account logs `kiro-cli` out, switches it through a fresh browser login, stores the account by profile ARN, and restores the previous CLI session on cancellation or failure. Experimental third-party harness — see Kiro ToS.",',
-              ],
-          )
-
-          conflict_paths = [
-              oauth_path,
-              "src/providers/registry.ts",
-              "docs-site/src/content/docs/guides/providers.md",
-              *localized.keys(),
-          ]
-          for path in conflict_paths:
-              text = read(path)
-              if re.search(r"^(<<<<<<<|=======|>>>>>>>)", text, re.M):
-                  raise SystemExit(f"unresolved conflict marker in {path}")
+          path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
           PY
-
           git diff --check
 
-      - name: Run focused Kiro and OAuth regressions
+      - name: Commit formatting cleanup to workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/oauth-refresh.test.ts
+          git commit -m "test(kiro): format account-scoped refresh regression"
+          git push origin HEAD:automation/kiro-merge-work
+
+      - name: Build clean rebased branch on current dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/lidge-jun/opencodex.git 2>/dev/null || true
+          git fetch upstream dev
+          git diff --binary upstream/dev..HEAD > /tmp/kiro-multiauth.patch
+
+          changed_count=$(git diff --name-only upstream/dev..HEAD | wc -l | tr -d ' ')
+          test "$changed_count" = "20"
+          ! git diff --name-only upstream/dev..HEAD | grep -q '^\.github/workflows/kiro-rebase-driver.yml$'
+
+          git checkout -B automation/kiro-rebased upstream/dev
+          git apply --index /tmp/kiro-multiauth.patch
+          git diff --cached --check
+          ! git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- \
+            src/oauth/index.ts \
+            src/providers/registry.ts \
+            docs-site/src/content/docs/guides/providers.md \
+            docs-site/src/content/docs/ja/guides/providers.md \
+            docs-site/src/content/docs/ko/guides/providers.md \
+            docs-site/src/content/docs/ru/guides/providers.md \
+            docs-site/src/content/docs/zh-cn/guides/providers.md
+          git commit -m "fix(kiro): support browser-based multi-account login"
+
+      - name: Run focused Kiro and OAuth regressions on rebased tip
         run: >-
           bun test
           tests/kiro-adapter.test.ts
@@ -241,25 +139,10 @@ jobs:
           tests/oauth-store-multi.test.ts
           tests/server-kiro-oauth-401-replay.test.ts
 
-      - name: Run typecheck and privacy scan
+      - name: Run typecheck and privacy scan on rebased tip
         run: |
           bun run typecheck
           bun run privacy:scan
 
-      - name: Commit resolved workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            src/oauth/index.ts \
-            src/providers/registry.ts \
-            tests/oauth-refresh.test.ts \
-            docs-site/src/content/docs/guides/providers.md \
-            docs-site/src/content/docs/ja/guides/providers.md \
-            docs-site/src/content/docs/ko/guides/providers.md \
-            docs-site/src/content/docs/ru/guides/providers.md \
-            docs-site/src/content/docs/zh-cn/guides/providers.md
-          git commit -m "fix(kiro): resolve dev refresh integration safely"
-          git push origin HEAD:automation/kiro-merge-work
+      - name: Publish rebased branch
+        run: git push --force origin HEAD:automation/kiro-rebased
