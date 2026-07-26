@@ -1,0 +1,43 @@
+name: Kiro rebase workspace
+
+on:
+  push:
+    branches:
+      - automation/kiro-rebase-driver
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Kiro PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/kiro-multiauth
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge current upstream dev and publish workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/lidge-jun/opencodex.git 2>/dev/null || true
+          git fetch upstream dev
+          git checkout -B automation/kiro-merge-work
+
+          set +e
+          git merge --no-ff --no-commit upstream/dev
+          merge_status=$?
+          set -e
+
+          if [ "$merge_status" -ne 0 ]; then
+            echo "Merge conflicts captured for explicit resolution."
+          fi
+
+          git add -A
+          git commit -m "chore: prepare Kiro multi-account dev merge workspace"
+          git push --force origin HEAD:automation/kiro-merge-work
