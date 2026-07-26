@@ -1,9 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { Database } from "bun:sqlite";
 
 const DEFAULT_EXPIRES_MS = 3600_000;
+const KIRO_CLI_RECOVERY_SUFFIX = ".opencodex-recovery";
+const KIRO_CLI_RECOVERY_HEADER = Buffer.from("opencodex-kiro-session-v1\n", "utf8");
+const SQLITE_DATABASE_HEADER = Buffer.from("SQLite format 3\0", "binary");
 const KIRO_REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d$/;
 const CLIENT_ID_HASH_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TOKEN_KEYS = [
@@ -47,6 +50,13 @@ export interface ImportedKiroCredential {
   apiRegion?: string;
   clientId?: string;
   clientSecret?: string;
+}
+
+/** Opaque backup retained on disk while a forced Kiro CLI login is pending persistence. */
+export interface KiroCliSessionSnapshot {
+  readonly path: string;
+  readonly database: Buffer;
+  readonly recoveryPath: string;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -210,7 +220,16 @@ function readStateProfile(db: Database): { profileArn?: string; apiRegion?: stri
   }
 }
 
-function readSqliteCredentials(diagnostics: KiroImportDiagnostic[]): ImportedKiroCredential | undefined {
+interface LocatedKiroCliCredential {
+  credential: ImportedKiroCredential;
+  path: string;
+  database?: Buffer;
+}
+
+function readSqliteCredentials(
+  diagnostics: KiroImportDiagnostic[],
+  includeSnapshot = false,
+): LocatedKiroCliCredential | undefined {
   for (const { location, path } of sqliteEntries()) {
     if (!existsSync(path)) {
       diagnostics.push({ location, status: "missing" });
@@ -261,7 +280,13 @@ function readSqliteCredentials(diagnostics: KiroImportDiagnostic[]): ImportedKir
       const merged = { ...registrationData, ...tokenData, ...profile };
       const credential = credentialFromJson(merged, "sqlite");
       diagnostics.push({ location, status: credential ? "token_found" : "token_missing" });
-      if (credential) return credential;
+      if (credential) {
+        return {
+          credential,
+          path,
+          ...(includeSnapshot ? { database: db.serialize() } : {}),
+        };
+      }
     } catch (error) {
       if (error instanceof Error && error.message.includes("KIROCLI_TOKEN_KEY")) throw error;
       diagnostics.push({ location, status: "schema_mismatch" });
@@ -277,12 +302,12 @@ export function inspectKiroCredentialSources(): { credential: ImportedKiroCreden
   const json = readJsonCredentials(diagnostics);
   if (json) return { credential: json, diagnostics };
   const sqlite = readSqliteCredentials(diagnostics);
-  return { credential: sqlite ?? null, diagnostics };
+  return { credential: sqlite?.credential ?? null, diagnostics };
 }
 
 export function inspectKiroCliSqliteSources(): { credential: ImportedKiroCredential | null; diagnostics: KiroImportDiagnostic[] } {
   const diagnostics: KiroImportDiagnostic[] = [];
-  return { credential: readSqliteCredentials(diagnostics) ?? null, diagnostics };
+  return { credential: readSqliteCredentials(diagnostics)?.credential ?? null, diagnostics };
 }
 
 export function readImportedKiroCredential(): ImportedKiroCredential | null {
@@ -291,4 +316,129 @@ export function readImportedKiroCredential(): ImportedKiroCredential | null {
 
 export function readKiroCliSqliteCredential(): ImportedKiroCredential | null {
   return inspectKiroCliSqliteSources().credential;
+}
+
+/** Capture the complete active CLI database so a failed account switch can restore it exactly. */
+export function snapshotKiroCliSession(): KiroCliSessionSnapshot | null {
+  const located = readSqliteCredentials([], true);
+  if (!located?.database) return null;
+  return {
+    path: located.path,
+    database: located.database,
+    recoveryPath: `${located.path}${KIRO_CLI_RECOVERY_SUFFIX}`,
+  };
+}
+
+/** Persist a complete, private recovery image before kiro-cli is allowed to mutate its store. */
+export function persistKiroCliSessionRecovery(snapshot: KiroCliSessionSnapshot): void {
+  if (existsSync(snapshot.recoveryPath)) {
+    throw new Error("Kiro CLI session recovery is already pending.");
+  }
+  const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+  const staged = `${snapshot.recoveryPath}.${nonce}.tmp`;
+  try {
+    writeFileSync(staged, Buffer.concat([
+      KIRO_CLI_RECOVERY_HEADER,
+      Buffer.from(`${process.pid}\n`, "utf8"),
+      snapshot.database,
+    ]), { flag: "wx", mode: 0o600 });
+    try { chmodSync(staged, 0o600); } catch { /* platform may ignore chmod */ }
+    const fd = openSync(staged, "r+");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    // A hard link publishes the fsynced inode atomically and, unlike rename, can never replace
+    // another process's live recovery transaction if both raced past the initial existence check.
+    linkSync(staged, snapshot.recoveryPath);
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+/** Remove recovery data only after the corresponding login transaction has settled. */
+export function discardKiroCliSessionRecovery(snapshot: KiroCliSessionSnapshot): void {
+  rmSync(snapshot.recoveryPath, { force: true });
+}
+
+function isKiroRecoveryOwnerAlive(ownerPid: number): boolean {
+  if (ownerPid === process.pid) return true;
+  try {
+    process.kill(ownerPid, 0);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error) return error.code !== "ESRCH";
+    return true;
+  }
+}
+
+/** Restore a previously captured CLI database after every kiro-cli child process has exited. */
+export function restoreKiroCliSession(snapshot: KiroCliSessionSnapshot): void {
+  const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+  const staged = `${snapshot.path}.ocx-restore.${nonce}.tmp`;
+  const displacedBase = `${snapshot.path}.ocx-restore.${nonce}.new`;
+  const displaced: Array<{ current: string; backup: string }> = [];
+  let published = false;
+  try {
+    writeFileSync(staged, snapshot.database, { mode: 0o600 });
+    try { chmodSync(staged, 0o600); } catch { /* platform may ignore chmod */ }
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      const current = `${snapshot.path}${suffix}`;
+      if (!existsSync(current)) continue;
+      const backup = `${displacedBase}${suffix || ".db"}`;
+      renameSync(current, backup);
+      displaced.push({ current, backup });
+    }
+    renameSync(staged, snapshot.path);
+    published = true;
+  } catch (error) {
+    const recoveryErrors: unknown[] = [];
+    for (const { current, backup } of [...displaced].reverse()) {
+      if (!existsSync(backup) || existsSync(current)) continue;
+      try { renameSync(backup, current); } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    }
+    if (recoveryErrors.length > 0) throw new AggregateError([error, ...recoveryErrors], "Kiro CLI session restore failed during rollback.");
+    throw error;
+  } finally {
+    rmSync(staged, { force: true });
+    if (published) {
+      for (const { backup } of displaced) {
+        try { rmSync(backup, { force: true }); } catch { /* restored database is already published */ }
+      }
+    }
+  }
+}
+
+/** Restore a transaction abandoned by a crashed process before starting another forced login. */
+export function restoreStaleKiroCliSessionRecovery(): boolean {
+  for (const { path } of sqliteEntries()) {
+    const recoveryPath = `${path}${KIRO_CLI_RECOVERY_SUFFIX}`;
+    if (!existsSync(recoveryPath)) continue;
+    const payload = readFileSync(recoveryPath);
+    const ownerEnd = payload.indexOf(0x0a, KIRO_CLI_RECOVERY_HEADER.length);
+    const ownerPid = ownerEnd > KIRO_CLI_RECOVERY_HEADER.length
+      ? Number(payload.subarray(KIRO_CLI_RECOVERY_HEADER.length, ownerEnd).toString("utf8"))
+      : Number.NaN;
+    const database = ownerEnd >= 0 ? payload.subarray(ownerEnd + 1) : Buffer.alloc(0);
+    if (
+      !payload.subarray(0, KIRO_CLI_RECOVERY_HEADER.length).equals(KIRO_CLI_RECOVERY_HEADER) ||
+      !Number.isSafeInteger(ownerPid) || ownerPid <= 0 ||
+      !database.subarray(0, SQLITE_DATABASE_HEADER.length).equals(SQLITE_DATABASE_HEADER)
+    ) {
+      throw new Error(
+        `Kiro CLI session recovery data is invalid: ${recoveryPath}. Remove this file to continue.`,
+      );
+    }
+    if (isKiroRecoveryOwnerAlive(ownerPid)) {
+      throw new Error(
+        `Another Kiro CLI login transaction is still in progress (pid ${ownerPid}, ${recoveryPath}).`,
+      );
+    }
+    const snapshot: KiroCliSessionSnapshot = {
+      path,
+      database,
+      recoveryPath,
+    };
+    restoreKiroCliSession(snapshot);
+    discardKiroCliSessionRecovery(snapshot);
+    return true;
+  }
+  return false;
 }
