@@ -87,7 +87,12 @@ OAuth 凭据中带有稳定账号 id 或邮箱的提供商可以保存多个登�
 
 ### Kiro 凭据导入
 
-普通的 `ocx login kiro` 导入会以只读方式打开 CLI SQLite 数据库，不修改数据库、WAL 或 SHM。**添加账户**的回滚是独立流程：恢复之前的快照时会替换数据库，并删除当前的 WAL、SHM 和 journal 边车文件。
+普通的 `ocx login kiro` 导入会以只读方式打开 CLI SQLite 数据库，不修改数据库、WAL 或 SHM。
+
+- `KIROCLI_DB_PATH` 用于选择非标准位置的 Kiro CLI SQLite 数据库；指定的数据库必须已经存在。
+- `KIROCLI_TOKEN_KEY` 在存在多个含糊的令牌行时选择确切的 `auth_kv` 行键。缺少选择值时，登录会失败而不会猜测。
+
+导入的凭据会保存到 `~/.opencodex/auth.json`。**添加账户**的回滚是独立流程：恢复之前的快照时会替换数据库，并删除当前的 WAL、SHM 和 journal 边车文件。
 
 ## 3. API 密钥目录
 

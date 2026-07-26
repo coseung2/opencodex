@@ -422,10 +422,14 @@ export function restoreStaleKiroCliSessionRecovery(): boolean {
       !Number.isSafeInteger(ownerPid) || ownerPid <= 0 ||
       !database.subarray(0, SQLITE_DATABASE_HEADER.length).equals(SQLITE_DATABASE_HEADER)
     ) {
-      throw new Error("Kiro CLI session recovery data is invalid.");
+      throw new Error(
+        `Kiro CLI session recovery data is invalid: ${recoveryPath}. Remove this file to continue.`,
+      );
     }
     if (isKiroRecoveryOwnerAlive(ownerPid)) {
-      throw new Error("Another Kiro CLI login transaction is still in progress.");
+      throw new Error(
+        `Another Kiro CLI login transaction is still in progress (pid ${ownerPid}, ${recoveryPath}).`,
+      );
     }
     const snapshot: KiroCliSessionSnapshot = {
       path,

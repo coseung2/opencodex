@@ -99,13 +99,15 @@ Tokens stay in `~/.opencodex/auth.json`; `/api/oauth/accounts` returns masked me
 ### Kiro credential import
 
 The `ocx login kiro` import path searches the platform Kiro CLI stores and opens SQLite databases
-read-only. Two environment variables make selection explicit without copying credentials into
-opencodex:
+read-only. Two environment variables make the source and token row selection explicit:
 
 - `KIROCLI_DB_PATH` selects a nonstandard Kiro CLI SQLite database. The path must already exist;
   during this import path, opencodex does not create or modify the database, WAL, or SHM files.
 - `KIROCLI_TOKEN_KEY` selects the exact `auth_kv` token key when a database contains multiple
   otherwise ambiguous token rows. A missing selection fails login instead of guessing.
+
+After a successful import, opencodex persists the imported credential to
+`~/.opencodex/auth.json`.
 
 Keep these variables and the selected database private. Do not attach database files or raw login
 diagnostics to bug reports.

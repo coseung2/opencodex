@@ -308,12 +308,16 @@ describe("kiro oauth — import-first", () => {
       .map(suffix => readFileSync(`${kiroCliDbPath()}${suffix}`));
 
     let liveOwnerRunnerCalled = false;
-    await expect(loginKiro({}, {
+    const liveOwnerFailure = await loginKiro({}, {
       cliRunner: async () => {
         liveOwnerRunnerCalled = true;
         return { exitCode: 0, stdout: "" };
       },
-    })).rejects.toThrow(/still in progress/i);
+    }).catch((error: unknown) => error);
+    expect(liveOwnerFailure).toBeInstanceOf(Error);
+    expect((liveOwnerFailure as Error).message).toContain("still in progress");
+    expect((liveOwnerFailure as Error).message).toContain(`pid ${process.pid}`);
+    expect((liveOwnerFailure as Error).message).toContain(kiroCliRecoveryPath());
     expect(liveOwnerRunnerCalled).toBe(false);
     expect(existsSync(kiroCliRecoveryPath())).toBe(true);
     expect(["", "-wal", "-shm", "-journal", ".opencodex-recovery"]
@@ -340,6 +344,27 @@ describe("kiro oauth — import-first", () => {
     expect(["-wal", "-shm", "-journal"].map(suffix => existsSync(`${kiroCliDbPath()}${suffix}`))).toEqual([false, false, false]);
     expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
     expect(existsSync(kiroCliRecoveryPath())).toBe(false);
+  });
+
+  test("invalid recovery data names the file the operator must remove", async () => {
+    seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
+    writeFileSync(kiroCliRecoveryPath(), "not a recovery database", { mode: 0o600 });
+    let runnerCalled = false;
+
+    const failure = await loginKiro({}, {
+      cliRunner: async () => {
+        runnerCalled = true;
+        return { exitCode: 0, stdout: "" };
+      },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("recovery data is invalid");
+    expect((failure as Error).message).toContain(kiroCliRecoveryPath());
+    expect((failure as Error).message).toContain("Remove this file to continue");
+    expect(runnerCalled).toBe(false);
+    expect(readKiroCliSqlite()).toMatchObject({ access: "aoa-prior", refresh: "rt-prior" });
+    expect(existsSync(kiroCliRecoveryPath())).toBe(true);
   });
 
   test("force login cancellation during browser login restores the prior Kiro CLI session", async () => {
