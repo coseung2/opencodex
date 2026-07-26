@@ -85,11 +85,7 @@ ocx logout <provider>
 | `xai` | `openai-chat` | `https://api.x.ai/v1` | Live-first Grok catalog; `grok-4.5` is the fallback default. |
 | `anthropic` | `anthropic` | `https://api.anthropic.com` | Claude models; live model list fetched from `/v1/models`. |
 | `kimi` | `openai-chat` | `https://api.kimi.com/coding/v1` | Kimi K2.7/K2.6/K2.5 coding models. |
-<<<<<<< HEAD
-| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed `kiro-cli` session; **Add account** logs `kiro-cli` out, starts a fresh browser login (switching the account `kiro-cli` itself uses), and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved, and cancellation or failure restores the previous `kiro-cli` session. |
-=======
-| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Import-first login reuses the installed `kiro-cli` session — requires the Kiro CLI installed (`curl -fsSL https://cli.kiro.dev/install | bash`) and signed in via `kiro-cli login`. |
->>>>>>> upstream/dev
+| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed, signed-in `kiro-cli` session (install with `curl -fsSL https://cli.kiro.dev/install | bash`, then run `kiro-cli login`). **Add account** logs `kiro-cli` out, starts a fresh browser login that switches the account used by `kiro-cli`, and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved, and cancellation or failure restores the previous `kiro-cli` session. |
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
@@ -147,17 +143,12 @@ and WARN rows that include a recovery Action. When an OAuth provider account nee
 
 ### Kiro credential import
 
-<<<<<<< HEAD
-The `ocx login kiro` import path searches the platform Kiro CLI stores and opens SQLite databases
-read-only. Two environment variables make the source and token row selection explicit:
-=======
 Kiro login expects the Kiro CLI: install it (`curl -fsSL https://cli.kiro.dev/install | bash`)
-and sign in with `kiro-cli login` first. Without a kiro-cli session, `ocx login kiro` falls
+and sign in with `kiro-cli login` first. Without a `kiro-cli` session, `ocx login kiro` falls
 back to a pasted access token or the `KIRO_ACCESS_TOKEN` environment variable.
 
-`ocx login kiro` searches the platform Kiro CLI stores and opens SQLite databases read-only. Two
-environment variables make selection explicit without copying credentials into opencodex:
->>>>>>> upstream/dev
+The `ocx login kiro` import path searches the platform Kiro CLI stores and opens SQLite databases
+read-only. Two environment variables make the source and token row selection explicit:
 
 - `KIROCLI_DB_PATH` selects a nonstandard Kiro CLI SQLite database. The path must already exist;
   during this import path, opencodex does not create or modify the database, WAL, or SHM files.

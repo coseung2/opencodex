@@ -61,7 +61,11 @@ export interface LoginOpts { forceLogin?: boolean; /** When set, persist into th
 
 interface OAuthProviderDef {
   login(ctrl: OAuthController, opts?: LoginOpts): Promise<OAuthCredentials>;
-  refresh(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials>;
+  refresh(
+    refreshToken: string,
+    signal?: AbortSignal,
+    credential?: OAuthCredentials,
+  ): Promise<OAuthCredentials>;
   /** provider entry written into config.json on first login. */
   providerConfig: OcxProviderConfig;
   defaultModel: string;
@@ -110,7 +114,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
   },
   kiro: {
     login: (ctrl, opts) => loginKiro(ctrl, { forceLogin: opts?.forceLogin }),
-    refresh: (rt, signal) => refreshKiroToken(rt, signal),
+    refresh: (rt, signal, credential) => refreshKiroToken(rt, signal, credential),
     providerConfig: oauthConfig("kiro"),
     defaultModel: oauthDefaultModel("kiro"),
   },
@@ -305,6 +309,7 @@ function merged(fresh: OAuthCredentials, previous: OAuthCredentials): OAuthCrede
     ...(fresh.apiBaseUrl === undefined && previous.apiBaseUrl ? { apiBaseUrl: previous.apiBaseUrl } : {}),
     ...(fresh.email === undefined && previous.email ? { email: previous.email } : {}),
     ...(fresh.accountId === undefined && previous.accountId ? { accountId: previous.accountId } : {}),
+    ...(fresh.kiro === undefined && previous.kiro ? { kiro: previous.kiro } : {}),
   };
 }
 export async function refreshXaiAccountWithLock(provider:string,accountId:string,def:OAuthProviderDef,callerCredential:OAuthCredentials,deps:XaiRefreshDeps={}):Promise<string>{const now=deps.now??Date.now;const guard=await(deps.intentLock??createOAuthRefreshIntentLock(provider,accountId)).acquire();try{const stored=getAccountCredential(provider,accountId);if(!stored)throw new OAuthLoginRequiredError(provider);const active=getAccountSet(provider)?.activeAccountId===accountId,candidate=authoritative(stored,active,now);if(credentialGeneration(candidate)!==credentialGeneration(callerCredential)&&candidate.expires>now()+REFRESH_SKEW_MS){if(credentialGeneration(candidate)!==credentialGeneration(stored)){const o=await mergeAccountCredential(provider,accountId,candidate,{expectedGeneration:credentialGeneration(stored),afterPrePersistRead:deps.afterPrePersistRead});if(o.superseded){if(o.stored.expires>now()+REFRESH_SKEW_MS)return o.stored.access;throw new OAuthLoginRequiredError(provider);}}return candidate.access;}if(cached(provider,accountId,candidate,now))throw new OAuthLoginRequiredError(provider);const generation=credentialGeneration(candidate);try{const fresh=merged(await def.refresh(candidate.refresh),candidate);const o=await mergeAccountCredential(provider,accountId,fresh,{expectedGeneration:generation,afterPrePersistRead:deps.afterPrePersistRead});if(o.superseded){if(o.stored.expires>now()+REFRESH_SKEW_MS)return o.stored.access;throw new OAuthLoginRequiredError(provider);}permanentRefreshFailures.delete(verdictKey(provider,accountId,candidate));if(candidate.source==="local-cli")console.warn(XAI_LOCAL_CLI_DETACH_WARNING);return fresh.access;}catch(error){if(!terminal(error))throw error;permanentRefreshFailures.set(verdictKey(provider,accountId,candidate),now()+XAI_PERMANENT_FAILURE_TTL_MS);await markAccountNeedsReauthIfGeneration(provider,accountId,generation);throw new OAuthLoginRequiredError(provider);}}finally{guard.release();}}
@@ -403,7 +408,7 @@ export async function refreshGenericAccountWithLock(
     }
     const generation = credentialGeneration(stored);
     try {
-      const fresh = merged(await def.refresh(stored.refresh), stored);
+      const fresh = merged(await def.refresh(stored.refresh, undefined, stored), stored);
       const outcome = await mergeAccountCredential(provider, accountId, fresh, {
         expectedGeneration: generation,
         afterPrePersistRead: deps.afterPrePersistRead,
@@ -415,7 +420,7 @@ export async function refreshGenericAccountWithLock(
       logOAuthEvent("OAuth credentials rotated and persisted", { provider, accountId });
       return fresh.access;
     } catch (error) {
-      if (!isTerminalRefreshError(error)) throw error;
+      if (!terminal(error)) throw error;
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation);
       throw new OAuthLoginRequiredError(provider);
     }
@@ -432,50 +437,7 @@ async function refreshAndPersistAccessToken(
 ): Promise<string> {
   if (provider === "xai") return refreshXaiAccountWithLock(provider, accountId, def, cred);
   if (provider === "anthropic") return refreshAnthropicAccountWithLock(provider, accountId, def, cred);
-  const generation = credentialGeneration(cred);
-  try {
-<<<<<<< HEAD
-    const fresh = provider === "kiro"
-      ? await refreshKiroToken(cred.refresh, undefined, cred)
-      : await def.refresh(cred.refresh);
-    // Persist to THIS account (rotation-safe: new refresh token hits disk before use) without
-    // touching activeAccountId.
-    const next: OAuthCredentials = {
-      ...fresh,
-      source: fresh.source ?? cred.source ?? "oauth",
-      // Preserve a previously-discovered project id when a refresh-time re-discovery comes back empty
-      // (e.g. a transient network blip), so Antigravity does not lose its CCA project across refresh.
-      ...(fresh.projectId === undefined && cred.projectId ? { projectId: cred.projectId } : {}),
-      ...(fresh.apiBaseUrl === undefined && cred.apiBaseUrl ? { apiBaseUrl: cred.apiBaseUrl } : {}),
-      // Preserve identity fields the refresh response may omit, so identity matching stays stable.
-      ...(fresh.email === undefined && cred.email ? { email: cred.email } : {}),
-      ...(fresh.accountId === undefined && cred.accountId ? { accountId: cred.accountId } : {}),
-      ...(fresh.kiro === undefined && cred.kiro ? { kiro: cred.kiro } : {}),
-    };
-    const outcome = await mergeAccountCredential(provider, accountId, next, { expectedGeneration: generation });
-    if (outcome.superseded) {
-      if (outcome.stored.expires > Date.now() + REFRESH_SKEW_MS) return outcome.stored.access;
-      throw new OAuthLoginRequiredError(provider);
-    }
-    return next.access;
-  } catch (err) {
-    if (terminal(err)) {
-      await markAccountNeedsReauthIfGeneration(provider, accountId, generation);
-      throw new OAuthLoginRequiredError(provider);
-    }
-=======
-    return await refreshGenericAccountWithLock(provider, accountId, def, cred);
-  } catch (err) {
-    if (provider === "kiro" && isActive) {
-      const imported = readFreshKiroCliCredential();
-      if (imported) {
-        await saveCredential(provider, imported);
-        return imported.access;
-      }
-    }
->>>>>>> upstream/dev
-    throw err;
-  }
+  return refreshGenericAccountWithLock(provider, accountId, def, cred);
 }
 
 /**

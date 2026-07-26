@@ -152,6 +152,55 @@ describe("oauth refresh hardening", () => {
     expect(getCredential("kiro")?.source).not.toBe("local-cli");
   });
 
+  test("account-scoped Kiro OIDC refresh sends stored client registration and preserves metadata", async () => {
+  const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/account-scoped";
+  const urls: string[] = [];
+  const bodies: unknown[] = [];
+  globalThis.fetch = (async (input, init) => {
+    urls.push(String(input));
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({
+      accessToken: "aoa-oidc-fresh",
+      refreshToken: "rt-oidc-fresh",
+      expiresIn: 3600,
+    }), { status: 200 });
+  }) as typeof fetch;
+  await saveCredential("kiro", {
+    access: "aoa-oidc-old",
+    refresh: "rt-oidc-old",
+    expires: Date.now() - 1,
+    accountId: profileArn,
+    kiro: {
+      profileArn,
+      apiRegion: "eu-west-1",
+      ssoRegion: "eu-west-1",
+      clientId: "stored-client",
+      clientSecret: "stored-secret",
+    },
+  });
+
+  await expect(getValidAccessToken("kiro")).resolves.toBe("aoa-oidc-fresh");
+  expect(urls).toEqual(["https://oidc.eu-west-1.amazonaws.com/token"]);
+  expect(bodies).toEqual([{
+    grantType: "refresh_token",
+    clientId: "stored-client",
+    clientSecret: "stored-secret",
+    refreshToken: "rt-oidc-old",
+  }]);
+  expect(getCredential("kiro")).toMatchObject({
+    access: "aoa-oidc-fresh",
+    refresh: "rt-oidc-fresh",
+    accountId: profileArn,
+    kiro: {
+      profileArn,
+      apiRegion: "eu-west-1",
+      ssoRegion: "eu-west-1",
+      clientId: "stored-client",
+      clientSecret: "stored-secret",
+    },
+  });
+});
+
   test("failed Kiro refresh does not overwrite the stored account from local CLI", async () => {
     await saveCredential("kiro", { access: "aoa-old", refresh: "rt-old", expires: Date.now() - 1 });
     let calls = 0;
