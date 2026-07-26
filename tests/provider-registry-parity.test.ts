@@ -13,6 +13,7 @@ import {
   providerConfigSeed,
 } from "../src/providers/derive";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
+import { FREE_PROVIDER_DIRECTORY } from "../src/providers/free-directory";
 import { applyProviderConfigHints } from "../src/codex/catalog";
 import { routeModel } from "../src/router";
 import { resolveAdapter } from "../src/server";
@@ -234,6 +235,12 @@ describe("provider registry parity", () => {
       expect(entry?.defaultModel).toBe("MiniMax-M3");
       expect(entry?.models).toEqual(minimaxModels);
       expect(entry?.modelContextWindows?.["MiniMax-M3"]).toBe(1_000_000);
+      expect(entry?.modelReasoningEfforts?.["MiniMax-M3"]).toEqual(["low", "medium", "high", "xhigh", "max"]);
+      expect(entry?.modelDefaultReasoningEfforts?.["MiniMax-M3"]).toBe("medium");
+      expect(entry?.modelReasoningEffortMap?.["MiniMax-M3"]).toMatchObject({ low: "disabled", medium: "adaptive", high: "adaptive" });
+      expect(entry?.preserveReasoningContentModels).toEqual(minimaxModels);
+      expect(entry?.reasoningSplitModels).toEqual(minimaxModels);
+      expect(entry?.thinkingToggleModels).toEqual(["MiniMax-M3"]);
       for (const modelId of minimaxModels.slice(1)) {
         expect(entry?.modelContextWindows?.[modelId]).toBe(204_800);
       }
@@ -783,5 +790,58 @@ describe("provider registry parity", () => {
     // The catalog slug flattens the vendor separator, but the routed model id itself is untouched,
     // so the request still reaches BizRouter as `openai/gpt-5.6-sol`.
     expect(entries.find(e => e.slug === "bizrouter/openai-gpt-5.6-sol")).toBeTruthy();
+  });
+});
+
+describe("free-provider directory isolation", () => {
+  test("directory metadata never becomes a canonical runtime provider", () => {
+    // The directory is a catalog of endpoints we have not adopted. If its ids reached
+    // PROVIDER_REGISTRY, routedProviderConfig() would canonicalize a user's same-named provider
+    // onto the directory's adapter and baseUrl — for `qoder` that baseUrl is the empty string,
+    // so the request would lose its destination entirely.
+    const directoryOnlyIds = FREE_PROVIDER_DIRECTORY
+      .filter(entry => entry.supportLevel === "reference")
+      .map(entry => entry.id);
+    expect(directoryOnlyIds.length).toBeGreaterThan(0);
+    expect(directoryOnlyIds).toContain("qoder");
+
+    const registryIds = new Set(PROVIDER_REGISTRY.map(entry => entry.id));
+    for (const id of directoryOnlyIds) {
+      expect(registryIds.has(id)).toBe(false);
+    }
+  });
+
+  test("a custom provider named after a directory entry keeps its own destination", () => {
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: "qoder",
+      providers: {
+        qoder: {
+          adapter: "openai-chat",
+          baseUrl: "https://custom.example.test/v1",
+          apiKey: "test-key",
+          liveModels: true,
+        },
+      },
+    };
+
+    const routed = routeModel(config, "qoder/custom-model");
+    expect(routed.provider).toMatchObject({
+      adapter: "openai-chat",
+      baseUrl: "https://custom.example.test/v1",
+      liveModels: true,
+    });
+    expect(routed.modelId).toBe("custom-model");
+  });
+
+  test("only rows with checked provenance claim a verification date", () => {
+    for (const entry of FREE_PROVIDER_DIRECTORY) {
+      if (entry.verification === "unverified") {
+        expect(entry.lastVerified).toBeUndefined();
+      } else {
+        expect(entry.lastVerified).toBeTruthy();
+        expect(entry.documentationUrl ?? entry.modelsUrl ?? entry.dashboardUrl).toBeTruthy();
+      }
+    }
   });
 });

@@ -56,6 +56,14 @@ existing account-health state. Unknown Images subpaths still reach the JSON `/v1
 On non-loopback binds, data-plane authentication and origin policy cover both Images routes just as
 they cover `/v1/responses`; clients must send the configured `x-opencodex-api-key`.
 
+The API-key `openai-responses` path also prevents the standalone client tool from colliding with the
+hosted Responses tool. When a request declares `image_gen.imagegen` (as a flat function or an
+`image_gen` namespace), the adapter drops hosted `image_generation` while preserving unrelated
+tools. Conflict discovery spans both top-level `body.tools` and Codex Desktop Responses Lite
+`input[].type = "additional_tools"` containers because the platform validates their merged tool
+namespace. ChatGPT forward mode preserves the pair because that backend accepts it and owns native
+image generation.
+
 ## Cursor Native Exec
 
 Cursor's experimental live transport can receive server-driven local read/write/delete/ls/grep,
@@ -109,7 +117,18 @@ The web-search loop requests `stream: true` for every routed-model iteration, bu
 needed to decide whether to intercept a synthetic search call. Text explicitly phased as
 `commentary` is safe to forward live because it cannot terminate the turn; this keeps Kiro's
 progress visible. A Kiro stream EOF after user-facing text or reasoning gets one bounded completion
-retry, because the upstream text event does not distinguish progress from a final answer. Synthetic search calls, real tool calls,
+retry, because the upstream text event does not distinguish progress from a final answer — but only
+when the terminal `metadataEvent` carries NO native `stopReason`. A native `END_TURN` or
+`STOP_SEQUENCE` is authoritative and ends the turn with that text as the final answer. Any other
+explicit reason already terminated the inference upstream and is reported as a terminal state rather
+than converted into another model request: output-token limits become continuable incomplete output,
+context-window exhaustion becomes a non-retryable `context_length_exceeded` error, filtering becomes
+filtered incomplete output, and a `TOOL_USE` without an actual tool call is a contradiction. Since
+the stop reason arrives only at the end of the stream, `required`-mode assistant text is held inside
+the adapter until a real tool call starts (released as `commentary`) or the stream ends (released as
+`final_answer` on `END_TURN` or `STOP_SEQUENCE`, otherwise as `commentary`). Each held event yields a `heartbeat` in its place so the stall watchdog stays
+armed. This trades token-by-token rendering of a tool-enabled turn's answer for removing the extra
+inference request that the same turn previously always paid. Synthetic search calls, real tool calls,
 and terminal events remain buffered until the iteration validates. Only the first iteration's final
 response headers/status and any 429 key rotations are handled eagerly. A failure before downstream
 SSE starts returns non-2xx JSON; once headers have started the final response, a generation failure

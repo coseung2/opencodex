@@ -621,6 +621,77 @@ describe("OpenAI Responses hosted-tool name conflicts", () => {
     expect(body.tools.some(t => t.type === "image_generation")).toBe(false);
   });
 
+  test("keyed responses-lite strips hosted image_generation from nested additional_tools", () => {
+    const adapter = createResponsesPassthroughAdapter(keyedProvider);
+    const request = adapter.buildRequest({
+      modelId: "gpt-5.6-sol",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "gpt-5.6-sol",
+        input: [
+          {
+            type: "additional_tools",
+            role: "developer",
+            tools: [
+              { type: "namespace", name: "image_gen", tools: [] },
+              { type: "image_generation" },
+              { type: "web_search" },
+            ],
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        ],
+      },
+    }, meta);
+    const body = JSON.parse(request.body) as {
+      input: Array<{ type: string; role?: string; tools?: Array<{ type: string; name?: string }> }>;
+    };
+    const additionalTools = body.input.find(item => item.type === "additional_tools");
+
+    // Preserve the input entry and unrelated tools while removing only the hosted conflict.
+    expect(additionalTools).toBeDefined();
+    expect(additionalTools?.role).toBe("developer");
+    expect(additionalTools?.tools?.some(t => t.type === "image_generation")).toBe(false);
+    expect(additionalTools?.tools?.some(t => t.type === "namespace" && t.name === "image_gen")).toBe(true);
+    expect(additionalTools?.tools?.some(t => t.type === "web_search")).toBe(true);
+    expect(body.input.some(item => item.type === "message")).toBe(true);
+  });
+
+  test("keyed responses-lite detects image_gen conflicts across top-level and nested tool groups", () => {
+    const adapter = createResponsesPassthroughAdapter(keyedProvider);
+    const request = adapter.buildRequest({
+      modelId: "gpt-5.6-sol",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "gpt-5.6-sol",
+        tools: [
+          { type: "image_generation" },
+          { type: "web_search" },
+        ],
+        input: [
+          {
+            type: "additional_tools",
+            role: "developer",
+            tools: [{ type: "function", name: "image_gen.imagegen", parameters: {} }],
+          },
+        ],
+      },
+    }, meta);
+    const body = JSON.parse(request.body) as {
+      tools: Array<{ type: string }>;
+      input: Array<{ type: string; tools?: Array<{ type: string; name?: string }> }>;
+    };
+    const additionalTools = body.input.find(item => item.type === "additional_tools");
+
+    // The platform validates one merged namespace even when declarations use different groups.
+    expect(body.tools.some(t => t.type === "image_generation")).toBe(false);
+    expect(body.tools.some(t => t.type === "web_search")).toBe(true);
+    expect(additionalTools?.tools?.some(t => t.name === "image_gen.imagegen")).toBe(true);
+  });
+
   test("keyed platform keeps hosted image_generation when no conflicting tool is declared", () => {
     const adapter = createResponsesPassthroughAdapter(keyedProvider);
     const request = adapter.buildRequest({
@@ -665,5 +736,71 @@ describe("OpenAI Responses hosted-tool name conflicts", () => {
     expect(body.tools).toHaveLength(2);
     expect(body.tools.some(t => t.type === "image_generation")).toBe(true);
     expect(body.tools.some(t => t.type === "function" && t.name === "image_gen.imagegen")).toBe(true);
+  });
+});
+
+describe("OpenAI Responses forward-mode unsupported param stripping", () => {
+  const meta = { headers: new Headers({ authorization: "Bearer token" }) };
+  const rawBody = {
+    model: "gpt-5.6-sol",
+    input: [{ role: "user", content: [{ type: "input_text", text: "ping" }] }],
+    stream: true,
+    store: false,
+    max_output_tokens: 32000,
+    metadata: { user_id: "u-1" },
+    reasoning: { effort: "low" },
+  };
+
+  test("forward mode strips max_output_tokens and metadata", () => {
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const request = adapter.buildRequest({
+      modelId: "gpt-5.6-sol",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { ...rawBody },
+    }, meta);
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+
+    expect(body).not.toHaveProperty("max_output_tokens");
+    expect(body).not.toHaveProperty("metadata");
+    expect(body.reasoning).toEqual({ effort: "low" });
+    expect(body.model).toBe("gpt-5.6-sol");
+  });
+
+  test("forward mode is a no-op when neither field is present", () => {
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const { max_output_tokens: _m, metadata: _d, ...codexBody } = rawBody;
+    const request = adapter.buildRequest({
+      modelId: "gpt-5.6-sol",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { ...codexBody },
+    }, meta);
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+
+    expect(body.reasoning).toEqual({ effort: "low" });
+    expect(body.store).toBe(false);
+  });
+
+  test("key-auth mode preserves max_output_tokens and metadata", () => {
+    const adapter = createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://api.openai.example/v1",
+      authMode: "key",
+      apiKey: "sk-test",
+    });
+    const request = adapter.buildRequest({
+      modelId: "gpt-5.6-sol",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { ...rawBody },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as Record<string, unknown>;
+
+    expect(body.max_output_tokens).toBe(32000);
+    expect(body.metadata).toEqual({ user_id: "u-1" });
   });
 });

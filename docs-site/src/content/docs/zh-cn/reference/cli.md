@@ -63,7 +63,8 @@ ocx eject back
 ### `ocx status [--json]`
 
 打印只读诊断摘要：代理 PID、`/healthz` 可达性、仪表盘 URL、配置路径、默认 provider、Codex
-自动启动设置、服务状态和 shim 状态。
+自动启动设置、服务状态、shim 状态以及隐藏用户名后的实际 Codex home。仅当命中明确的高置信度
+Windows Orca runtime-home 特征时，才会针对 App home 不一致给出可执行警告，但不会自动修改 `CODEX_HOME`。
 
 使用 `--json` 可获得机器可读的只读诊断契约：
 
@@ -95,6 +96,13 @@ ocx status --json
   },
   "runtime": {
     "source": "bundled"
+  },
+  "codexHome": {
+    "effectiveCodexHome": "C:\\Users\\[USER]\\.codex",
+    "appCodexHome": "C:\\Users\\[USER]\\.codex",
+    "mismatch": false,
+    "warning": null,
+    "action": null
   },
   "codexAutostart": true,
   "defaultProvider": "openai",
@@ -232,7 +240,7 @@ OAuth 账号显示为 `Account N`，plan/label 列按 plan → 脱敏邮箱 → 
 
 不指定 provider 时，会列出 Codex pool、OAuth 账号和已配置的 API-key pool。除非传入 `--all`，
 否则跳过空 provider；指定 provider 时只读取对应凭据 family。普通输出的列为
-`PROVIDER TYPE ID PLAN/LABEL STATUS`，已 pin 的 Codex 行标记为 `next session`。当存在已保存的
+`PROVIDER TYPE ID PLAN/LABEL STATUS`，手动选择的 Codex 行标记为 `selected`。当存在已保存的
 Kiro 账号时，输出会说明它只有一个登录 slot，再次登录会替换当前账号。结果为空仍算成功。`--json` 返回：
 
 ```text
@@ -389,7 +397,9 @@ ocx codex-shim uninstall
 ### `ocx doctor`
 
 运行只读的环境与连接诊断：状态路径和文件系统类型、WSL 双重安装、代理环境/配置、ChatGPT
-可达性、Codex plugin 与项目配置警告，以及待处理的历史迁移。它会打印修复建议，但不会执行。
+可达性、Codex plugin 与项目配置警告，以及待处理的历史迁移。Codex app-home targeting 部分还会
+窄范围检测 Windows Orca runtime-home 不一致，并在需要时说明如何迁移服务。新诊断中的路径会隐藏
+OS 用户名。它会打印修复建议，但不会执行。
 
 ### `ocx debug [provider|usage …]`
 

@@ -49,7 +49,7 @@ no-replace 方式创建 `config.json.pre-openai-tiers-v2.bak`，并把已知旧 
 | `codexShimAutoRestore?` | `boolean` | `true` | 已完成的外部 Codex 更新替换此前安装的 shim 时自动恢复。若要关闭，请设为 `false`，或为进程设置 `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | 可逆的 Codex App 历史兼容模式。opencodex 会备份原始 Codex thread metadata，把旧 OpenAI interactive row 重映射到 `opencodex`，并暂时把 opencodex 创建的 `exec` row 提升成 App 可见 source。`ocx stop` / `ocx restore` 会恢复已备份的 OpenAI row，并把剩余 opencodex user thread 转回 OpenAI，使原生 Codex 在从 `config.toml` 移除代理后仍能继续这些 thread。设为 `false` 可退出该模式。 |
 | `codexAccounts?` | `CodexAccount[]` | `[]` | Codex Auth 仪表盘管理的 ChatGPT/Codex pool account metadata。secret 单独存放在 `codex-accounts.json`。 |
-| `activeCodexAccountId?` | `string` | — | 下一个新 Codex thread 使用的 pool account。已有 thread affinity 继续保留原账号。 |
+| `activeCodexAccountId?` | `string` | — | 手动选择的 pool account。选择时清除已有 thread affinity，并从下一次请求开始生效；进行中的请求保留原账号。 |
 | `autoSwitchThreshold?` | `number` | `80` | 新 session 自动切换的 usage 百分比 threshold。分数取已知 5 小时、周或 30 天 quota window 中最高的一项。设为 `0` 可禁用 quota 自动切换。 |
 | `upstreamFailoverThreshold?` | `number` | `3` | 连续发生多少次临时上游失败后，让后续新 session failover 到其他合格 pool account。设为 `0` 可禁用失败切换。 |
 | `modelCacheTtlMs?` | `number` | `300000` | 每个 provider 的 `/models` 缓存新鲜度窗口（5 分钟）。 |
@@ -126,7 +126,7 @@ x-opencodex-api-key: your-secret-token
 | Field | Type | 含义 |
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`、`openai-responses`、`anthropic`、`google`、`kiro`、`cursor`、`azure-openai`（或别名 `azure`）之一。 |
-| `baseUrl` | `string` | 上游 API base URL。 |
+| `baseUrl` | `string` | 上游 API base URL。端点固定的内置 provider 会忽略它 —— 见[固定的 provider 端点](#固定的-provider-端点)。 |
 | `responsesPath?` | `string` | `key` 认证的 `openai-responses` 请求可选相对 resource path。必须以 `/` 开头，且不得包含 URL scheme、query 或 fragment。省略时保留原有的 `/v1/responses` URL 构造。 |
 | `disabled?` | `boolean` | 配置保留在磁盘上，但从路由和模型/目录列表排除。 |
 | `apiKey?` | `string` | API key，或在请求时解析的 `${ENV_VAR}` / `$ENV_VAR` 引用。 |
@@ -166,6 +166,26 @@ x-opencodex-api-key: your-secret-token
 | `mcpServers?` | `Record<string,CursorMcpServerConfig>` | **仅 Cursor。** 通过 stdio 启动或 Streamable HTTP 连接的 MCP server；字段见下文。 |
 | `desktopExecutor?` | `DesktopExecutorConfig` | **仅 Cursor。** 外部 computer-use/record-screen 命令；字段见下文。 |
 | `unsafeAllowNativeLocalExec?` | `boolean` | **仅 Cursor adapter。** 允许 Cursor server 驱动本地 `read` / `write` / `delete` / `ls` / `grep` / `shell` / `fetch` 的 opt-in escape hatch。默认 `false`，防止远程 Cursor message 绕过 Codex 审批与 sandbox。见下文 [Cursor provider](#cursor-provideradapter-cursor)。 |
+
+### 固定的 provider 端点
+
+路由会在任何 adapter 介入之前解析 provider 的端点；对大多数内置 provider 而言，registry 自带的端点
+优先于你在配置里写的 `baseUrl`。在这一步保留配置 URL 的只有三类：
+
+- 显式开启覆盖的 provider —— `ollama`、`vllm`、`lm-studio`、`litellm`、`qwen-cloud` 和
+  `alibaba-token-plan-intl`；
+- registry 端点本身是待填模板的 provider，例如 `azure-openai` 和 `cloudflare-ai-gateway`；
+- 你自己定义的 provider，它们根本不在 registry 中。
+
+之后 adapter 仍可能调整已解析的 URL。例如 `kiro` adapter 在 host 为标准
+`runtime.{region}.kiro.dev` 时，会改用导入凭据所属的 API region。逐个 adapter 的规则见
+[Adapters](/zh-cn/reference/adapters/)。
+
+当路由丢弃配置的 `baseUrl` 时，opencodex 会打印一条警告：registry 端点会完整列出，而你配置的那个
+只列出 origin —— 原本带路径时显示为 `https://host/…`。配置的路径本身可能就是凭据，因此一段都不会记录。
+此时要么删掉 `baseUrl`（路由本来就只会使用 registry 端点），要么改用端点与目标 URL 相符的 provider。
+当同一产品分区域运营时，选对条目尤其重要：`alibaba-token-plan` 固定指向北京，而
+`alibaba-token-plan-intl` 覆盖国际端点，为其中一个签发的 key 在另一个上会被拒绝。
 
 ## Cursor provider（`adapter: "cursor"`）
 

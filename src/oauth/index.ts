@@ -16,6 +16,27 @@ import { deriveOAuthDefaultModel, deriveOAuthProviderConfig } from "../providers
 import { effectiveGoogleMode } from "../providers/registry";
 import { resolveProviderTransport } from "../providers/xai-transport";
 import { detectClaudeCodeToken, detectGrokCliToken, hasComparableGrokIdentity, isSameGrokIdentity, shouldAdoptGrokGeneration } from "./local-token-detect";
+import { logOAuthEvent } from "./log";
+export {
+  CODEX_HEALTH_UNAVAILABLE_NOTE,
+  MASKED_ACCOUNT_FALLBACK,
+  collectOAuthHealthEntries,
+  collectOAuthHealthEntriesForCli,
+  detectOAuthWarning,
+  oauthAccountHealthFields,
+  oauthHealthLabel,
+  oauthHealthSummary,
+  projectCodexAccountHealth,
+  projectOAuthAccountHealth,
+  projectStoredOAuthAccountHealth,
+  type CodexHealthSource,
+  type OAuthAccountHealth,
+  type OAuthAccountHealthFields,
+  type OAuthCliHealthReport,
+  type OAuthHealthEntry,
+  type OAuthHealthLabel,
+} from "./health";
+export { OAUTH_REFRESH_LOCK_WAIT_MS, peekAuthStore, peekOAuthRefreshIntent } from "./store";
 
 const REFRESH_SKEW_MS = 60_000;
 export interface OAuthAccessSnapshot {
@@ -32,6 +53,7 @@ const XAI_PERMANENT_FAILURE_TTL_MS=30_000;
 const permanentRefreshFailures=new Map<string,number>();
 interface XaiRefreshDeps { intentLock?:ReturnType<typeof createOAuthRefreshIntentLock>; now?:()=>number; afterPrePersistRead?:()=>void|Promise<void> }
 interface AnthropicRefreshDeps { intentLock?:ReturnType<typeof createOAuthRefreshIntentLock>; now?:()=>number; afterPrePersistRead?:()=>void|Promise<void> }
+interface GenericRefreshDeps { intentLock?:ReturnType<typeof createOAuthRefreshIntentLock>; afterPrePersistRead?:()=>void|Promise<void> }
 function verdictKey(p:string,a:string,c:OAuthCredentials){return `${p}\0${a}\0${credentialGeneration(c)}`;}
 function cached(p:string,a:string,c:OAuthCredentials,now:()=>number){const k=verdictKey(p,a,c),u=permanentRefreshFailures.get(k);if(u===undefined)return false;if(u<=now()){permanentRefreshFailures.delete(k);return false;}return true;}
 
@@ -208,7 +230,10 @@ async function resolveAccessSnapshotForAccount(
 
   const key = `${provider}\u0000${accountId}`;
   const existing = tokenRefreshes.get(key);
-  if (existing) return existing;
+  if (existing) {
+    logOAuthEvent("OAuth refresh joined existing operation", { provider, accountId });
+    return existing;
+  }
 
   const refresh = (async (): Promise<OAuthAccessSnapshot> => {
     const accessToken = await refreshAndPersistAccessToken(provider, accountId, def, cred);
@@ -357,6 +382,48 @@ export async function refreshAnthropicAccountWithLock(
   }
 }
 
+export async function refreshGenericAccountWithLock(
+  provider: string,
+  accountId: string,
+  def: OAuthProviderDef,
+  callerCredential: OAuthCredentials,
+  deps: GenericRefreshDeps = {},
+): Promise<string> {
+  logOAuthEvent("OAuth refresh started", { provider, accountId });
+  const guard = await (deps.intentLock ?? createOAuthRefreshIntentLock(provider, accountId)).acquire();
+  try {
+    const stored = getAccountCredential(provider, accountId);
+    if (!stored) throw new OAuthLoginRequiredError(provider);
+    if (
+      credentialGeneration(stored) !== credentialGeneration(callerCredential)
+      && stored.expires > Date.now() + REFRESH_SKEW_MS
+    ) {
+      logOAuthEvent("OAuth refresh joined existing operation", { provider, accountId });
+      return stored.access;
+    }
+    const generation = credentialGeneration(stored);
+    try {
+      const fresh = merged(await def.refresh(stored.refresh), stored);
+      const outcome = await mergeAccountCredential(provider, accountId, fresh, {
+        expectedGeneration: generation,
+        afterPrePersistRead: deps.afterPrePersistRead,
+      });
+      if (outcome.superseded) {
+        if (outcome.stored.expires > Date.now() + REFRESH_SKEW_MS) return outcome.stored.access;
+        throw new OAuthLoginRequiredError(provider);
+      }
+      logOAuthEvent("OAuth credentials rotated and persisted", { provider, accountId });
+      return fresh.access;
+    } catch (error) {
+      if (!isTerminalRefreshError(error)) throw error;
+      await markAccountNeedsReauthIfGeneration(provider, accountId, generation);
+      throw new OAuthLoginRequiredError(provider);
+    }
+  } finally {
+    guard.release();
+  }
+}
+
 async function refreshAndPersistAccessToken(
   provider: string,
   accountId: string,
@@ -367,6 +434,7 @@ async function refreshAndPersistAccessToken(
   if (provider === "anthropic") return refreshAnthropicAccountWithLock(provider, accountId, def, cred);
   const generation = credentialGeneration(cred);
   try {
+<<<<<<< HEAD
     const fresh = provider === "kiro"
       ? await refreshKiroToken(cred.refresh, undefined, cred)
       : await def.refresh(cred.refresh);
@@ -395,6 +463,17 @@ async function refreshAndPersistAccessToken(
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation);
       throw new OAuthLoginRequiredError(provider);
     }
+=======
+    return await refreshGenericAccountWithLock(provider, accountId, def, cred);
+  } catch (err) {
+    if (provider === "kiro" && isActive) {
+      const imported = readFreshKiroCliCredential();
+      if (imported) {
+        await saveCredential(provider, imported);
+        return imported.access;
+      }
+    }
+>>>>>>> upstream/dev
     throw err;
   }
 }

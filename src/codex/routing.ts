@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { saveConfig } from "../config";
+import { saveConfigPreservingClaudeCode } from "../config";
 import { isCodexAccountGenerationLive, readCodexAccountRecord } from "./account-store";
 import { codexAccountLogLabel } from "./account-label";
 import { isCodexAccountUsable } from "./account-usability";
@@ -235,14 +235,8 @@ export function computeQuotaCooldownUntil(meta: CodexUpstreamOutcomeMeta = {}): 
  * Returns the lease id, or null when no probe may go out right now.
  */
 export function tryAcquireCodexQuotaProbeLease(accountId: string, now = Date.now()): string | null {
-  const health = upstreamHealth.get(accountId);
-  if (!health) return null;
-  const cooldownUntil = health.cooldownUntil;
-  if (typeof cooldownUntil !== "number" || !Number.isFinite(cooldownUntil) || cooldownUntil <= now) return null;
-  if (health.cooldownSource === "retry-after") return null;
-  if (health.probeLeaseId !== undefined) return null;
-  const origin = health.lastProbeAt ?? health.cooldownSince ?? cooldownUntil;
-  if (now - origin < CODEX_QUOTA_PROBE_INTERVAL_MS) return null;
+  if (!canAcquireCodexQuotaProbeLease(accountId, now)) return null;
+  const health = upstreamHealth.get(accountId)!;
   const probeLeaseId = randomUUID();
   upstreamHealth.set(accountId, {
     ...health,
@@ -251,6 +245,18 @@ export function tryAcquireCodexQuotaProbeLease(accountId: string, now = Date.now
     lastProbeAt: now,
   });
   return probeLeaseId;
+}
+
+/** Side-effect-free check mirroring {@link tryAcquireCodexQuotaProbeLease} eligibility. */
+export function canAcquireCodexQuotaProbeLease(accountId: string, now = Date.now()): boolean {
+  const health = upstreamHealth.get(accountId);
+  if (!health) return false;
+  const cooldownUntil = health.cooldownUntil;
+  if (typeof cooldownUntil !== "number" || !Number.isFinite(cooldownUntil) || cooldownUntil <= now) return false;
+  if (health.cooldownSource === "retry-after") return false;
+  if (health.probeLeaseId !== undefined) return false;
+  const origin = health.lastProbeAt ?? health.cooldownSince ?? cooldownUntil;
+  return now - origin >= CODEX_QUOTA_PROBE_INTERVAL_MS;
 }
 
 /**
@@ -299,13 +305,76 @@ function preservedCooldownFields(health: CodexUpstreamHealth | undefined): Parti
   return cooldownFields;
 }
 
+/** Manual selection resets transient routing evidence without bypassing a real 429 cooldown. */
+export function resetCodexRoutingForManualSelection(accountId: string): void {
+  clearThreadAccountMap();
+  const current = upstreamHealth.get(accountId);
+  if (!current) return;
+  const preserved = preservedCooldownFields(current);
+  if (Object.keys(preserved).length === 0) upstreamHealth.delete(accountId);
+  else upstreamHealth.set(accountId, { consecutiveFailures: 0, ...preserved });
+}
+
 export function getCodexAccountCooldownUntil(accountId: string, now = Date.now()): number | null {
   const cooldownUntil = upstreamHealth.get(accountId)?.cooldownUntil;
   return typeof cooldownUntil === "number" && Number.isFinite(cooldownUntil) && cooldownUntil > now ? cooldownUntil : null;
 }
 
+/** Read-only cooldown snapshot for shared OAuth health projection (no write side effects). */
+export function getCodexAccountHealthSnapshot(accountId: string, now = Date.now()): {
+  cooldownUntil?: number;
+  cooldownSource?: CodexCooldownSource;
+} | null {
+  const cooldownUntil = getCodexAccountCooldownUntil(accountId, now);
+  if (cooldownUntil === null) return null;
+  const source = upstreamHealth.get(accountId)?.cooldownSource;
+  return {
+    cooldownUntil,
+    ...(source ? { cooldownSource: source } : {}),
+  };
+}
+
 export function isCodexAccountInCooldown(accountId: string, now = Date.now()): boolean {
   return getCodexAccountCooldownUntil(accountId, now) !== null;
+}
+
+/**
+ * Manually lift a hard quota cooldown without touching failure history.
+ *
+ * Injected Codex routing makes this proxy the ONLY model path for Codex Desktop, so a
+ * cooldown that outlives the real upstream limit reads to the user as "the whole app is
+ * broken" with no escape but editing config.toml. This is that escape hatch.
+ *
+ * Deliberately narrow:
+ * - Failure counters and softAvoid survive. Clearing a cooldown says "the quota window
+ *   moved", not "this account is healthy"; failover must keep its knowledge.
+ * - Dropping `probeLeaseId` is what stops a stale in-flight probe from later "proving"
+ *   recovery against a NEWER cooldown: {@link ownsProbeLease} needs the id to match.
+ *   `cooldownGeneration` is preserved and bumped as redundancy only — a fresh 429 already
+ *   bumps it in {@link recordCodexUpstreamOutcome}, so the bump here is not load-bearing
+ *   today and is kept so the invariant survives a future change that retains the lease.
+ *
+ * Returns false when the account carried no live cooldown (already expired or never set).
+ */
+export function clearCodexAccountCooldown(accountId: string, now = Date.now()): boolean {
+  const health = upstreamHealth.get(accountId);
+  if (!health) return false;
+  const cooldownUntil = health.cooldownUntil;
+  if (typeof cooldownUntil !== "number" || !Number.isFinite(cooldownUntil) || cooldownUntil <= now) return false;
+  const {
+    cooldownUntil: _until,
+    cooldownSince: _since,
+    cooldownSource: _source,
+    probeLeaseId: _leaseId,
+    probeLeaseGeneration: _leaseGeneration,
+    ...rest
+  } = health;
+  upstreamHealth.set(accountId, {
+    ...rest,
+    cooldownGeneration: (health.cooldownGeneration ?? 0) + 1,
+    lastProbeAt: now,
+  });
+  return true;
 }
 
 export function getCodexAccountSoftAvoidUntil(accountId: string, now = Date.now()): number | null {
@@ -391,7 +460,7 @@ function getEligiblePoolAccounts(config: OcxConfig, excludeId?: string, now = Da
   return ids;
 }
 
-function getPoolAccountPlan(config: OcxConfig, accountId: string): string | undefined {
+export function getPoolAccountPlan(config: OcxConfig, accountId: string): string | undefined {
   if (accountId === MAIN_CODEX_ACCOUNT_ID) return getMainAccountPlan();
   return (config.codexAccounts ?? []).find(account => !account.isMain && account.id === accountId)?.plan;
 }
@@ -425,21 +494,11 @@ export function pickLowestUsageCodexAccount(config: OcxConfig, excludeId?: strin
 function setActiveCodexAccount(config: OcxConfig, accountId: string): void {
   if (config.activeCodexAccountId === accountId) return;
   config.activeCodexAccountId = accountId;
-  saveConfig(config);
+  saveConfigPreservingClaudeCode(config);
 }
 
 function isUnknownUsage(usage: number): boolean {
   return usage >= CODEX_UNKNOWN_USAGE_SCORE;
-}
-
-// Round-robin among eligible unknown-quota candidates. `getEligiblePoolAccounts`
-// already returns a deterministic order (config order, main unshifted first) and
-// excludes the active id, so taking the first eligible unknown is a stable rotation
-// without any new per-account state.
-function pickNextUnknownAccount(config: OcxConfig, active: string, now: number): string | null {
-  const eligible = getEligiblePoolAccounts(config, active, now)
-    .filter(id => isUnknownUsage(computeCodexUsageScore(getAccountQuota(id), getPoolAccountPlan(config, id))));
-  return eligible.length > 0 ? eligible[0]! : null;
 }
 
 function applyQuotaAutoSwitch(config: OcxConfig, active: string, now: number): string {
@@ -447,6 +506,9 @@ function applyQuotaAutoSwitch(config: OcxConfig, active: string, now: number): s
   if (threshold <= 0) return active;
   const quota = getAccountQuota(active);
   const activeUsage = computeCodexUsageScore(quota, getPoolAccountPlan(config, active));
+  // Unknown usage is not evidence that a user's explicit selection crossed the
+  // threshold. Wait for quota priming instead of rotating among guesses.
+  if (isUnknownUsage(activeUsage)) return active;
   if (activeUsage < threshold) return active;
   const best = pickLowerUsageAccount(config, active, activeUsage, now);
   if (best !== active) {
@@ -454,21 +516,6 @@ function applyQuotaAutoSwitch(config: OcxConfig, active: string, now: number): s
     return best;
   }
 
-  // Deadlock guard: active is over threshold but no candidate scored strictly
-  // lower. When the active itself is unknown, every candidate is likely unknown
-  // too (100 < 100 never fires), which pins the pool to one account whose real
-  // usage we cannot see (e.g. quota never primed on WSL). Rotate to the next
-  // eligible unknown so rotation is not stuck; known-but-saturated accounts are
-  // intentionally left alone so a genuinely hot pool stays visible.
-  if (isUnknownUsage(activeUsage)) {
-    const next = pickNextUnknownAccount(config, active, now);
-    if (next) {
-      console.warn(`[codex-routing] quota unknown for active "${active}"; rotating to "${next}" (all candidates unknown, threshold=${threshold})`);
-      setActiveCodexAccount(config, next);
-      return next;
-    }
-    console.warn(`[codex-routing] quota unknown for active "${active}" and no eligible rotation target; staying put`);
-  }
   return active;
 }
 
@@ -497,6 +544,74 @@ export function resolveCodexAccountForThread(
 ): string | null {
   const resolution = resolveCodexAccountForThreadDetailed(threadId, config, now);
   return resolution.status === "selected" ? resolution.accountId : null;
+}
+
+/**
+ * Side-effect-free preview of the Codex pool account native routing would prefer.
+ * Used for subagent fallback quota decisions before final auth.
+ *
+ * Does not mutate activeCodexAccountId, thread affinity, config on disk, or probe leases.
+ * Mirrors {@link resolveCodexAccountForThreadDetailed} account choice, including returning a
+ * configured cooled account so callers can evaluate probe/quota availability.
+ */
+export function previewCodexAccountForRequest(
+  threadId: string | null,
+  config: OcxConfig,
+  now = Date.now(),
+): string | null {
+  if (threadId && threadAccountMap.has(threadId)) {
+    const entry = threadAccountMap.get(threadId)!;
+    if (
+      !isThreadAffinityExpired(entry, now)
+      && isThreadAffinityGenerationLive(entry)
+      && isCodexAccountSelectable(config, entry.accountId, now)
+      && !shouldFailover(config, entry.accountId, now)
+    ) {
+      const threshold = config.autoSwitchThreshold ?? 80;
+      if (threshold > 0) {
+        const usage = computeCodexUsageScore(
+          getAccountQuota(entry.accountId),
+          getPoolAccountPlan(config, entry.accountId),
+        );
+        if (!isUnknownUsage(usage) && usage >= threshold) {
+          const best = pickLowerUsageAccount(config, entry.accountId, usage, now);
+          if (best !== entry.accountId) return best;
+        }
+      }
+      return entry.accountId;
+    }
+    // Stale/unusable affinity is ignored for preview (no map mutation).
+  }
+
+  let active = config.activeCodexAccountId ?? null;
+  if (!active) {
+    return pickLowestUsageCodexAccount(config, undefined, now);
+  }
+  if (!isCodexAccountSelectable(config, active, now)) {
+    const fallback = pickLowestUsageCodexAccount(config, active, now);
+    if (fallback) active = fallback;
+    else if (hasConfiguredPoolAccount(config, active)) return active;
+    else return null;
+  }
+
+  const threshold = config.autoSwitchThreshold ?? 80;
+  if (threshold > 0) {
+    const usage = computeCodexUsageScore(getAccountQuota(active), getPoolAccountPlan(config, active));
+    if (!isUnknownUsage(usage) && usage >= threshold) {
+      active = pickLowerUsageAccount(config, active, usage, now);
+    }
+  }
+  if (shouldFailover(config, active, now)) {
+    const best = pickLowestUsageCodexAccount(config, active, now);
+    if (best) active = best;
+  }
+  if (!isCodexAccountUsable(config, active)) {
+    return hasConfiguredPoolAccount(config, active) ? active : null;
+  }
+  if (isCodexAccountInCooldown(active, now)) {
+    return hasConfiguredPoolAccount(config, active) ? active : null;
+  }
+  return active;
 }
 
 export function resolveCodexAccountForThreadDetailed(
@@ -530,7 +645,7 @@ export function resolveCodexAccountForThreadDetailed(
             getAccountQuota(entry.accountId),
             getPoolAccountPlan(config, entry.accountId),
           );
-          if (usage >= threshold) {
+          if (!isUnknownUsage(usage) && usage >= threshold) {
             const best = pickLowerUsageAccount(config, entry.accountId, usage, now);
             if (best !== entry.accountId) {
               setActiveCodexAccount(config, best);
@@ -680,12 +795,13 @@ export function recordCodexUpstreamOutcome(
   const hardCooldownUntil = getCodexAccountCooldownUntil(accountId, now) ?? undefined;
   // Soft avoid + affinity clears are part of failover. When threshold is 0, leave
   // sticky sessions alone (same as shouldFailover / applyFailureFailover no-ops).
-  const failoverEnabled = (config.upstreamFailoverThreshold ?? 3) > 0;
+  const failoverThreshold = config.upstreamFailoverThreshold ?? 3;
   const consecutiveFailures = stale ? 1 : (current?.consecutiveFailures ?? 0) + 1;
+  const failoverReady = failoverThreshold > 0 && consecutiveFailures >= failoverThreshold;
   const escalationMs = CODEX_TRANSIENT_SOFT_AVOID_ESCALATION_MS[
-    Math.min(consecutiveFailures, CODEX_TRANSIENT_SOFT_AVOID_ESCALATION_MS.length) - 1
+    Math.min(Math.max(consecutiveFailures - failoverThreshold, 0), CODEX_TRANSIENT_SOFT_AVOID_ESCALATION_MS.length - 1)
   ]!;
-  const softAvoidUntil = failoverEnabled
+  const softAvoidUntil = failoverReady
     ? Math.max(
       getCodexAccountSoftAvoidUntil(accountId, now) ?? 0,
       now + escalationMs,
@@ -704,7 +820,7 @@ export function recordCodexUpstreamOutcome(
   // thread is still pinned to the FAILING account — a late failure from account A
   // must not delete a newer healthy binding to account B (race: T→A, A fails,
   // T→B, late A failure must not delete B's mapping).
-  if (failoverEnabled && meta.threadId) {
+  if (failoverReady && meta.threadId) {
     const bound = threadAccountMap.get(meta.threadId);
     if (bound?.accountId === accountId) threadAccountMap.delete(meta.threadId);
   }

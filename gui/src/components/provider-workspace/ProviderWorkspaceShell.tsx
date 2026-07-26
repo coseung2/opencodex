@@ -5,7 +5,7 @@
  * arrive in WP090/091; until then the slot renders a real placeholder message.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useT } from "../../i18n";
+import { useT } from "../../i18n/shared";
 import { IconFilter, IconSearch, IconBoxes, IconGlobe, IconLock, IconKey, IconTrash } from "../../icons";
 import {
   applyActiveAccountReauth,
@@ -19,6 +19,7 @@ import {
   type WorkspaceSections,
 } from "../../provider-workspace/catalog";
 import { providerKind } from "../../provider-workspace/kind";
+import { readJsonIfOk, readJsonOrThrow } from "../../fetch-json";
 import { countAvailableModels, parseAvailableModels, parseLiveModelCounts, parseSelectedModels, type ProviderAvailableModels, type ProviderLiveModelCounts, type ProviderModelCounts, type ProviderSelectedModels } from "../../provider-workspace/usage";
 import type { ProviderQuotaReportView } from "../../provider-workspace/report";
 import { formatProviderDisplayName } from "../../provider-icons";
@@ -118,22 +119,23 @@ export default function ProviderWorkspaceShell({
     let cancelled = false;
     const timeout = window.setTimeout(() => {
       setModelsLoading(true);
-      fetch(`${apiBase}/api/selected-models`)
-        .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
-        .then(data => {
+      void (async () => {
+        try {
+          const res = await fetch(`${apiBase}/api/selected-models`);
+          const data = await readJsonOrThrow(res);
           if (cancelled) return;
           setModelCounts(countAvailableModels(data));
           setAvailableModels(parseAvailableModels(data));
           setLiveModelCounts(parseLiveModelCounts(data));
           setSelectedModels(parseSelectedModels(data));
           setModelsLoadFailed(false);
-          setModelsLoading(false);
-        })
-        .catch(() => {
+        } catch {
           if (cancelled) return;
           setModelsLoadFailed(true);
-          setModelsLoading(false);
-        });
+        } finally {
+          if (!cancelled) setModelsLoading(false);
+        }
+      })();
     }, 0);
     return () => {
       cancelled = true;
@@ -144,11 +146,11 @@ export default function ProviderWorkspaceShell({
   useEffect(() => {
     let cancelled = false;
     fetch(`${apiBase}/api/usage?range=30d`)
-      .then(r => r.ok ? r.json() : null)
-      .then((data: {
+      .then(r => readJsonIfOk<{
         providers?: Array<{ provider: string; requests: number; totalTokens?: number }>;
         models?: Array<{ provider: string; model: string; resolvedModel?: string; requests: number; totalTokens: number; inputTokens: number; outputTokens: number; shareRatio: number; estimatedCostUsd?: number }>;
-      } | null) => {
+      }>(r))
+      .then((data) => {
         if (cancelled || !data) return;
         const byProvider: Record<string, ProviderUsageTotals> = {};
         for (const p of data.providers ?? []) byProvider[p.provider] = { requests: p.requests, totalTokens: p.totalTokens };
@@ -178,8 +180,8 @@ export default function ProviderWorkspaceShell({
   useEffect(() => {
     let cancelled = false;
     fetch(`${apiBase}/api/provider-quotas`)
-      .then(r => r.ok ? r.json() : null)
-      .then((data: { reports?: Array<{ provider: string; label?: string; source?: string; updatedAt?: number; quota?: unknown }> } | null) => {
+      .then(r => readJsonIfOk<{ reports?: Array<{ provider: string; label?: string; source?: string; updatedAt?: number; quota?: unknown }> }>(r))
+      .then((data) => {
         if (cancelled || !data) return;
         // Merge so a partial/failed probe cannot wipe a previously good provider row.
         setQuotaReports(prev => {
@@ -270,7 +272,11 @@ export default function ProviderWorkspaceShell({
       const label = formatProviderDisplayName(item.name);
       counts.set(label, (counts.get(label) ?? 0) + 1);
     }
-    return new Set([...counts.entries()].filter(([, n]) => n > 1).map(([label]) => label));
+    const dups = new Set<string>();
+    for (const [label, n] of counts.entries()) {
+      if (n > 1) dups.add(label);
+    }
+    return dups;
   }, [allItems]);
 
   if (allItems.length === 0) {
@@ -316,18 +322,18 @@ export default function ProviderWorkspaceShell({
               className={`pws-filter-btn${filterActive || filterOpen ? " pws-filter-btn--active" : ""}`}
               onClick={() => setFilterOpen(open => !open)}
               aria-label={t("pws.filterAria")}
-              aria-haspopup="menu"
               aria-expanded={filterOpen}
+              aria-controls="pws-provider-filters"
             >
               <IconFilter width={18} height={18} aria-hidden="true" />
               {filterActive && <span className="pws-filter-dot" aria-hidden="true" />}
             </button>
             {filterOpen && (
-              <div className="pws-filter-menu" role="menu" aria-label={t("pws.providerFiltersAria")}>
+              <div id="pws-provider-filters" className="pws-filter-menu" role="group" aria-label={t("pws.providerFiltersAria")}>
                 <div className="pws-filter-title">{t("pws.filters")}</div>
                 <div className="pws-filter-head">{t("pws.filterStatus")}</div>
                 {statusFilterOptions.map(({ key, label, count }) => (
-                  <label key={key} className="pws-filter-option" role="menuitemcheckbox" aria-checked={statusFilter[key]}>
+                  <label key={key} className="pws-filter-option">
                     <input
                       type="checkbox"
                       checked={statusFilter[key]}
@@ -338,12 +344,12 @@ export default function ProviderWorkspaceShell({
                   </label>
                 ))}
                 <div className="pws-filter-head">{t("pws.pricing")}</div>
-                <label className="pws-filter-option" role="menuitemcheckbox" aria-checked={pricingFilter.free}>
+                <label className="pws-filter-option">
                   <input type="checkbox" checked={pricingFilter.free} onChange={() => setPricingFilter(prev => ({ ...prev, free: !prev.free }))} />
                   <span className="pws-filter-label">{t("modal.badge.free")}</span>
                   <span className="pws-filter-count">{freeCount}</span>
                 </label>
-                <label className="pws-filter-option" role="menuitemcheckbox" aria-checked={pricingFilter.paid}>
+                <label className="pws-filter-option">
                   <input type="checkbox" checked={pricingFilter.paid} onChange={() => setPricingFilter(prev => ({ ...prev, paid: !prev.paid }))} />
                   <span className="pws-filter-label">{t("pws.paid")}</span>
                   <span className="pws-filter-count">{paidCount}</span>
@@ -355,7 +361,7 @@ export default function ProviderWorkspaceShell({
                   { key: "selfHosted" as const, label: t("pws.type.selfHosted"), count: typeCounts.selfHosted },
                   { key: "login" as const, label: t("pws.type.login"), count: typeCounts.login },
                 ]).map(({ key, label, count }) => (
-                  <label key={key} className="pws-filter-option" role="menuitemcheckbox" aria-checked={typeFilter[key]}>
+                  <label key={key} className="pws-filter-option">
                     <input
                       type="checkbox"
                       checked={typeFilter[key]}
