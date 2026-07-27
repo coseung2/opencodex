@@ -1,0 +1,700 @@
+(pass) openai-chat stream EOF fail-closed > final frame WITHOUT a trailing newline still emits its content and is accepted as done [0.42ms]
+(pass) openai-chat stream EOF fail-closed > final tool-call frame WITHOUT a trailing newline emits the tool call and closes it [0.54ms]
+(pass) openai-chat stream EOF fail-closed > final usage-only frame without a trailing newline is accepted as done [0.37ms]
+(pass) openai-chat stream EOF fail-closed > genuinely truncated stream WITHOUT a trailing newline still fails closed [0.43ms]
+
+::endgroup::
+
+::group::tests/token-guardian.test.ts:
+(pass) token guardian > disabled by default → no refresh, no fetch [3.66ms]
+[opencodex] OAuth refresh started provider=kimi account=account-…49e4
+[opencodex] OAuth credentials rotated and persisted provider=kimi account=account-…49e4
+(pass) token guardian > proactive provider with soon-expiring token is refreshed [3.16ms]
+(pass) token guardian > lazy-only policy is left untouched even when enabled [0.86ms]
+(pass) token guardian > token far from expiry is not refreshed [0.87ms]
+(pass) token guardian > anthropic default policy is disabled → never refreshed even when enabled [0.87ms]
+(pass) token guardian > codex pool refreshed only when canonical openai policy is proactive [1.81ms]
+(pass) token guardian > codex pool warmup is opt-in even when validation is stale [0.90ms]
+(pass) token guardian > codex pool warmup validates stale far-from-expiry accounts when explicitly enabled [2.37ms]
+(pass) token guardian > direct mode warms main only and never enumerates the added-account store [1.22ms]
+
+::endgroup::
+
+::group::tests/tray-proxy.test.ts:
+(pass) tray proxy coordinator > returns immediately when a proxy is already live [18.53ms]
+(pass) tray proxy coordinator > refuses an installed but unviable service instead of bypassing it [0.29ms]
+(pass) tray proxy coordinator > uses a viable service and otherwise falls back to a direct start [0.16ms]
+(pass) tray proxy coordinator > fails when the selected start path never becomes healthy [0.11ms]
+(pass) tray proxy coordinator > propagates the selected start failure without trying an alternate path [0.22ms]
+(pass) tray proxy coordinator > restart never starts after a failed stop [0.19ms]
+
+::endgroup::
+
+::group::tests/oauth-refresh-generic-lock.test.ts:
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth refresh joined existing operation provider=kimi account=account-…5fda
+[opencodex] OAuth credentials rotated and persisted provider=kimi account=account-…5fda
+(pass) generic OAuth refresh lock + CAS > ten concurrent generic refreshes share one IdP call and same credential [3.13ms]
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+[opencodex] OAuth credentials rotated and persisted provider=kimi account=account-…5fda
+(pass) generic OAuth refresh lock + CAS > failed refresh clears single-flight so a later call can retry [1.64ms]
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+(pass) generic OAuth refresh lock + CAS > after lock acquire, a newer disk credential is adopted without a second IdP call [21.90ms]
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+(pass) generic OAuth refresh lock + CAS > older refresh result cannot overwrite newer stored token [1.55ms]
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+(pass) generic OAuth refresh lock + CAS > late refresh result adopts superseding fresh credential via CAS [2.69ms]
+[opencodex] OAuth refresh started provider=kimi account=account-…5fda
+(pass) generic OAuth refresh lock + CAS > terminal refresh failure marks needsReauth only for matching generation [2.90ms]
+
+::endgroup::
+
+::group::tests/windows-deploy-close-regressions.test.ts:
+(pass) update-job restart avoids the shell-less .cmd EINVAL (Windows, bun/source) > no ocx.cmd shim is spawned for restart [0.08ms]
+(pass) update-job restart avoids the shell-less .cmd EINVAL (Windows, bun/source) > bun/source restart uses the runtime executable + launcher (a real .exe, no shell) [0.08ms]
+(pass) update-job restart avoids the shell-less .cmd EINVAL (Windows, bun/source) > service update restart bakes OCX_BAKE_PORT so wrappers hard-pin the captured port [0.20ms]
+(pass) systemd detection tolerates a no-DBUS SSH session (F9) > isSystemd falls back to the per-user runtime dir when the user-bus probe fails [0.18ms]
+(pass) systemd detection tolerates a no-DBUS SSH session (F9) > install ensures the user-bus env before touching systemctl --user [0.09ms]
+(pass) server bind canonicalizes explicit localhost but preserves wildcards (F4 symmetry) > literal localhost binds to 127.0.0.1; 0.0.0.0/:: exposure is untouched [0.05ms]
+
+::endgroup::
+
+::group::tests/config.test.ts:
+(pass) opencodex config defaults > atomic rename retries transient Windows sharing violations [0.47ms]
+(pass) opencodex config defaults > atomic rename does not retry non-transient errors [0.22ms]
+(pass) opencodex config defaults > Codex autostart is enabled by default [0.14ms]
+(pass) opencodex config defaults > Codex autostart can be disabled explicitly [0.16ms]
+(pass) opencodex config defaults > Codex shim auto-restore defaults on with config and environment opt-out precedence [0.20ms]
+(pass) opencodex config defaults > codexShimAutoRestore loads false and rejects non-booleans [2.91ms]
+(pass) opencodex config defaults > multi-agent guidance is default-on and false is the only off state [0.15ms]
+(pass) opencodex config defaults > multiAgentGuidanceEnabled loads false and rejects non-booleans [0.85ms]
+(pass) opencodex config defaults > loads valid config from OPENCODEX_HOME [0.49ms]
+(pass) opencodex config defaults > accepts OpenAI account mode only on the canonical forward provider [0.61ms]
+(pass) opencodex config defaults > rejects invalid or noncanonical codexAccountMode placements [1.65ms]
+(pass) opencodex config defaults > accepts the exact responsesItemIdRepair shape and rejects the old nested placeholderIds proposal [1.20ms]
+(pass) opencodex config defaults > accepts a relative responsesPath [0.40ms]
+(pass) opencodex config defaults > rejects responsesPath without a leading slash [0.51ms]
+(pass) opencodex config defaults > rejects responsesPath containing a URL scheme, query, or fragment [1.11ms]
+(pass) opencodex config defaults > reads valid config diagnostics without mutation [0.43ms]
+(pass) opencodex config defaults > missing config diagnostics use defaults without creating files [0.18ms]
+(pass) opencodex config defaults > malformed config diagnostics fall back without backup or raw content [0.33ms]
+(pass) opencodex config defaults > resolves relative OPENCODEX_HOME once to an absolute config directory [0.29ms]
+(pass) opencodex config defaults > uses the default home when OPENCODEX_HOME is unset [0.15ms]
+(pass) opencodex config defaults > loads UTF-8 BOM config files written by Windows tools [0.36ms]
+(pass) opencodex config defaults > backs up invalid JSON config before falling back to defaults [0.65ms]
+(pass) opencodex config defaults > repairs structurally incomplete config by merging defaults instead of rejecting [0.58ms]
+(pass) opencodex config defaults > backs up config when defaultProvider is absent from providers [0.60ms]
+(pass) opencodex config defaults > diagnoses config with unsafe provider URLs or sensitive headers [2.02ms]
+(pass) opencodex config defaults > validates provider context cap maps explicitly [0.98ms]
+(pass) opencodex config defaults > modelMaxInputTokens accepts only plain positive finite integer records [0.23ms]
+(pass) opencodex config defaults > modelSupportsReasoningSummaries accepts only plain boolean records [1.25ms]
+(pass) opencodex config defaults > modelAdapters accepts only allowed wires on eligible providers (#404) [1.74ms]
+(pass) opencodex config defaults > modelAdapters rejects wire-pinned models rather than ignoring them (#404) [0.65ms]
+(pass) opencodex config defaults > modelAdapters is rejected on the canonical forward provider (#404) [0.55ms]
+(pass) opencodex config defaults > output token defaults accept only positive finite integers [0.25ms]
+(pass) opencodex config defaults > disk config rejects malformed output token defaults [1.06ms]
+(pass) opencodex config defaults > disk config rejects malformed modelMaxInputTokens [0.57ms]
+(pass) opencodex config defaults > disk config preserves valid OpenRouter routing and rejects invalid destinations [0.90ms]
+(pass) opencodex config defaults > disk config rejects forged registry-only virtual model maps [0.50ms]
+(pass) opencodex config defaults > validates the global context cap value [0.82ms]
+(pass) opencodex config defaults > backs up config when provider validation fails during load [0.65ms]
+(pass) opencodex config defaults > provider names reject namespace-breaking and reserved object keys [0.14ms]
+(pass) opencodex config defaults > backs up config when defaultProvider only exists on Object prototype [0.53ms]
+(pass) opencodex config defaults > warns and backs up once per invalid config path [0.40ms]
+(pass) opencodex config defaults > parses pid files [0.14ms]
+(pass) opencodex config defaults > recognizes opencodex start command lines [0.35ms]
+(pass) opencodex config defaults > writes pid file as a numeric pid [0.32ms]
+(pass) opencodex config defaults > removes pid file only when the expected pid still matches [0.24ms]
+(pass) opencodex config defaults > runtime port metadata round-trips and validates expected pid [0.38ms]
+(pass) opencodex config defaults > runtime port metadata removal preserves newer pid state [0.31ms]
+(pass) opencodex config defaults > invalid runtime port metadata returns null [0.19ms]
+(pass) config.ts – Windows ACL hardening integration > hardenConfigDir delegates to hardenSecretDir with required:false on win32 [0.19ms]
+(pass) config.ts – Windows ACL hardening integration > hardenConfigDir does not call hardenSecretDir on non-Windows [0.16ms]
+(pass) config.ts – Windows ACL hardening integration > hardenExistingSecret delegates to hardenSecretPath with required:false on win32 [0.27ms]
+(pass) config.ts – Windows ACL hardening integration > hardenExistingSecret does not throw when ACL helper returns ok:false on win32 [0.25ms]
+(pass) config.ts – Windows ACL hardening integration > saveConfig applies hardenSecretDir with required:true on win32 [0.29ms]
+(pass) config.ts – Windows ACL hardening integration > saveConfig throws when hardenSecretDir fails in required mode on win32 [0.28ms]
+(pass) config.ts – Windows ACL hardening integration > loadConfig does not throw when ACL helper fails non-fatally on win32 [0.22ms]
+(pass) config.ts – Windows ACL hardening integration > saveConfig does not call hardenSecretDir on non-Windows [0.25ms]
+
+::endgroup::
+
+::group::tests/kiro-retry.test.ts:
+(pass) kiro retry fetch > retries connection resets and broken pipes [316.22ms]
+(pass) kiro retry fetch > does not replay a per-attempt TimeoutError [10.81ms]
+(pass) kiro retry fetch > rethrows deterministic fetch and URL errors without retrying [0.54ms]
+(pass) kiro retry fetch > does not replay throttling responses [1.56ms]
+(pass) kiro retry fetch > does not replay ordinary 5xx responses [0.59ms]
+(pass) kiro retry fetch > falls back once from canonical runtime to the legacy endpoint for 404 [0.25ms]
+(pass) kiro retry fetch > falls back for endpoint-specific 403 and connection-refused errors [0.56ms]
+(pass) kiro retry fetch > a custom base URL disables legacy fallback [0.86ms]
+(pass) kiro retry fetch > does not retry non-retryable 400 [0.68ms]
+(pass) kiro retry fetch > raw mode preserves final error body and headers without normalization [0.43ms]
+(pass) kiro retry fetch > normalizes final 403 response body into a redacted Kiro auth error [1.12ms]
+(pass) kiro retry fetch > normalizes final 400 validation/model body into an invalid request error [0.73ms]
+(pass) kiro retry fetch > normalizes final 429 without adapter replay [0.42ms]
+(pass) kiro retry fetch > does not start fetch when caller signal is already aborted [0.18ms]
+(pass) kiro adapter error formatter > is classified, redacted, and does not copy secret headers [12.36ms]
+
+::endgroup::
+
+::group::tests/cursor-effort-suffix.test.ts:
+(pass) Cursor per-model reasoning-effort suffix > literal requested efforts pass through when the model supports that tier [0.51ms]
+(pass) Cursor per-model reasoning-effort suffix > models with both max and xhigh preserve the exact named tier [0.13ms]
+(pass) Cursor per-model reasoning-effort suffix > efforts outside the model tier set clamp by Codex rank [0.19ms]
+(pass) Cursor per-model reasoning-effort suffix > single-tier models always use their one tier [0.17ms]
+(pass) Cursor per-model reasoning-effort suffix > non-reasoning models and already-qualified ids are left bare [0.15ms]
+(pass) Cursor per-model reasoning-effort suffix > claude-sonnet-5 and glm-5.2 map to live effort suffixes [0.20ms]
+(pass) Cursor per-model reasoning-effort suffix > grok-4.5-fast preserves its explicit code-backed tiers [0.09ms]
+(pass) Cursor per-model reasoning-effort suffix > model ladders are deduped and sorted in canonical Codex order [0.09ms]
+
+::endgroup::
+
+::group::tests/tencent-siliconflow-providers.test.ts:
+(pass) Tencent Cloud Coding Plan provider > publishes the coding-only OpenAI-compatible contract [0.15ms]
+(pass) Tencent Cloud Coding Plan provider > derives key login, GUI preset, and route metadata from the registry [0.94ms]
+(pass) SiliconFlow provider > uses the official live OpenAI-compatible endpoint without frozen reasoning claims [0.28ms]
+(pass) SiliconFlow provider > registers canonical GUI display names for both providers [0.06ms]
+
+::endgroup::
+
+::group::tests/codex-auth-modal-status.test.ts:
+(pass) Codex auth modal status feedback > keeps a distinct submitted/waiting state for manual code login [16.47ms]
+(pass) Codex auth modal status feedback > defines the new status copy in every shipped GUI locale [2.10ms]
+
+::endgroup::
+
+::group::tests/cursor-tool-finalize-race.test.ts:
+(pass) client-tool finalize grace selection > keeps ordinary single-tool turns on the base grace [0.22ms]
+(pass) client-tool finalize grace selection > expands grace only for generic tool-count prompts [0.10ms]
+(pass) client-tool finalize grace selection > does not carry expanded grace into tool-result continuations [0.03ms]
+(pass) transport finalize race (hidden parallel sibling) > single client tool: grace timer fires once, emits done, cancels with RST_STREAM CANCEL [73.24ms]
+(pass) transport finalize race (hidden parallel sibling) > hidden sibling announced after first drain revokes the premature finalize [163.51ms]
+
+::endgroup::
+
+::group::tests/clearable-deadline.test.ts:
+(pass) clearableDeadline > clear stops the header timer but preserves the parent body-lifetime link [32.71ms]
+(pass) clearableDeadline > reports its stable timeout reason when the deadline wins [32.57ms]
+(pass) clearableDeadline > an already-aborted parent wins without being mislabeled as a deadline [15.75ms]
+
+::endgroup::
+
+::group::tests/grok-orphan-adoption.test.ts:
+(pass) Grok orphan adoption (#511) > adopts the stale entry so exactly one table per model survives [2.17ms]
+(pass) Grok orphan adoption (#511) > repoints default at the surviving alias [0.73ms]
+(pass) Grok orphan adoption (#511) > never adopts a hand-written model, even on a loopback base_url [0.76ms]
+(pass) Grok orphan adoption (#511) > does not adopt our api_key when the base_url is remote [0.63ms]
+(pass) Grok orphan adoption (#511) > leaves an array-of-table model reserved [0.57ms]
+(pass) Grok orphan adoption (#511) > removal keeps the following table intact [0.59ms]
+(pass) Grok orphan adoption (#511) > keeps an orphan whose model is no longer in the catalog [0.65ms]
+(pass) Grok orphan adoption (#511) > is idempotent: the second sync reports no change [0.66ms]
+(pass) Grok orphan adoption (#511) > preserves CRLF line endings [0.60ms]
+(pass) Grok orphan adoption (#511) > still adopts safely when Grok has dropped the markers entirely [0.87ms]
+(pass) Grok orphan adoption (#511) > refuses to sweep when the end marker is missing [0.38ms]
+
+::endgroup::
+
+::group::tests/github-copilot-oauth.test.ts:
+(pass) github-copilot URL allowlists > buildGithubDeviceVerifyUrl constructs an allowlisted github.com URL [0.20ms]
+(pass) github-copilot URL allowlists > rejects phishing or non-github verification URLs [0.05ms]
+(pass) github-copilot URL allowlists > validateCopilotApiBaseUrl allows only https *.githubcopilot.com [0.21ms]
+(pass) github-copilot URL allowlists > http errors never include response bodies [0.12ms]
+(pass) github-copilot login + refresh > device flow exchanges for a Copilot token and stores allowlisted apiBaseUrl [2020.05ms]
+(pass) github-copilot login + refresh > honors slow_down without failing the device flow [7022.13ms]
+(pass) github-copilot login + refresh > refresh re-exchanges without leaking tokens on failure [0.73ms]
+(pass) github-copilot login + refresh > login cancel aborts the poll loop [5000.86ms]
+(pass) github-copilot login + refresh > rejects SSRF endpoints.api and falls back to default host [0.43ms]
+(pass) github-copilot security repairs (absorb hardening) > access-token-only device flow succeeds and stores the gho_ token as durable grant [1017.74ms]
+(pass) github-copilot security repairs (absorb hardening) > a gho_ durable grant refreshes by direct re-exchange (no refresh grant call) [0.39ms]
+(pass) github-copilot security repairs (absorb hardening) > terminal refresh errors surface only the allowlisted code, never the description [0.23ms]
+(pass) github-copilot security repairs (absorb hardening) > persistent identity failure fails the login instead of persisting an anonymous credential [500.61ms]
+(pass) github-copilot security repairs (absorb hardening) > a transient identity failure recovers on the single retry [501.04ms]
+(pass) github-copilot transport fail-closed host allowlist > an OAuth credential without endpoints.api never sends the bearer to a foreign baseUrl [0.74ms]
+(pass) github-copilot transport fail-closed host allowlist > a valid credential apiBaseUrl still wins for OAuth transports [0.13ms]
+(pass) copilot token redaction > the Copilot tid= token grammar and GitHub token prefixes are fully redacted [0.19ms]
+
+::endgroup::
+
+::group::tests/chat-completions-endpoint.test.ts:
+(pass) chatCompletionsToResponsesBody maps messages/tools/system [0.99ms]
+(pass) chatCompletionsToResponsesBody rejects missing model [0.38ms]
+(pass) chatCompletionsUsage always emits detail objects with zero defaults [0.34ms]
+(pass) responsesSseToChatCompletionsSse consumes response.heartbeat without forwarding a raw frame [2.38ms]
+🚀 opencodex proxy running on http://localhost:41469
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) POST /v1/chat/completions streams OpenAI-shaped chunks end to end [44.30ms]
+🚀 opencodex proxy running on http://localhost:38555
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) non-streaming /v1/chat/completions returns chat.completion JSON [8.43ms]
+🚀 opencodex proxy running on http://localhost:38611
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+[opencodex] Provider model discovery for "mock" failed with HTTP 404 [urlClass=provider-models, fallback=configured].
+(pass) GET /v1/models returns OpenAI list shape for Copilot App discovery [7.60ms]
+🚀 opencodex proxy running on http://localhost:40897
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) invalid chat completions body returns OpenAI-style 400 [3.35ms]
+(pass) chatCompletionsToResponsesBody maps response_format and rejects unknown types [0.58ms]
+(pass) responsesSseToChatCompletionsSse emits parallel tool calls once with stable indices [1.84ms]
+(pass) responsesSseToChatCompletionsSse bounds upstream reads until the chat client pulls [26.19ms]
+(pass) responsesSseToChatCompletionsSse delivers the first frame before a macrotask turn [1.12ms]
+🚀 opencodex proxy running on http://localhost:40349
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) POST /v1/chat/completions rejects response_format for routed openai-chat [3.20ms]
+🚀 opencodex proxy running on http://localhost:40135
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) POST /v1/chat/completions direct mode forwards caller Authorization [6.44ms]
+🚀 opencodex proxy running on http://localhost:33535
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) POST /v1/chat/completions finalizes native passthrough request logs [56.60ms]
+(pass) responsesSseToChatCompletionsSse reconciles done-frame final arguments (last-write-wins) [1.47ms]
+(pass) responsesSseToChatCompletionsSse emits error frame on response.failed (no clean DONE) [2.70ms]
+(pass) responsesSseToChatCompletionsSse emits error frame on truncated stream [1.00ms]
+🚀 opencodex proxy running on http://localhost:34641
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) non-streaming /v1/chat/completions returns error status on upstream failure [9.23ms]
+🚀 opencodex proxy running on http://localhost:34357
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) streaming /v1/chat/completions does not clean-DONE after response.failed [7.17ms]
+(pass) responsesSseToChatCompletionsSse emits one complete named tool call [1.40ms]
+(pass) responsesSseToChatCompletionsSse falls back to buffered arguments when the done item omits them [1.00ms]
+(pass) responsesSseToChatCompletionsSse flushes buffered tool calls before an incomplete terminal frame [0.87ms]
+(pass) responsesSseToChatCompletionsSse keeps buffered arguments when the done snapshot is empty [0.75ms]
+(pass) responsesSseToChatCompletionsSse ignores duplicate done events for a tool call [0.71ms]
+(pass) responsesSseToChatCompletionsSse uses finalized arguments when the item done event is absent [0.77ms]
+(pass) chatCompletionsToResponsesBody recovers tool_calls function.name from earlier call_id [0.47ms]
+(pass) responsesSseToChatCompletionsSse accepts CRLF-framed SSE with terminal event at EOF [0.92ms]
+(pass) responsesSseToChatCompletionsSse cancel promptly cancels an idle upstream [51.06ms]
+(pass) stall incomplete becomes an error frame with no [DONE] (WP3) [1.38ms]
+(pass) adapter_eof incomplete surfaces the upstream message and no [DONE] (WP3) [0.71ms]
+(pass) max_output_tokens incomplete still maps to finish_reason length with [DONE] (WP3 pin) [0.67ms]
+(pass) content_filter incomplete still maps to finish_reason content_filter with [DONE] (WP3 pin) [0.63ms]
+(pass) collectChatCompletion throws ChatCompletionsStreamError on a stall incomplete (WP3) [0.82ms]
+🚀 opencodex proxy running on http://localhost:40679
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) an overridden model reaches the responses wire with its hosted tool intact (#404) [7.18ms]
+🚀 opencodex proxy running on http://localhost:35849
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) a sibling model on the same provider still takes the chat wire (#404) [10.73ms]
+🚀 opencodex proxy running on http://localhost:40075
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) inbound chat-completions honors the override when stripping sampling (#404) [11.06ms]
+🚀 opencodex proxy running on http://localhost:44423
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) /v1/chat/completions non-OK upstream preserves structured model_not_found [5.74ms]
+🚀 opencodex proxy running on http://localhost:40179
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) /v1/chat/completions status:failed replay preserves structured model_not_found [4.61ms]
+
+::endgroup::
+
+::group::tests/identity-neutralize.test.ts:
+(pass) identity neutralization — central helper > replaces the Codex GPT-5 line with the proxy-neutral line [0.03ms]
+(pass) identity neutralization — central helper > never emits the opencodex proxy identity [0.11ms]
+(pass) identity neutralization — central helper > leaves text without the GPT-5 line unchanged [0.02ms]
+(pass) identity neutralization — central helper > neutral line still forbids GPT-5 / OpenAI self-reporting [0.05ms]
+(pass) identity neutralization — adapters never leak proxy identity > openai-chat: system message is neutralized, no proxy mention [0.62ms]
+(pass) identity neutralization — adapters never leak proxy identity > google/antigravity: systemInstruction is neutralized, no proxy mention [0.44ms]
+(pass) identity neutralization — adapters never leak proxy identity > kiro > system prefix is neutralized, no proxy mention [2.10ms]
+
+::endgroup::
+
+::group::tests/openai-provider-option-migration.test.ts:
+(pass) OpenAI provider option migration matrix > unmarked minimal openai becomes one pool-default row [0.42ms]
+(pass) OpenAI provider option migration matrix > unmarked chatgpt (added accounts=%s) becomes one pool row without a transient Multi [0.23ms]
+(pass) OpenAI provider option migration matrix > unmarked chatgpt (added accounts=%s) becomes one pool row without a transient Multi [0.15ms]
+(pass) OpenAI provider option migration matrix > marker 1 Direct-only preserves direct behavior [0.15ms]
+(pass) OpenAI provider option migration matrix > marker 1 enabled Multi absorbs into pool mode [0.27ms]
+(pass) OpenAI provider option migration matrix > marker 1 legacy default maps to openai pool [0.21ms]
+(pass) OpenAI provider option migration matrix > disabled Multi plus enabled Direct and no Multi references resolves direct and enabled [0.11ms]
+(pass) OpenAI provider option migration matrix > marker 1 with neither forward row preserves provider absence [0.09ms]
+(pass) OpenAI provider option migration matrix > disabled-Multi-only creates disabled openai pool [0.09ms]
+(pass) OpenAI provider option migration matrix > Direct-only with stale activeCodexAccountId stays direct and leaves ignored pool state intact [0.15ms]
+(pass) OpenAI provider option migration matrix > no provider plus stale pool state preserves absence and pool state [0.14ms]
+(pass) OpenAI provider option migration matrix > rewrites every Claude model owner and only modelMap destinations [0.30ms]
+(pass) OpenAI provider option migration matrix > merges selectedModels stably and deduplicates rewritten ids [0.18ms]
+(pass) OpenAI provider option migration matrix > merges provider context caps to the lower positive cap with path-only warning [0.15ms]
+(pass) OpenAI provider option migration matrix > rewrites and deduplicates disabledModels and subagentModels in first-seen order [0.46ms]
+(pass) OpenAI provider option migration matrix > rewrites injection, shadow, global sidecar, and Claude sidecar model references [0.21ms]
+(pass) OpenAI provider option migration matrix > leaves unknown passthrough values unchanged and emits only their paths [0.15ms]
+(pass) OpenAI provider option migration matrix > noncanonical secret-bearing Multi collides without mutating input [0.13ms]
+(pass) OpenAI provider option migration matrix > marker 2 canonical result is clone-only and warning-free [0.09ms]
+(pass) OpenAI provider option migration matrix > restored marker-1 split recreates identical marker-2 bytes and then becomes idempotent [0.34ms]
+
+::endgroup::
+
+::group::tests/uninstall.test.ts:
+(pass) full uninstall command > CLI exposes a one-shot local state cleanup command [0.94ms]
+(pass) full uninstall command > CLI exposes explicit legacy history recovery command [0.85ms]
+(pass) full uninstall command > service cleanup has a quiet best-effort helper [0.41ms]
+(pass) full uninstall command > full uninstall kills the tracked proxy before deleting service assets [0.28ms]
+
+::endgroup::
+
+::group::tests/claude-cli.test.ts:
+(pass) ocx claude env assembly > injects base URL, discovery flag and model slots — NO auth token by default (subscription mode) [0.73ms]
+(pass) ocx claude env assembly > configured API key becomes the auth token (admission required) [0.17ms]
+(pass) ocx claude env assembly > subscription mode leaves the host-managed auth assertion unset [0.09ms]
+(pass) ocx claude env assembly > proxy-owned authentication sets CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1 [0.20ms]
+(pass) ocx claude env assembly > a user pre-export of the host-managed flag wins (opt-out preserved) [0.06ms]
+(pass) ocx claude env assembly > model-slot injection is independent of the host-managed flag [0.10ms]
+(pass) ocx claude env assembly > lever env defaults OFF: no effort forcing, no context override (devlog 136 B6) [0.09ms]
+(pass) ocx claude env assembly > opt-in levers: alwaysEnableEffort=1, maxContextTokens injects the official pair [0.20ms]
+(pass) ocx claude env assembly > user-exported lever values win over config levers [0.11ms]
+(pass) ocx claude env assembly > invalid maxContextTokens values inject nothing [0.15ms]
+(pass) ocx claude env assembly > tier slots inject ANTHROPIC_DEFAULT_*_MODEL with [1m] auto-marking (devlog 260712 B2) [0.17ms]
+(pass) ocx claude env assembly > user-exported tier slots win over config tier slots [0.11ms]
+(pass) ocx claude env assembly > no context map -> no [1m] marking (conservative fallback) [0.08ms]
+(pass) ocx claude env assembly > auto-context: 372k slot gets [1m] + compact window rides along (devlog 020) [0.09ms]
+(pass) ocx claude env assembly > auto-context: custom window moves both the env and the marking threshold [0.06ms]
+(pass) ocx claude env assembly > auto-context: user-exported env value drives the predicate (audit 021 #2) [0.16ms]
+(pass) ocx claude env assembly > auto-context off: no env injection, no sub-1M marking [0.07ms]
+(pass) ocx claude env assembly > user-exported env always wins; unset slots stay unset [0.07ms]
+(pass) ocx claude Windows launch (devlog 260715_cross_platform_audit/020) > win32 .cmd shim launches through cmd.exe with preserved arg boundaries [0.20ms]
+(pass) ocx claude Windows launch (devlog 260715_cross_platform_audit/020) > POSIX launch is byte-identical to the pre-launcher behavior [0.05ms]
+(pass) ocx claude Windows launch (devlog 260715_cross_platform_audit/020) > exit-9009 hint fires only for win32 non-signal not-found exits [0.06ms]
+
+::endgroup::
+
+::group::tests/codex-account-label.test.ts:
+(pass) codex account privacy labels > generates non-PII log labels [0.28ms]
+(pass) codex account privacy labels > avoids existing log labels [0.20ms]
+(pass) codex account privacy labels > preserves an existing valid label [0.08ms]
+(pass) codex account privacy labels > adds a label to new account records [0.03ms]
+(pass) codex account privacy labels > fallback label is stable and does not include the raw account id [0.20ms]
+
+::endgroup::
+
+::group::tests/cursor-message-mapper.test.ts:
+(pass) Cursor message mapper > maps text, thinking, done, and error messages to AdapterEvents [13.33ms]
+(pass) Cursor message mapper > maps a heartbeat to a liveness AdapterEvent (no protocol output) [0.12ms]
+(pass) Cursor message mapper > handles KV get and set as internal client replies only [0.28ms]
+(pass) Cursor message mapper > maps tool call messages to AdapterEvents [0.08ms]
+(pass) Cursor message mapper > answers requestContextArgs and returns legacy mock placeholders for native tool cases [0.17ms]
+
+::endgroup::
+
+::group::tests/combo-workspace-data.test.ts:
+(pass) combo-workspace-data > parseComboList accepts normalized GET rows and skips malformed entries [14.51ms]
+(pass) combo-workspace-data > parseComboList normalizes aliases and derives the public model name [0.18ms]
+(pass) combo-workspace-data > group and filter cover id, wire model, provider, and target model [0.28ms]
+(pass) combo-workspace-data > attention flags zero-target and one-target defensive rows [0.13ms]
+(pass) combo-workspace-data > validates combo id boundaries and duplicate ids on create and rename [0.32ms]
+(pass) combo-workspace-data > validates public alias shape, namespace, family, and uniqueness [0.18ms]
+(pass) combo-workspace-data > create drafts support bare, custom-prefixed, and default public names [0.15ms]
+(pass) combo-workspace-data > toPutBody emits the exact plain-object PUT contract [0.16ms]
+(pass) combo-workspace-data > preserves an unset effort through parse, draft, and PUT [0.07ms]
+(pass) combo-workspace-data > toPutBody carries alias and renameFrom only when set [0.08ms]
+(pass) combo-workspace-data > rejects duplicate targets [0.03ms]
+(pass) combo-workspace-data > rejects fractional, zero, and over-max sticky limits and weights [0.10ms]
+(pass) combo-workspace-data > rejects unknown providers and namespace collisions [0.08ms]
+(pass) combo-workspace-data > allows mixed enabled and disabled members but rejects all-disabled drafts [0.08ms]
+(pass) combo-workspace-data > preserves an existing legacy chatgpt member through validation and PUT [0.05ms]
+(pass) combo-workspace-data > draftEquals includes strategy, sticky limit, effort, order, and weight [0.13ms]
+(pass) combo-workspace-data > draftEquals tracks id and alias edits for rename and public-name flows [0.04ms]
+
+::endgroup::
+
+::group::tests/desktop-3p-guard.test.ts:
+(pass) k3[1m] renders as a clean label with no bracket marker [1.10ms]
+(pass) the real generator output passes the guard for a representative catalog [0.47ms]
+(pass) the guard rejects an invalid name shape [0.22ms]
+(pass) the guard rejects a duplicated name (collision-skip regression net) [0.07ms]
+(pass) the guard rejects a label that still carries a bracket marker [0.08ms]
+(pass) the guard rejects an over-long label [0.06ms]
+(pass) writeDesktop3pConfig emits a config whose model list passes the guard end to end [18.40ms]
+
+::endgroup::
+
+::group::tests/cursor-oauth.test.ts:
+(pass) Cursor OAuth core flow > generateCursorAuthParams builds a PKCE login URL with the challenge but never the verifier [0.96ms]
+(pass) Cursor OAuth core flow > pollCursorAuth returns tokens after a 404 (pending) then 200 [16.45ms]
+(pass) Cursor OAuth core flow > pollCursorAuth throws when the success payload is missing tokens [30.92ms]
+(pass) Cursor OAuth core flow > pollCursorAuth aborts promptly on a pre-aborted signal [0.39ms]
+(pass) Cursor OAuth core flow > refreshCursorToken posts the refresh token as a Bearer and returns new creds [0.66ms]
+(pass) Cursor OAuth core flow > refreshCursorToken keeps the old refresh when the server omits it [0.12ms]
+(pass) Cursor OAuth core flow > refreshCursorToken throws on non-ok without leaking the token [0.20ms]
+(pass) Cursor OAuth core flow > refreshCursorToken retries a transient 503 then succeeds [370.54ms]
+(pass) Cursor OAuth core flow > refreshCursorToken retries a transient network error then succeeds [288.10ms]
+(pass) Cursor OAuth core flow > refreshCursorToken fails fast on a non-retryable 401 (single attempt) [0.32ms]
+(pass) Cursor OAuth core flow > getTokenExpiry parses JWT exp with a 5-minute skew [0.20ms]
+(pass) Cursor OAuth core flow > getTokenExpiry falls back ~1h for a malformed token [0.04ms]
+(pass) Cursor OAuth core flow > loginCursor surfaces the login URL via onAuth and returns parsed creds [1.64ms]
+(pass) Cursor OAuth core flow > credentialsFromCursorTokens extracts JWT sub as accountId for multiauth [0.07ms]
+(pass) Cursor OAuth core flow > refreshCursorToken preserves accountId from the refreshed access token [0.22ms]
+
+::endgroup::
+
+::group::tests/anthropic-image-normalize.test.ts:
+(pass) normalizeAnthropicImages — real Bun.Image path > N1: oversized-dimension PNG is resized under the tier-0 edge and 2MiB cap, not dropped [938.58ms]
+(pass) normalizeAnthropicImages — real Bun.Image path > N2: 30 images land on age tiers — newest pass through, older shrink to their tier edges [225.12ms]
+(pass) normalizeAnthropicImages — real Bun.Image path > N3: cache hit — same input re-normalized with ZERO additional encoder invocations and identical bytes [926.31ms]
+(pass) normalizeAnthropicImages — real Bun.Image path > N6: undecodable garbage is textified with the undecodable note [0.66ms]
+(pass) normalizeAnthropicImages — real Bun.Image path > N6b: sniffable-but-truncated PNG is caught by pass-through validation and textified [7.45ms]
+(pass) normalizeAnthropicImages — real Bun.Image path > cache does not reuse a pass-through verdict across media types [23.88ms]
+(pass) normalizeAnthropicImages — guards and seams > N4: decode-bomb dimensions are textified without a decode attempt [0.54ms]
+(pass) normalizeAnthropicImages — guards and seams > N5: URL-source images are untouched [0.15ms]
+(pass) normalizeAnthropicImages — guards and seams > N7: incompressible output walks the ladder to terminal and terminates (no hang, no drop) [13.22ms]
+(pass) normalizeAnthropicImages — guards and seams > N7b: all-terminal overflow falls to the guard, which textifies — either-fits-or-textifies [116.33ms]
+(pass) normalizeAnthropicImages — guards and seams > representative 100-image session: demotion keeps every image, zero textify, sum within budget [220.80ms]
+(pass) normalizeAnthropicImages — guards and seams > aggregate demotion: over-budget totals demote OLDEST images further down the ladder until the sum fits [8.63ms]
+(pass) normalizeAnthropicImages — guards and seams > activation both directions: with normalization the guard keeps every image; without it Rule 4 drops [1009.82ms]
+(pass) bounded parallel first pass (WP170) > parallelism is real but never exceeds the fixed concurrency limit [6.96ms]
+(pass) bounded parallel first pass (WP170) > a thrown target callback rejects the call, settles in-flight work, and stops new pulls [30.18ms]
+(pass) bounded parallel first pass (WP170) > zero encoder starts after a fatal replace error (synchronous failure flag) [13.70ms]
+(pass) bounded parallel first pass (WP170) > output order is deterministic regardless of completion order [4.47ms]
+(pass) bounded parallel first pass (WP170) > entries stay index-addressed under reversed completion: overflow drop hits index 0, not first-completed [10.75ms]
+(pass) bounded parallel first pass (WP170) > skip paths free the worker slot: URL sources and over-limit images never reach the encoder [36.93ms]
+
+::endgroup::
+
+::group::tests/native-model-toggle.test.ts:
+(pass) native GPT model toggles (bare slugs in disabledModels) > disabledNativeSlugs picks bare ids only; routed namespaced ids are ignored [0.09ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > visibleNativeSlugs omits disabled natives from the bare availability list [3.55ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > nativeModelRows lists the full static supported set regardless of disabled state [0.19ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > catalog sync flips supported natives to visibility hide and restores list on re-enable [2.43ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > visibility hide survives the upstream-upgrade branch for synthesized 5.6 entries [1.13ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > backfilled missing natives are synthesized hidden while disabled [1.33ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > applyNativeVisibility never touches routed or unsupported entries [0.05ms]
+(pass) native GPT model toggles (bare slugs in disabledModels) > management API surfaces: /api/models leads with native rows; subagent available drops disabled bare slugs [8.37ms]
+
+::endgroup::
+
+::group::tests/claude-sidecar-override.test.ts:
+(pass) Claude replay overrides both sidecars while preserving global-only settings [0.26ms]
+(pass) unset Claude overrides inherit the global sidecar backend and model [0.08ms]
+
+::endgroup::
+
+::group::tests/grok-selection.test.ts:
+(pass) no exclusions is byte-identical to the old writer [0.23ms]
+(pass) excluding one id omits exactly that table and keeps the others [0.09ms]
+(pass) excluding an unknown id changes nothing [0.09ms]
+(pass) excluding a colliding model leaves the survivor's alias unchanged [0.19ms]
+(pass) excluding the first model keeps the TOML shape valid [0.08ms]
+(pass) excluding everything writes a marker-only fence that strip removes [0.97ms]
+(pass) a user-reserved alias still pushes generated aliases past it while exclusions are active [1.00ms]
+(pass) syncGrokConfig with grokExcludedModels omits that model's table end to end [3.84ms]
+
+::endgroup::
+
+::group::tests/usage-failure-persistence.test.ts:
+(pass) 5xx entry persists failure diagnostics to usage.jsonl (survives the ring buffer) [0.98ms]
+(pass) successful entry keeps the existing persisted shape (no diagnostic fields) [0.46ms]
+
+::endgroup::
+
+::group::tests/codex-shim-autorestore.test.ts:
+(pass) Codex shim CLI auto-restore policy > skips destructive and explicit repair commands but keeps status and ordinary commands eligible [0.13ms]
+(pass) Codex shim CLI auto-restore policy > restore failure -> warning only, command succeeds [0.23ms]
+(pass) Codex shim CLI auto-restore policy > successful automatic repair warns exactly once [0.07ms]
+(pass) Codex shim CLI auto-restore policy > actionable mixed-sibling deferrals are logged while ordinary deferrals stay silent [0.04ms]
+(pass) Codex shim CLI auto-restore policy > healthy, not-installed, disabled, and deferred outcomes stay silent and lazy [0.07ms]
+(pass) Codex shim CLI auto-restore policy > opt-out config and environment are evaluated lazily only for a candidate [0.21ms]
+(pass) Codex shim CLI auto-restore policy > oversized shim state is bounded, skipped, and warned without loading config [2.06ms]
+(pass) Codex shim CLI auto-restore policy > shim replaced -> next ocx command auto-restores and warns [525.83ms]
+
+::endgroup::
+
+::group::tests/google-models-listing.test.ts:
+(pass) buildModelsRequest google routing > ai-studio google uses x-goog-api-key + /v1beta/models [0.27ms]
+(pass) buildModelsRequest google routing > custom google-adapter provider without googleMode defaults to ai-studio [0.11ms]
+(pass) buildModelsRequest google routing > google-antigravity (oauth) keeps Authorization: Bearer via registry backfill [0.06ms]
+(pass) buildModelsRequest google routing > google-vertex without googleMode resolves vertex via registry, not ai-studio [0.05ms]
+(pass) google models listing via catalog > treats a { models } 2xx shape as malformed and degrades to the static seed [34.59ms]
+[opencodex] Provider model discovery for "flaky" threw Error [urlClass=provider-models, fallback=configured].
+[opencodex] Provider model discovery for "flaky" threw Error [urlClass=provider-models, fallback=configured].
+(pass) models fetch failure cooldown > a failed provider fetch is not retried within the cooldown window [68.81ms]
+
+::endgroup::
+
+::group::tests/run-turn-queue.test.ts:
+(pass) run-turn adapter event queue > collect preserves push order after close [0.51ms]
+(pass) run-turn adapter event queue > stream wakes a pending reader when an event is pushed [0.19ms]
+(pass) run-turn adapter event queue > close is idempotent and wakes pending readers [0.07ms]
+(pass) run-turn adapter event queue > push after close is ignored [0.06ms]
+(pass) run-turn adapter event queue > aborts and closes with a terminal error when the default backlog cap is exceeded [1.95ms]
+(pass) run-turn adapter event queue > does not count direct handoff to an active consumer toward the backlog cap [4.18ms]
+(pass) run-turn adapter event preflight > heartbeat then error reports pre-commit failure without duplicate replay [0.71ms]
+(pass) run-turn adapter event preflight > heartbeat text done commits and replays the full order once [0.13ms]
+(pass) run-turn adapter event preflight > heartbeat text error stays committed and replays each event once [0.10ms]
+(pass) run-turn adapter event preflight > immediate done is a commit [0.06ms]
+(pass) run-turn adapter event preflight > empty close is an empty pre-commit failure [0.06ms]
+(pass) run-turn adapter event preflight > leading error cancels the source iterator [0.20ms]
+
+::endgroup::
+
+::group::tests/provider-api-keys.test.ts:
+🚀 opencodex proxy running on http://localhost:36169
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) provider API key pool > GET seeds legacy bare apiKey into a one-entry pool with masked value [27.22ms]
+🚀 opencodex proxy running on http://localhost:40383
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) provider API key pool > POST adds + activates; PUT switches; DELETE removes and promotes [134.22ms]
+🚀 opencodex proxy running on http://localhost:44777
+   POST /v1/responses → provider translation
+   POST /v1/chat/completions → OpenAI-compatible clients
+   GET  /healthz      → health check
+   GET  /api/*        → management API
+   GET  /             → GUI dashboard
+(pass) provider API key pool > unknown provider 404; empty key 400 [33.87ms]
+
+::endgroup::
+
+::group::tests/crash-guard.test.ts:
+(pass) crash-guard diagnostics > surfaces the JSC throw site from hidden source fields when the stack is native-only [18.20ms]
+(pass) crash-guard diagnostics > does not add origin when a usable source frame already exists [0.08ms]
+(pass) crash-guard diagnostics > captures cause and code for shaped errors [0.08ms]
+(pass) crash-guard diagnostics > redacts secrets from crash entry details and diagnostics [0.12ms]
+(pass) crash-guard diagnostics > never throws on non-object rejection values [0.13ms]
+(pass) crash-guard diagnostics > dumps recent fetch origins (pending/rejected) in the breadcrumb [79.73ms]
+(pass) crash-guard diagnostics > records a sidecar breadcrumb when one is in flight [0.12ms]
+(pass) benign abort-teardown classification > flags the native-only bare TypeError as benign [0.07ms]
+(pass) benign abort-teardown classification > does NOT flag a TypeError with a real JS source frame [0.03ms]
+(pass) benign abort-teardown classification > does NOT flag a different message or the (evaluating …) form [0.03ms]
+(pass) benign abort-teardown classification > does NOT flag non-TypeError rejections [0.02ms]
+(pass) benign abort-teardown classification > flags the native-only locked-ReadableStream sink-close teardown as benign (260712) [0.03ms]
+(pass) benign abort-teardown classification > locked-ReadableStream shape needs the code AND a native-only stack [0.03ms]
+
+::endgroup::
+
+::group::tests/release-notes.test.ts:
+(pass) matchingPreviewTag > picks the newest matching preview tag for a stable version [0.29ms]
+(pass) matchingPreviewTag > returns null for preview versions and when no match exists [0.04ms]
+(pass) matchingPreviewTags > returns all matching preview tags oldest to newest [0.04ms]
+(pass) matchingPreviewTags > orders same-day previews numerically, not lexicographically [0.02ms]
+(pass) stripCarriedReleaseNotes > keeps PR categories and drops npm blurb, commits, and compare link [0.23ms]
+(pass) stripCarriedReleaseNotes > commits-only preview bodies strip to non-meaningful notes [0.22ms]
+(pass) joinCarriedPreviewNotes > aggregates multiple incremental preview bodies in order [0.11ms]
+(pass) selectNewestCarriedPreviewTag > keeps preview.1 as baseline when preview.2 is missing or empty [0.11ms]
+(pass) selectNewestCarriedPreviewTag > advances to preview.2 only when its body is meaningful [0.03ms]
+(pass) assembleReleaseNotes > copies preview notes and appends only the since-preview delta [0.13ms]
+(pass) assembleReleaseNotes > omits empty generate-notes delta that is only the config comment [0.05ms]
+(pass) assembleReleaseNotes > falls back to channel notes when no preview body is carried [0.07ms]
+
+::endgroup::
+
+::group::tests/adapter-usage.test.ts:
+(pass) adapter reasoning and usage details > OpenAI-compatible non-streaming maps reasoning_content and usage details [0.36ms]
+(pass) adapter reasoning and usage details > OpenAI-compatible streaming maps reasoning_content and usage details [1.48ms]
+(pass) adapter reasoning and usage details > OpenAI-compatible non-OpenAI providers receive the tool catalog nudge [0.52ms]
+(pass) adapter reasoning and usage details > OpenAI-compatible OpenAI hosts do not receive the non-OpenAI nudge [0.27ms]
+(pass) adapter reasoning and usage details > Anthropic usage maps cache tokens only when present [0.21ms]
+(pass) adapter reasoning and usage details > Anthropic usage does not fabricate cache tokens when absent [0.12ms]
+(pass) adapter reasoning and usage details > Anthropic API-key requests mark system prompt as cacheable [0.39ms]
+(pass) adapter reasoning and usage details > Anthropic OAuth requests keep Claude identity first and cache user system prompt [0.47ms]
+(pass) adapter reasoning and usage details > Anthropic requests mark the final tool definition as cacheable [0.32ms]
+(pass) adapter reasoning and usage details > Anthropic native automatic caching reserves one explicit breakpoint slot [0.40ms]
+(pass) adapter reasoning and usage details > Google usage maps cached and thoughts tokens when present [0.22ms]
+(pass) usage and content retention (F2) > openai-chat keeps content when usage and choices share one chunk [0.65ms]
+(pass) usage and content retention (F2) > openai-chat retains usage on EOF without [DONE] [0.48ms]
+(pass) usage and content retention (F2) > anthropic stream merges message_start input usage with message_delta output usage [0.75ms]
+(pass) usage and content retention (F2) > anthropic stream fails closed on EOF when message_stop and stop_reason are missing [0.52ms]
+(pass) usage and content retention (F2) > google emits exactly one done carrying usage [0.61ms]
+(pass) openai-chat tool history repair > inserts a synthetic assistant tool_call before orphan tool results [0.24ms]
+(pass) openai-chat tool history repair > keeps paired tool results attached to the prior assistant tool_call [0.21ms]
+(pass) anthropic tool result history repair > merges adjacent tool results after multiple tool uses into one user message [0.40ms]
+(pass) anthropic tool result history repair > adds an error tool result when history is missing a tool result [0.17ms]
+(pass) anthropic tool result history repair > preserves orphan tool results as text instead of invalid Anthropic tool_result blocks [0.15ms]
+(pass) anthropic tool result history repair > preserves duplicate adjacent tool results as text after the matching result [0.22ms]
+(pass) anthropic tool result history repair > maps non-string tool result content through Anthropic content blocks [17.61ms]
+
+::endgroup::
+
+::group::tests/doctor-oauth.test.ts:
+(pass) collectOAuthDoctorChecks > needsReauth account yields WARN with action and redacted id [22.98ms]
+(pass) collectOAuthDoctorChecks > emits storage, single-flight, and pass-through metadata notes [0.47ms]
+(pass) collectOAuthDoctorChecks > labels Codex health unavailable when proxy is down [0.42ms]
+(pass) collectOAuthDoctorChecks > Codex needsReauth WARN comes from management API, not CLI process maps [0.68ms]
+(pass) collectOAuthDoctorChecks > every WARN includes a recovery Action [1.41ms]
+(pass) collectOAuthDoctorChecks > doctor health path does not mutate auth.json [0.76ms]
+(pass) collectOAuthDoctorChecks > doctor does not backup corrupt auth.json [0.50ms]
+
+::endgroup::
+
+::group::tests/e2e-style/phase100-native-parity.test.ts:
+(pass) Phase 100 Codex-native parity smoke > routed model keeps native-like catalog affordances while runtime routes through opencodex sidecars and bridge errors [24.96ms]
+
+::endgroup::
+
+3 tests failed:
+(fail) kiro adapter — buildRequest > an account with no stored Kiro metadata never borrows different local CLI metadata [4.53ms]
+
+ 4846 pass
+ 3 fail
+ 2 errors
+ 23743 expect() calls
+Ran 4849 tests across 376 files. [154.99s]
