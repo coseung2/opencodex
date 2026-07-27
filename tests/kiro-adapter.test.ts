@@ -111,6 +111,7 @@ describe("kiro adapter — buildRequest", () => {
       "arn:aws:codewhisperer:eu-west-1:123456789012:profile/local-other-account",
       "eu-west-1",
     );
+    delete process.env.KIRO_REGION;
     await saveCredential("kiro", {
       access: "stored-access",
       refresh: "stored-refresh",
