@@ -1,0 +1,38 @@
+name: Rebase PR 447 onto current upstream dev
+
+on:
+  push:
+    branches:
+      - diag/pr447-rebase
+    paths:
+      - .github/workflows/pr447-rebase.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout orchestrator branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+      - name: Rebase PR branch onto upstream dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/lidge-jun/opencodex.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/lidge-jun/opencodex.git
+          git fetch --no-tags upstream dev
+          git fetch --no-tags origin fix/kiro-multiauth
+          git checkout -B fix/kiro-multiauth origin/fix/kiro-multiauth
+          git rebase upstream/dev
+          git push --force-with-lease=refs/heads/fix/kiro-multiauth:d972876662ee733d3b7e1d6b76431a8c428f613f \
+            origin HEAD:refs/heads/fix/kiro-multiauth
+      - name: Remove orchestrator branch
+        if: success()
+        shell: bash
+        run: git push origin --delete diag/pr447-rebase
