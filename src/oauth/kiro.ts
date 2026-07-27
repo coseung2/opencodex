@@ -13,6 +13,7 @@ import {
   discardKiroCliSessionRecovery,
   inferRegionFromProfileArn,
   inspectKiroCliSqliteSources,
+  inspectKiroCliSessionSnapshot,
   normalizeKiroRegion,
   persistKiroCliSessionRecovery,
   readImportedKiroCredential,
@@ -20,7 +21,6 @@ import {
   restoreKiroCliSession,
   restoreStaleKiroCliSessionRecovery,
   requireKiroRegion,
-  snapshotKiroCliSession,
   type ImportedKiroCredential,
   type KiroCliSessionSnapshot,
   type KiroImportDiagnostic,
@@ -202,7 +202,17 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
       instructions: "Kiro CLI is opening a fresh browser login. This also switches the account used by kiro-cli.",
     });
     ctrl.onProgress?.("Opening a fresh Kiro CLI browser login.");
-    const previousSession = snapshotKiroCliSession();
+    // Never log out of a session we could not capture: the recovery contract promises an exact
+    // restore, so an uncapturable store (unreadable / schema-mismatched / ambiguous token) must
+    // abort here rather than let a later failure destroy it permanently.
+    const inspected = inspectKiroCliSessionSnapshot();
+    if (inspected.blocked) {
+      throw new Error(
+        "Kiro CLI session could not be backed up, so OCX will not sign it out. " +
+          "Resolve the local kiro-cli credential store first (see `ocx account diagnose kiro`), then retry.",
+      );
+    }
+    const previousSession = inspected.snapshot;
     if (previousSession) persistKiroCliSessionRecovery(previousSession);
     try {
       const logout = await runner(["logout"], ctrl.signal);
@@ -348,8 +358,15 @@ async function refreshAwsSsoOidcToken(
   let metadata = credential?.kiro;
   if (!metadata) {
     const local = readImportedKiroCredential();
+    // Only a local store holding this exact refresh token describes this account. Anything else
+    // belongs to whichever account kiro-cli is currently signed into.
     if (local?.refresh === refresh) metadata = metadataFromImported(local);
   }
+  // A stored OCX account with no usable `kiro` metadata must still refresh account-scoped: falling
+  // through to `resolveKiroRegion(undefined)` would read KIRO_REGION or the local CLI import and
+  // borrow an unrelated account's region after a switch. An empty marker pins the default region.
+  // Only a truly accountless refresh (no stored credential) keeps the legacy env/local fallback.
+  if (!metadata && credential) metadata = {};
   const clientId = metadata?.clientId;
   const clientSecret = metadata?.clientSecret;
   if (!clientId || !clientSecret) return refreshKiroDesktopToken(refresh, signal, metadata);

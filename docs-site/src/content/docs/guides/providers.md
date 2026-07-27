@@ -166,6 +166,11 @@ and imports the fresh browser login. If the login is cancelled or fails, includi
 persists the credential, rollback replaces the Kiro CLI database and removes its current WAL, SHM,
 and journal sidecars before publishing the previous session snapshot.
 
+Because that rollback is only possible from a snapshot, **Add account** refuses to sign `kiro-cli`
+out when a session store is present but cannot be captured (unreadable file, mismatched schema, or
+an ambiguous token selection). Resolve the local store first, then retry. Signing in from a machine
+with no existing `kiro-cli` session is unaffected.
+
 ## 3. API-key catalog
 
 opencodex ships 53 built-in presets: 42 key-based, seven OAuth, three local, and the default

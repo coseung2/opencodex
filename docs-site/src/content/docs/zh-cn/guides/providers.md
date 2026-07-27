@@ -98,6 +98,8 @@ Kiro 登录需要 Kiro CLI：使用 `curl -fsSL https://cli.kiro.dev/install | b
 
 导入的凭据会保存到 `~/.opencodex/auth.json`。**添加账户**的回滚是独立流程：恢复之前的快照时会替换数据库，并删除当前的 WAL、SHM 和 journal 边车文件。
 
+由于回滚依赖快照，当会话存储已存在但无法捕获时（文件不可读、架构不匹配、令牌选择有歧义），**添加账户**会拒绝将 `kiro-cli` 登出。请先修复本地存储，然后重试。对于完全没有现有 `kiro-cli` 会话的机器，不受影响。
+
 ## 3. API 密钥目录
 
 opencodex v2.7.1 内置 50 个预设：40 个密钥预设、6 个 OAuth 预设、3 个本地预设，以及默认的

@@ -320,12 +320,50 @@ export function readKiroCliSqliteCredential(): ImportedKiroCredential | null {
 
 /** Capture the complete active CLI database so a failed account switch can restore it exactly. */
 export function snapshotKiroCliSession(): KiroCliSessionSnapshot | null {
-  const located = readSqliteCredentials([], true);
-  if (!located?.database) return null;
+  return inspectKiroCliSessionSnapshot().snapshot;
+}
+
+/**
+ * A store that exists but cannot be captured must never be logged out of: the recovery contract
+ * promises an exact restore, and without a snapshot a later failure would destroy the session for
+ * good. `missing`/`token_missing` are the only statuses that mean "there is nothing to lose".
+ */
+const KIRO_UNSNAPSHOTTABLE_SESSION_STATUSES: ReadonlySet<KiroDiagnosticStatus> = new Set([
+  "unreadable",
+  "schema_mismatch",
+  "invalid_json",
+  "token_ambiguous",
+  "token_key_missing",
+  "token_found",
+]);
+
+/**
+ * Capture the active CLI session and report why capture failed. `blocked` is true when a session
+ * store is present but could not be snapshotted (unreadable / schema-mismatched / ambiguous), so
+ * callers can abort before mutating it.
+ */
+export function inspectKiroCliSessionSnapshot(): {
+  snapshot: KiroCliSessionSnapshot | null;
+  diagnostics: KiroImportDiagnostic[];
+  blocked: boolean;
+} {
+  const diagnostics: KiroImportDiagnostic[] = [];
+  const located = readSqliteCredentials(diagnostics, true);
+  if (located?.database) {
+    return {
+      snapshot: {
+        path: located.path,
+        database: located.database,
+        recoveryPath: `${located.path}${KIRO_CLI_RECOVERY_SUFFIX}`,
+      },
+      diagnostics,
+      blocked: false,
+    };
+  }
   return {
-    path: located.path,
-    database: located.database,
-    recoveryPath: `${located.path}${KIRO_CLI_RECOVERY_SUFFIX}`,
+    snapshot: null,
+    diagnostics,
+    blocked: diagnostics.some(entry => KIRO_UNSNAPSHOTTABLE_SESSION_STATUSES.has(entry.status)),
   };
 }
 

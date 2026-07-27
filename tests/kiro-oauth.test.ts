@@ -283,6 +283,49 @@ describe("kiro oauth — import-first", () => {
     expect(readKiroCliSqlite()?.access).toBe("aoa-new");
   });
 
+  test("force login refuses to log out when a present CLI session cannot be snapshotted", async () => {
+    const dir = join(tmp, "Library", "Application Support", "kiro-cli");
+    mkdirSync(dir, { recursive: true });
+    const db = new Database(join(dir, "data.sqlite3"));
+    db.run("CREATE TABLE other_table (key TEXT PRIMARY KEY, value TEXT)");
+    db.close();
+    const calls: string[][] = [];
+
+    await expect(loginKiro({}, {
+      forceLogin: true,
+      cliRunner: async (args: string[]) => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "" };
+      },
+    })).rejects.toThrow(/could not be backed up/i);
+
+    expect(calls).toEqual([]);
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
+    expect(existsSync(join(dir, "data.sqlite3"))).toBe(true);
+  });
+
+  test("force login still proceeds when no CLI session exists at all", async () => {
+    const calls: string[][] = [];
+    const runner = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "login") {
+        seedKiroCliDb({
+          access_token: "aoa-first",
+          refresh_token: "rt-first",
+          profile_arn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/first",
+        });
+      }
+      if (args[0] === "whoami") return { exitCode: 0, stdout: JSON.stringify({ email: "first@example.com" }) };
+      return { exitCode: 0, stdout: "" };
+    };
+
+    const cred = await loginKiro({}, { forceLogin: true, cliRunner: runner });
+
+    expect(calls[0]).toEqual(["logout"]);
+    expect(cred.access).toBe("aoa-first");
+    expect(existsSync(kiroCliRecoveryPath())).toBe(false);
+  });
+
   test("next ordinary login restores stale crash recovery before importing SQLite", async () => {
     seedKiroCliDb({ access_token: "aoa-prior", refresh_token: "rt-prior" });
     const firstRunner = async (args: string[]) => {
@@ -746,6 +789,53 @@ describe("kiro oauth — import-first", () => {
       clientSecret: "stored-secret",
       refreshToken: "rt-stored",
     });
+  });
+
+  test("legacy stored credential without kiro metadata does not borrow the local CLI region", async () => {
+    // A legacy OCX account predates account-scoped metadata. The local CLI is signed into a
+    // different account in another region; refresh must not route through that region.
+    seedKiroCliDb({
+      access_token: "aoa-other-cli",
+      refresh_token: "rt-other-cli",
+      region: "ap-southeast-1",
+      profile_arn: "arn:aws:codewhisperer:ap-southeast-1:123456789012:profile/other",
+    });
+    let captured: string | undefined;
+    globalThis.fetch = (async (input) => {
+      captured = String(input);
+      return new Response(JSON.stringify({ accessToken: "aoa-legacy-new", expiresIn: 60 }), { status: 200 });
+    }) as typeof fetch;
+
+    const cred = await refreshKiroToken("rt-legacy", undefined, {
+      access: "aoa-legacy",
+      refresh: "rt-legacy",
+      expires: 0,
+    });
+
+    expect(captured).toBe("https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken");
+    expect(captured).not.toContain("ap-southeast-1");
+    expect(cred.access).toBe("aoa-legacy-new");
+  });
+
+  test("legacy stored credential ignores KIRO_REGION set for a different local account", async () => {
+    process.env.KIRO_REGION = "eu-central-1";
+    let captured: string | undefined;
+    globalThis.fetch = (async (input) => {
+      captured = String(input);
+      return new Response(JSON.stringify({ accessToken: "aoa-scoped-new", expiresIn: 60 }), { status: 200 });
+    }) as typeof fetch;
+
+    await refreshKiroToken("rt-legacy", undefined, {
+      access: "aoa-legacy",
+      refresh: "rt-legacy",
+      expires: 0,
+    });
+
+    expect(captured).toBe("https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken");
+
+    // A truly accountless refresh keeps the documented env fallback.
+    await refreshKiroToken("rt-accountless");
+    expect(captured).toBe("https://prod.eu-central-1.auth.desktop.kiro.dev/refreshToken");
   });
 
   test("stored refresh metadata does not inspect an unrelated ambiguous local CLI store", async () => {
