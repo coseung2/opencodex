@@ -12,27 +12,50 @@ permissions:
 
 jobs:
   rebase:
+    if: ${{ !contains(github.event.head_commit.message, '[rebase-result]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout orchestrator branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
-      - name: Rebase PR branch onto upstream dev
+      - name: Attempt rebase and publish diagnostics
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/lidge-jun/opencodex.git 2>/dev/null || \
             git remote set-url upstream https://github.com/lidge-jun/opencodex.git
           git fetch --no-tags upstream dev
-          git fetch --no-tags origin fix/kiro-multiauth
+          git fetch --no-tags origin fix/kiro-multiauth diag/pr447-rebase
           git checkout -B fix/kiro-multiauth origin/fix/kiro-multiauth
-          git rebase upstream/dev
-          git push --force-with-lease=refs/heads/fix/kiro-multiauth:d972876662ee733d3b7e1d6b76431a8c428f613f \
-            origin HEAD:refs/heads/fix/kiro-multiauth
-      - name: Remove orchestrator branch
-        if: success()
-        shell: bash
-        run: git push origin --delete diag/pr447-rebase
+          git rebase upstream/dev > /tmp/pr447-rebase.log 2>&1
+          rebase_status=$?
+          push_status=not-attempted
+          new_head=
+          if [ "$rebase_status" -eq 0 ]; then
+            new_head=$(git rev-parse HEAD)
+            git push --force-with-lease=refs/heads/fix/kiro-multiauth:d972876662ee733d3b7e1d6b76431a8c428f613f \
+              origin HEAD:refs/heads/fix/kiro-multiauth >> /tmp/pr447-rebase.log 2>&1
+            push_status=$?
+          fi
+          {
+            echo "rebase_status=$rebase_status"
+            echo "push_status=$push_status"
+            echo "new_head=$new_head"
+            echo "upstream_dev=$(git rev-parse upstream/dev)"
+            echo "--- conflicts ---"
+            git diff --name-only --diff-filter=U
+            echo "--- status ---"
+            git status --short
+            echo "--- log ---"
+            cat /tmp/pr447-rebase.log
+          } > /tmp/pr447-rebase-result.txt
+          if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then git rebase --abort; fi
+          git checkout -B diag/pr447-rebase origin/diag/pr447-rebase
+          cp /tmp/pr447-rebase-result.txt pr447-rebase-result.txt
+          git add pr447-rebase-result.txt
+          git commit -m "[rebase-result] capture PR 447 rebase result"
+          git push origin HEAD:diag/pr447-rebase
+          exit 0
