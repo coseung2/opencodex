@@ -8,6 +8,7 @@ import { loginXai, refreshXaiToken, XAI_LOCAL_CLI_DETACH_WARNING, XaiTokenReques
 import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthropicToken } from "./anthropic";
 import { loginKimi, refreshKimiToken } from "./kimi";
 import { KiroTokenRefreshError, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
+import { requireKiroRegion } from "./kiro-credentials";
 import { loginChatGPT, refreshChatGPTToken } from "./chatgpt";
 import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
@@ -199,21 +200,40 @@ export class OAuthLoginRequiredError extends Error {
   }
 }
 
+function kiroEnvironmentRoutingMetadata(): Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion"> | undefined {
+  const profileArn = process.env.KIRO_PROFILE_ARN?.trim() || undefined;
+  const apiRegion = process.env.KIRO_API_REGION !== undefined
+    ? requireKiroRegion(process.env.KIRO_API_REGION)
+    : undefined;
+  const ssoRegion = process.env.KIRO_REGION !== undefined
+    ? requireKiroRegion(process.env.KIRO_REGION)
+    : undefined;
+  if (!profileArn && !apiRegion && !ssoRegion) return undefined;
+  return {
+    ...(profileArn ? { profileArn } : {}),
+    ...(apiRegion ? { apiRegion } : {}),
+    ...(ssoRegion ? { ssoRegion } : {}),
+  };
+}
+
 function accessSnapshot(provider: string, accountId: string, cred: OAuthCredentials): OAuthAccessSnapshot {
+  const storedKiroRouting = {
+    ...(cred.kiro?.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
+    ...(cred.kiro?.apiRegion ? { apiRegion: cred.kiro.apiRegion } : {}),
+    ...(cred.kiro?.ssoRegion ? { ssoRegion: cred.kiro.ssoRegion } : {}),
+  };
   return {
     provider,
     accountId,
     generation: credentialGeneration(cred),
     accessToken: cred.access,
-    // Presence is the account-scope marker: an empty object means this selected account has no
-    // stored routing metadata and must not borrow metadata from the local Kiro CLI/environment.
+    // Stored account metadata remains authoritative. Metadata-less legacy/environment credentials
+    // may use explicit environment routing, but never borrow the currently signed-in local CLI account.
     ...(provider === "kiro"
       ? {
-          kiro: {
-            ...(cred.kiro?.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
-            ...(cred.kiro?.apiRegion ? { apiRegion: cred.kiro.apiRegion } : {}),
-            ...(cred.kiro?.ssoRegion ? { ssoRegion: cred.kiro.ssoRegion } : {}),
-          },
+          kiro: Object.keys(storedKiroRouting).length > 0
+            ? storedKiroRouting
+            : kiroEnvironmentRoutingMetadata() ?? {},
         }
       : {}),
   };
@@ -569,6 +589,8 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
 interface RunLoginDeps {
   saveCredential?: typeof saveCredential;
   saveAccountCredential?: typeof saveAccountCredential;
+  loadConfig?: typeof loadConfig;
+  saveConfig?: typeof saveConfig;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
 }
 
@@ -590,12 +612,15 @@ export async function runLogin(
     if (opts?.reauthAccountId) {
       const existing = getAccountCredential(provider, opts.reauthAccountId);
       if (!existing) throw new Error(`Unknown account for reauth: ${opts.reauthAccountId}`);
-      const expected = existing.accountId ?? existing.email;
-      const got = cred.accountId ?? cred.email;
-      if (!expected) {
+      if (!existing.accountId && !existing.email) {
         throw new Error("Could not verify signed-in account identity for reauth.");
       }
-      if (!got || expected !== got) {
+      const identityMatches = existing.accountId && cred.accountId
+        ? existing.accountId === cred.accountId
+        : existing.email && cred.email
+          ? existing.email.toLowerCase() === cred.email.toLowerCase()
+          : false;
+      if (!identityMatches) {
         throw new Error("Signed-in account does not match the selected account. Sign in with the same account.");
       }
       await (deps.saveAccountCredential ?? saveAccountCredential)(provider, opts.reauthAccountId, cred);
@@ -604,22 +629,23 @@ export async function runLogin(
         preserveIdentityless: provider === "kiro" && opts?.forceLogin === true,
       });
     }
+    if (provider !== "chatgpt") {
+      const config = (deps.loadConfig ?? loadConfig)();
+      upsertOAuthProvider(config, provider);
+      (deps.saveConfig ?? saveConfig)(config);
+    }
   } catch (error) {
     try {
       settleKiroTransaction(rawCred, false);
     } catch (restoreError) {
       throw new AggregateError(
         [error, restoreError],
-        "Kiro credential persistence failed and the previous Kiro CLI session could not be restored.",
+        "Kiro login persistence failed and the previous Kiro CLI session could not be restored.",
       );
     }
     throw error;
   }
   settleKiroTransaction(rawCred, true);
-  if (provider === "chatgpt") return cred;
-  const config = loadConfig();
-  upsertOAuthProvider(config, provider);
-  saveConfig(config);
   return cred;
 }
 

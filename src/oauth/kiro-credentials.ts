@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -5,7 +6,10 @@ import { Database } from "bun:sqlite";
 
 const DEFAULT_EXPIRES_MS = 3600_000;
 const KIRO_CLI_RECOVERY_SUFFIX = ".opencodex-recovery";
-const KIRO_CLI_RECOVERY_HEADER = Buffer.from("opencodex-kiro-session-v1\n", "utf8");
+const KIRO_CLI_RECOVERY_HEADER_V1 = Buffer.from("opencodex-kiro-session-v1\n", "utf8");
+const KIRO_CLI_RECOVERY_HEADER = Buffer.from("opencodex-kiro-session-v2\n", "utf8");
+const KIRO_CLI_RECOVERY_PROCESS_INSTANCE = randomUUID();
+const KIRO_CLI_RECOVERY_PROCESS_INSTANCE_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 const SQLITE_DATABASE_HEADER = Buffer.from("SQLite format 3\0", "binary");
 const KIRO_REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d$/;
 const CLIENT_ID_HASH_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -378,6 +382,7 @@ export function persistKiroCliSessionRecovery(snapshot: KiroCliSessionSnapshot):
     writeFileSync(staged, Buffer.concat([
       KIRO_CLI_RECOVERY_HEADER,
       Buffer.from(`${process.pid}\n`, "utf8"),
+      Buffer.from(`${KIRO_CLI_RECOVERY_PROCESS_INSTANCE}\n`, "utf8"),
       snapshot.database,
     ]), { flag: "wx", mode: 0o600 });
     try { chmodSync(staged, 0o600); } catch { /* platform may ignore chmod */ }
@@ -396,8 +401,43 @@ export function discardKiroCliSessionRecovery(snapshot: KiroCliSessionSnapshot):
   rmSync(snapshot.recoveryPath, { force: true });
 }
 
-function isKiroRecoveryOwnerAlive(ownerPid: number): boolean {
-  if (ownerPid === process.pid) return true;
+interface ParsedKiroCliSessionRecovery {
+  ownerPid: number;
+  ownerProcessInstance?: string;
+  database: Buffer;
+}
+
+function parseKiroCliSessionRecovery(payload: Buffer): ParsedKiroCliSessionRecovery | null {
+  const isV2 = payload.subarray(0, KIRO_CLI_RECOVERY_HEADER.length).equals(KIRO_CLI_RECOVERY_HEADER);
+  const isV1 = payload.subarray(0, KIRO_CLI_RECOVERY_HEADER_V1.length).equals(KIRO_CLI_RECOVERY_HEADER_V1);
+  if (!isV2 && !isV1) return null;
+  const headerLength = isV2 ? KIRO_CLI_RECOVERY_HEADER.length : KIRO_CLI_RECOVERY_HEADER_V1.length;
+  const ownerEnd = payload.indexOf(0x0a, headerLength);
+  if (ownerEnd <= headerLength) return null;
+  const ownerPid = Number(payload.subarray(headerLength, ownerEnd).toString("utf8"));
+  let databaseStart = ownerEnd + 1;
+  let ownerProcessInstance: string | undefined;
+  if (isV2) {
+    const instanceEnd = payload.indexOf(0x0a, databaseStart);
+    if (instanceEnd <= databaseStart) return null;
+    ownerProcessInstance = payload.subarray(databaseStart, instanceEnd).toString("utf8");
+    if (!KIRO_CLI_RECOVERY_PROCESS_INSTANCE_PATTERN.test(ownerProcessInstance)) return null;
+    databaseStart = instanceEnd + 1;
+  }
+  const database = payload.subarray(databaseStart);
+  if (
+    !Number.isSafeInteger(ownerPid) || ownerPid <= 0 ||
+    !database.subarray(0, SQLITE_DATABASE_HEADER.length).equals(SQLITE_DATABASE_HEADER)
+  ) {
+    return null;
+  }
+  return { ownerPid, ...(ownerProcessInstance ? { ownerProcessInstance } : {}), database };
+}
+
+function isKiroRecoveryOwnerAlive(ownerPid: number, ownerProcessInstance?: string): boolean {
+  // A restarted supervisor may reuse the exact same PID (commonly PID 1). Only this process
+  // instance's nonce proves that a same-PID recovery transaction is still live.
+  if (ownerPid === process.pid) return ownerProcessInstance === KIRO_CLI_RECOVERY_PROCESS_INSTANCE;
   try {
     process.kill(ownerPid, 0);
     return true;
@@ -450,28 +490,20 @@ export function restoreStaleKiroCliSessionRecovery(): boolean {
     const recoveryPath = `${path}${KIRO_CLI_RECOVERY_SUFFIX}`;
     if (!existsSync(recoveryPath)) continue;
     const payload = readFileSync(recoveryPath);
-    const ownerEnd = payload.indexOf(0x0a, KIRO_CLI_RECOVERY_HEADER.length);
-    const ownerPid = ownerEnd > KIRO_CLI_RECOVERY_HEADER.length
-      ? Number(payload.subarray(KIRO_CLI_RECOVERY_HEADER.length, ownerEnd).toString("utf8"))
-      : Number.NaN;
-    const database = ownerEnd >= 0 ? payload.subarray(ownerEnd + 1) : Buffer.alloc(0);
-    if (
-      !payload.subarray(0, KIRO_CLI_RECOVERY_HEADER.length).equals(KIRO_CLI_RECOVERY_HEADER) ||
-      !Number.isSafeInteger(ownerPid) || ownerPid <= 0 ||
-      !database.subarray(0, SQLITE_DATABASE_HEADER.length).equals(SQLITE_DATABASE_HEADER)
-    ) {
+    const recovery = parseKiroCliSessionRecovery(payload);
+    if (!recovery) {
       throw new Error(
         `Kiro CLI session recovery data is invalid: ${recoveryPath}. Remove this file to continue.`,
       );
     }
-    if (isKiroRecoveryOwnerAlive(ownerPid)) {
+    if (isKiroRecoveryOwnerAlive(recovery.ownerPid, recovery.ownerProcessInstance)) {
       throw new Error(
-        `Another Kiro CLI login transaction is still in progress (pid ${ownerPid}, ${recoveryPath}).`,
+        `Another Kiro CLI login transaction is still in progress (pid ${recovery.ownerPid}, ${recoveryPath}).`,
       );
     }
     const snapshot: KiroCliSessionSnapshot = {
       path,
-      database,
+      database: recovery.database,
       recoveryPath,
     };
     restoreKiroCliSession(snapshot);
