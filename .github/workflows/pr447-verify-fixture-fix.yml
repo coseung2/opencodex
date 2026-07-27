@@ -25,20 +25,12 @@ jobs:
           from pathlib import Path
           path = Path('tests/kiro-adapter.test.ts')
           text = path.read_text()
-          old = '''    seedKiroCliMetadata(
-              "arn:aws:codewhisperer:eu-west-1:123456789012:profile/local-other-account",
-              "eu-west-1",
-            );
-            await saveCredential("kiro", {'''.replace('      ', '')
-          new = '''    seedKiroCliMetadata(
-              "arn:aws:codewhisperer:eu-west-1:123456789012:profile/local-other-account",
-              "eu-west-1",
-            );
-            delete process.env.KIRO_REGION;
-            await saveCredential("kiro", {'''.replace('      ', '')
-          if old not in text:
-              raise SystemExit('expected fixture block not found')
-          path.write_text(text.replace(old, new, 1))
+          marker = '  test("an account with no stored Kiro metadata never borrows different local CLI metadata", async () => {'
+          marker_at = text.index(marker)
+          insertion = '    await saveCredential("kiro", {'
+          insertion_at = text.index(insertion, marker_at)
+          text = text[:insertion_at] + '    delete process.env.KIRO_REGION;\n' + text[insertion_at:]
+          path.write_text(text)
           PY
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
