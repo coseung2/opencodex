@@ -581,6 +581,8 @@ export function restoreStaleKiroCliSessionRecovery(): boolean {
     try {
       const claimed = readFileSync(claimedPath);
       if (!claimed.equals(payload)) {
+        // Put the unexpected claim back so an operator / later process can inspect it.
+        try { renameSync(claimedPath, recoveryPath); } catch { /* keep claimed path for manual recovery */ }
         throw new Error(
           `Kiro CLI session recovery data changed while claiming ${recoveryPath}. Remove leftover claim files under the kiro-cli data directory and retry.`,
         );
@@ -590,10 +592,15 @@ export function restoreStaleKiroCliSessionRecovery(): boolean {
         database: recovery.database,
         recoveryPath: claimedPath,
       });
-    } finally {
       rmSync(claimedPath, { force: true });
+      return true;
+    } catch (error) {
+      // Preserve the only copy of the prior database when restore fails (disk full, permissions).
+      if (existsSync(claimedPath) && !existsSync(recoveryPath)) {
+        try { renameSync(claimedPath, recoveryPath); } catch { /* claimed file remains for manual recovery */ }
+      }
+      throw error;
     }
-    return true;
   }
   return false;
 }

@@ -25,7 +25,7 @@ import {
   type KiroCliSessionSnapshot,
   type KiroImportDiagnostic,
 } from "./kiro-credentials";
-import { getAccountSet, removeAccount, saveAccountCredential } from "./store";
+import { getAccountSet, saveAccountCredential } from "./store";
 
 const DEFAULT_REGION = "us-east-1";
 const REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
@@ -69,17 +69,41 @@ export interface KiroLoginOptions {
 }
 
 const pendingKiroLoginTransactions = new WeakMap<OAuthCredentials, KiroCliSessionSnapshot>();
+/** Forced logins that started with no native CLI DB must logout on persistence failure. */
+const pendingKiroEmptyPriorSessions = new WeakSet<OAuthCredentials>();
+
+function logoutKiroCliBestEffort(): void {
+  try {
+    Bun.spawnSync(["kiro-cli", "logout"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      windowsHide: true,
+    });
+  } catch {
+    // Best-effort rollback when the prior CLI state was empty.
+  }
+}
 
 /** Settle the external CLI side of a forced login after OCX credential persistence resolves. */
 export function settleKiroLoginTransaction(credential: OAuthCredentials, persisted: boolean): void {
   const snapshot = pendingKiroLoginTransactions.get(credential);
-  if (!snapshot) return;
-  if (!persisted) restoreKiroCliSession(snapshot);
-  discardKiroCliSessionRecovery(snapshot);
+  const emptyPrior = pendingKiroEmptyPriorSessions.has(credential);
   pendingKiroLoginTransactions.delete(credential);
+  pendingKiroEmptyPriorSessions.delete(credential);
+  if (!persisted) {
+    if (snapshot) {
+      restoreKiroCliSession(snapshot);
+      discardKiroCliSessionRecovery(snapshot);
+      return;
+    }
+    if (emptyPrior) logoutKiroCliBestEffort();
+    return;
+  }
+  if (snapshot) discardKiroCliSessionRecovery(snapshot);
 }
 
-function restoreKiroLoginOrThrow(snapshot: KiroCliSessionSnapshot | null, cause: unknown): never {
+function restoreKiroLoginOrThrow(snapshot: KiroCliSessionSnapshot | null, emptyPrior: boolean, cause: unknown): never {
   if (snapshot) {
     try {
       restoreKiroCliSession(snapshot);
@@ -90,6 +114,8 @@ function restoreKiroLoginOrThrow(snapshot: KiroCliSessionSnapshot | null, cause:
         "Kiro login failed and the previous Kiro CLI session could not be restored.",
       );
     }
+  } else if (emptyPrior) {
+    logoutKiroCliBestEffort();
   }
   throw cause;
 }
@@ -169,10 +195,11 @@ export function environmentKiroRoutingMetadata(): Pick<KiroOAuthMetadata, "profi
 
 /**
  * Before Add-account switches the external CLI identity, bind any matching legacy identity-less
- * OCX row to the current CLI session. Unmatched identity-less rows cannot be refreshed or
- * reauthenticated after the switch, so they are removed instead of left selectable-but-broken.
+ * OCX row to the current CLI session. Unmatched identity-less rows are left alone here so a
+ * cancelled browser login cannot destroy the only stored credential; after a successful add they
+ * remain selectable but cannot borrow the new CLI identity (and reauth refuses identity-less slots).
  */
-async function bindOrRemoveLegacyIdentitylessKiroAccounts(
+async function bindMatchingLegacyIdentitylessKiroAccounts(
   runner: KiroCliRunner,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -189,19 +216,14 @@ async function bindOrRemoveLegacyIdentitylessKiroAccounts(
   } catch {
     imported = null;
   }
+  if (!imported?.refresh) return;
 
   for (const account of legacyAccounts) {
     const refresh = account.credential.refresh;
-    if (imported && refresh && imported.refresh === refresh) {
-      const bound = await oauthCredentialFromImported(imported, runner, signal);
-      if (!bound.accountId && !bound.email) {
-        await removeAccount("kiro", account.id);
-        continue;
-      }
-      await saveAccountCredential("kiro", account.id, bound);
-      continue;
-    }
-    await removeAccount("kiro", account.id);
+    if (!refresh || imported.refresh !== refresh) continue;
+    const bound = await oauthCredentialFromImported(imported, runner, signal);
+    if (!bound.accountId && !bound.email) continue;
+    await saveAccountCredential("kiro", account.id, bound);
   }
 }
 
@@ -272,7 +294,7 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
       );
     }
     const previousSession = inspected.snapshot;
-    await bindOrRemoveLegacyIdentitylessKiroAccounts(runner, ctrl.signal);
+    await bindMatchingLegacyIdentitylessKiroAccounts(runner, ctrl.signal);
     if (previousSession) persistKiroCliSessionRecovery(previousSession);
     try {
       const logout = await runner(["logout"], ctrl.signal);
@@ -289,9 +311,10 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
         throw new Error("Kiro login completed but OCX could not determine a stable account identity.");
       }
       if (previousSession) pendingKiroLoginTransactions.set(credential, previousSession);
+      else pendingKiroEmptyPriorSessions.add(credential);
       return credential;
     } catch (error) {
-      restoreKiroLoginOrThrow(previousSession, error);
+      restoreKiroLoginOrThrow(previousSession, !previousSession, error);
     }
   }
 

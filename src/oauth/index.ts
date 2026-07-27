@@ -4,7 +4,7 @@ import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
 import { loadConfig, resolveEnvValue, saveConfig } from "../config";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
-import { getAccountCredential, getAccountSet, replaceProviderAccountSet, saveAccountCredential, saveCredential, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, clearOAuthRefreshIntent } from "./store";
+import { getAccountCredential, getAccountSet, removeAccount, saveAccountCredential, saveCredential, setActiveAccount, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, clearOAuthRefreshIntent } from "./store";
 import { loginXai, refreshXaiToken, XAI_LOCAL_CLI_DETACH_WARNING, XaiTokenRequestError } from "./xai";
 import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthropicToken } from "./anthropic";
 import { loginKimi, refreshKimiToken } from "./kimi";
@@ -647,7 +647,26 @@ interface RunLoginDeps {
   loadConfig?: typeof loadConfig;
   saveConfig?: typeof saveConfig;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
-  replaceProviderAccountSet?: typeof replaceProviderAccountSet;
+  removeAccount?: typeof removeAccount;
+  setActiveAccount?: typeof setActiveAccount;
+}
+
+/** Roll back only accounts created by this forced login, preserving concurrent refreshes of others. */
+async function rollbackForcedKiroAccountWrite(
+  provider: string,
+  previousActiveId: string | undefined,
+  previousAccountIds: ReadonlySet<string>,
+  deps: Pick<RunLoginDeps, "removeAccount" | "setActiveAccount">,
+): Promise<void> {
+  const set = getAccountSet(provider);
+  if (!set) return;
+  for (const account of [...set.accounts]) {
+    if (previousAccountIds.has(account.id)) continue;
+    await (deps.removeAccount ?? removeAccount)(provider, account.id);
+  }
+  if (previousActiveId && getAccountCredential(provider, previousActiveId)) {
+    await (deps.setActiveAccount ?? setActiveAccount)(provider, previousActiveId);
+  }
 }
 
 /** Run the login flow, persist the credential + upsert the provider entry to disk, return cred. */
@@ -663,20 +682,8 @@ export async function runLogin(
   // for settlement even when source normalization below creates a derived credential object.
   const shouldRollbackKiroAccounts = provider === "kiro" && opts?.forceLogin === true;
   const previousKiroAccounts = shouldRollbackKiroAccounts ? getAccountSet(provider) : undefined;
-  const previousKiroAccountsSnapshot = shouldRollbackKiroAccounts
-    ? (previousKiroAccounts
-      ? {
-          activeAccountId: previousKiroAccounts.activeAccountId,
-          accounts: previousKiroAccounts.accounts.map(account => ({
-            id: account.id,
-            credential: { ...account.credential, ...(account.credential.kiro ? { kiro: { ...account.credential.kiro } } : {}) },
-            ...(account.alias ? { alias: account.alias } : {}),
-            ...(account.needsReauth ? { needsReauth: true } : {}),
-            ...(account.addedAt !== undefined ? { addedAt: account.addedAt } : {}),
-          })),
-        }
-      : null)
-    : undefined;
+  const previousKiroActiveId = previousKiroAccounts?.activeAccountId;
+  const previousKiroAccountIds = new Set(previousKiroAccounts?.accounts.map(account => account.id) ?? []);
   const rawCred = await def.login(ctrl, opts);
   const cred: OAuthCredentials = rawCred.source ? rawCred : { ...rawCred, source: "oauth" };
   const settleKiroTransaction = deps.settleKiroLoginTransaction ?? settleKiroLoginTransaction;
@@ -707,14 +714,22 @@ export async function runLogin(
       (deps.saveConfig ?? saveConfig)(config);
     }
   } catch (error) {
-    if (previousKiroAccountsSnapshot !== undefined) {
-      await (deps.replaceProviderAccountSet ?? replaceProviderAccountSet)(provider, previousKiroAccountsSnapshot);
+    const errors: unknown[] = [error];
+    if (shouldRollbackKiroAccounts) {
+      try {
+        await rollbackForcedKiroAccountWrite(provider, previousKiroActiveId, previousKiroAccountIds, deps);
+      } catch (rollbackError) {
+        errors.push(rollbackError);
+      }
     }
     try {
       settleKiroTransaction(rawCred, false);
     } catch (restoreError) {
+      errors.push(restoreError);
+    }
+    if (errors.length > 1) {
       throw new AggregateError(
-        [error, restoreError],
+        errors,
         "Kiro login persistence failed and the previous Kiro CLI session could not be restored.",
       );
     }
