@@ -122,16 +122,28 @@ function jsonCredentialPaths(): string[] {
     .map(expandPath);
 }
 
-function sqliteEntries(): Array<{ location: KiroImportDiagnostic["location"]; path: string }> {
+function nativeKiroCliSessionEntries(): Array<{ location: "kiro-cli-data" | "kiro-cli-linux-data"; path: string }> {
   const home = userHome();
-  const configured = process.env.KIROCLI_DB_PATH?.trim() || process.env.KIRO_CLI_DB_FILE?.trim();
-  if (configured) return [{ location: "kiro-cli-db-env", path: expandPath(configured) }];
+  // Only the stores that `kiro-cli logout` / `kiro-cli login` themselves mutate. Import fallbacks
+  // (Amazon Q / SSO cache) and KIROCLI_DB_PATH selectors must not be snapshotted for rollback.
   return [
     { location: "kiro-cli-data", path: join(home, "Library", "Application Support", "kiro-cli", "data.sqlite3") },
     { location: "kiro-cli-linux-data", path: join(home, ".local", "share", "kiro-cli", "data.sqlite3") },
-    { location: "amazon-q-data", path: join(home, ".local", "share", "amazon-q", "data.sqlite3") },
-    { location: "kiro-sso-cache", path: join(home, ".kiro", "sso", "cache.db") },
   ];
+}
+
+function sqliteEntries(): Array<{ location: KiroImportDiagnostic["location"]; path: string }> {
+  const configured = process.env.KIROCLI_DB_PATH?.trim() || process.env.KIRO_CLI_DB_FILE?.trim();
+  if (configured) return [{ location: "kiro-cli-db-env", path: expandPath(configured) }];
+  return [
+    ...nativeKiroCliSessionEntries(),
+    { location: "amazon-q-data", path: join(userHome(), ".local", "share", "amazon-q", "data.sqlite3") },
+    { location: "kiro-sso-cache", path: join(userHome(), ".kiro", "sso", "cache.db") },
+  ];
+}
+
+function kiroCliImportSelectorConfigured(): boolean {
+  return Boolean(process.env.KIROCLI_DB_PATH?.trim() || process.env.KIRO_CLI_DB_FILE?.trim());
 }
 
 function selectTokenRow(db: Database): { value: string } | null | "ambiguous" | "selected_missing" {
@@ -345,6 +357,10 @@ const KIRO_UNSNAPSHOTTABLE_SESSION_STATUSES: ReadonlySet<KiroDiagnosticStatus> =
  * Capture the active CLI session and report why capture failed. `blocked` is true when a session
  * store is present but could not be snapshotted (unreadable / schema-mismatched / ambiguous), so
  * callers can abort before mutating it.
+ *
+ * Forced-login rollback must target the exact database `kiro-cli` mutates. Custom import selectors
+ * and lower-priority Amazon Q / SSO caches are never used here: snapshotting the wrong file would
+ * leave the real CLI session switched or lost after failure.
  */
 export function inspectKiroCliSessionSnapshot(): {
   snapshot: KiroCliSessionSnapshot | null;
@@ -352,18 +368,71 @@ export function inspectKiroCliSessionSnapshot(): {
   blocked: boolean;
 } {
   const diagnostics: KiroImportDiagnostic[] = [];
-  const located = readSqliteCredentials(diagnostics, true);
-  if (located?.database) {
-    return {
-      snapshot: {
-        path: located.path,
-        database: located.database,
-        recoveryPath: `${located.path}${KIRO_CLI_RECOVERY_SUFFIX}`,
-      },
-      diagnostics,
-      blocked: false,
-    };
+  if (kiroCliImportSelectorConfigured()) {
+    diagnostics.push({ location: "kiro-cli-db-env", status: "token_ambiguous" });
+    return { snapshot: null, diagnostics, blocked: true };
   }
+
+  for (const { location, path } of nativeKiroCliSessionEntries()) {
+    if (!existsSync(path)) {
+      diagnostics.push({ location, status: "missing" });
+      continue;
+    }
+
+    let db: Database | undefined;
+    try {
+      db = new Database(path, { readonly: true });
+      try { db.exec("PRAGMA busy_timeout = 5000"); } catch { /* read-only best effort */ }
+    } catch {
+      diagnostics.push({ location, status: "unreadable" });
+      return { snapshot: null, diagnostics, blocked: true };
+    }
+
+    try {
+      const row = selectTokenRow(db);
+      if (row === "ambiguous") {
+        diagnostics.push({ location, status: "token_ambiguous" });
+        return { snapshot: null, diagnostics, blocked: true };
+      }
+      if (row === "selected_missing") {
+        diagnostics.push({ location, status: "token_key_missing" });
+        return { snapshot: null, diagnostics, blocked: true };
+      }
+      if (!row) {
+        // An existing CLI database with no recognized token is still what logout mutates. Falling
+        // through to Amazon Q / another platform path would snapshot the wrong store.
+        diagnostics.push({ location, status: "token_missing" });
+        return { snapshot: null, diagnostics, blocked: true };
+      }
+      try {
+        JSON.parse(row.value);
+      } catch {
+        diagnostics.push({ location, status: "invalid_json" });
+        return { snapshot: null, diagnostics, blocked: true };
+      }
+      const database = db.serialize();
+      diagnostics.push({ location, status: "token_found" });
+      return {
+        snapshot: {
+          path,
+          database,
+          recoveryPath: `${path}${KIRO_CLI_RECOVERY_SUFFIX}`,
+        },
+        diagnostics,
+        blocked: false,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("KIROCLI_TOKEN_KEY")) {
+        diagnostics.push({ location, status: "token_key_missing" });
+        return { snapshot: null, diagnostics, blocked: true };
+      }
+      diagnostics.push({ location, status: "schema_mismatch" });
+      return { snapshot: null, diagnostics, blocked: true };
+    } finally {
+      db.close();
+    }
+  }
+
   return {
     snapshot: null,
     diagnostics,
@@ -486,7 +555,7 @@ export function restoreKiroCliSession(snapshot: KiroCliSessionSnapshot): void {
 
 /** Restore a transaction abandoned by a crashed process before starting another forced login. */
 export function restoreStaleKiroCliSessionRecovery(): boolean {
-  for (const { path } of sqliteEntries()) {
+  for (const { path } of nativeKiroCliSessionEntries()) {
     const recoveryPath = `${path}${KIRO_CLI_RECOVERY_SUFFIX}`;
     if (!existsSync(recoveryPath)) continue;
     const payload = readFileSync(recoveryPath);
@@ -501,13 +570,29 @@ export function restoreStaleKiroCliSessionRecovery(): boolean {
         `Another Kiro CLI login transaction is still in progress (pid ${recovery.ownerPid}, ${recoveryPath}).`,
       );
     }
-    const snapshot: KiroCliSessionSnapshot = {
-      path,
-      database: recovery.database,
-      recoveryPath,
-    };
-    restoreKiroCliSession(snapshot);
-    discardKiroCliSessionRecovery(snapshot);
+    // Atomically claim the marker before restoring so a concurrent process cannot restore the
+    // same stale image (and later delete a newer recovery file published by the winner).
+    const claimedPath = `${recoveryPath}.claimed.${process.pid}.${Date.now()}`;
+    try {
+      renameSync(recoveryPath, claimedPath);
+    } catch {
+      continue;
+    }
+    try {
+      const claimed = readFileSync(claimedPath);
+      if (!claimed.equals(payload)) {
+        throw new Error(
+          `Kiro CLI session recovery data changed while claiming ${recoveryPath}. Remove leftover claim files under the kiro-cli data directory and retry.`,
+        );
+      }
+      restoreKiroCliSession({
+        path,
+        database: recovery.database,
+        recoveryPath: claimedPath,
+      });
+    } finally {
+      rmSync(claimedPath, { force: true });
+    }
     return true;
   }
   return false;

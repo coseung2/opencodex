@@ -168,8 +168,10 @@ and journal sidecars before publishing the previous session snapshot.
 
 Because that rollback is only possible from a snapshot, **Add account** refuses to sign `kiro-cli`
 out when a session store is present but cannot be captured (unreadable file, mismatched schema, or
-an ambiguous token selection). Resolve the local store first, then retry. Signing in from a machine
-with no existing `kiro-cli` session is unaffected.
+an ambiguous token selection), when `KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` redirect import reads away
+from the live CLI store, or when an existing primary CLI database has no recognized token row.
+Repair or remove the unreadable database under the normal `kiro-cli` data path, unset those import
+selectors, then retry. Signing in from a machine with no existing `kiro-cli` session is unaffected.
 
 ## 3. API-key catalog
 

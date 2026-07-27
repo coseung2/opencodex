@@ -25,6 +25,7 @@ import {
   type KiroCliSessionSnapshot,
   type KiroImportDiagnostic,
 } from "./kiro-credentials";
+import { getAccountSet, removeAccount, saveAccountCredential } from "./store";
 
 const DEFAULT_REGION = "us-east-1";
 const REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
@@ -149,6 +150,61 @@ function metadataFromImported(imported: ImportedKiroCredential): KiroOAuthMetada
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
+/** Persistable routing subset from explicit KIRO_* environment overrides (never local CLI state). */
+export function environmentKiroRoutingMetadata(): Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion"> | undefined {
+  const profileArn = process.env.KIRO_PROFILE_ARN?.trim() || undefined;
+  const apiRegion = process.env.KIRO_API_REGION !== undefined
+    ? requireKiroRegion(process.env.KIRO_API_REGION)
+    : undefined;
+  const ssoRegion = process.env.KIRO_REGION !== undefined
+    ? requireKiroRegion(process.env.KIRO_REGION)
+    : undefined;
+  if (!profileArn && !apiRegion && !ssoRegion) return undefined;
+  return {
+    ...(profileArn ? { profileArn } : {}),
+    ...(apiRegion ? { apiRegion } : {}),
+    ...(ssoRegion ? { ssoRegion } : {}),
+  };
+}
+
+/**
+ * Before Add-account switches the external CLI identity, bind any matching legacy identity-less
+ * OCX row to the current CLI session. Unmatched identity-less rows cannot be refreshed or
+ * reauthenticated after the switch, so they are removed instead of left selectable-but-broken.
+ */
+async function bindOrRemoveLegacyIdentitylessKiroAccounts(
+  runner: KiroCliRunner,
+  signal?: AbortSignal,
+): Promise<void> {
+  const set = getAccountSet("kiro");
+  if (!set) return;
+  const legacyAccounts = set.accounts.filter(
+    account => account.credential.accountId === undefined && account.credential.email === undefined,
+  );
+  if (legacyAccounts.length === 0) return;
+
+  let imported: ImportedKiroCredential | null = null;
+  try {
+    imported = readKiroCliSqliteCredential();
+  } catch {
+    imported = null;
+  }
+
+  for (const account of legacyAccounts) {
+    const refresh = account.credential.refresh;
+    if (imported && refresh && imported.refresh === refresh) {
+      const bound = await oauthCredentialFromImported(imported, runner, signal);
+      if (!bound.accountId && !bound.email) {
+        await removeAccount("kiro", account.id);
+        continue;
+      }
+      await saveAccountCredential("kiro", account.id, bound);
+      continue;
+    }
+    await removeAccount("kiro", account.id);
+  }
+}
+
 async function oauthCredentialFromImported(
   imported: ImportedKiroCredential,
   runner: KiroCliRunner,
@@ -209,10 +265,14 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
     if (inspected.blocked) {
       throw new Error(
         "Kiro CLI session could not be backed up, so OCX will not sign it out. " +
-          "Resolve the local kiro-cli credential store first (see `ocx account diagnose kiro`), then retry.",
+          "Repair or remove the unreadable kiro-cli credential database " +
+          "(usually `~/.local/share/kiro-cli/data.sqlite3` or " +
+          "`~/Library/Application Support/kiro-cli/data.sqlite3`), " +
+          "unset KIROCLI_DB_PATH / KIRO_CLI_DB_FILE if set for import-only overrides, then retry.",
       );
     }
     const previousSession = inspected.snapshot;
+    await bindOrRemoveLegacyIdentitylessKiroAccounts(runner, ctrl.signal);
     if (previousSession) persistKiroCliSessionRecovery(previousSession);
     try {
       const logout = await runner(["logout"], ctrl.signal);
@@ -244,7 +304,14 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
   const envToken = process.env.KIRO_ACCESS_TOKEN;
   if (envToken) {
     ctrl.onProgress?.("Using KIRO_ACCESS_TOKEN from environment.");
-    return { access: envToken, refresh: process.env.KIRO_REFRESH_TOKEN ?? "", expires: Date.now() + 3600_000, source: "environment" };
+    const routing = environmentKiroRoutingMetadata();
+    return {
+      access: envToken,
+      refresh: process.env.KIRO_REFRESH_TOKEN ?? "",
+      expires: Date.now() + 3600_000,
+      source: "environment",
+      ...(routing ? { kiro: routing } : {}),
+    };
   }
 
   if (ctrl.onManualCodeInput) {
@@ -260,7 +327,16 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
     });
     ctrl.onProgress?.("No kiro-cli token found. Paste a Kiro access token (starts with 'aoa'), or install the Kiro CLI and run `kiro-cli login` first.");
     const raw = (await ctrl.onManualCodeInput()).trim();
-    if (raw) return { access: raw, refresh: "", expires: Date.now() + 3600_000, source: "manual" };
+    if (raw) {
+      const routing = environmentKiroRoutingMetadata();
+      return {
+        access: raw,
+        refresh: "",
+        expires: Date.now() + 3600_000,
+        source: "manual",
+        ...(routing ? { kiro: routing } : {}),
+      };
+    }
   }
 
   throw new Error(
@@ -364,9 +440,14 @@ async function refreshAwsSsoOidcToken(
   }
   // A stored OCX account with no usable `kiro` metadata must still refresh account-scoped: falling
   // through to `resolveKiroRegion(undefined)` would read KIRO_REGION or the local CLI import and
-  // borrow an unrelated account's region after a switch. An empty marker pins the default region.
+  // borrow an unrelated account's region after a switch. Environment/manual credentials may still
+  // honor explicit KIRO_* routing; other stored accounts pin an empty marker (default region).
   // Only a truly accountless refresh (no stored credential) keeps the legacy env/local fallback.
-  if (!metadata && credential) metadata = {};
+  if (!metadata && credential) {
+    metadata = credential.source === "environment" || credential.source === "manual"
+      ? environmentKiroRoutingMetadata() ?? {}
+      : {};
+  }
   const clientId = metadata?.clientId;
   const clientSecret = metadata?.clientSecret;
   if (!clientId || !clientSecret) return refreshKiroDesktopToken(refresh, signal, metadata);

@@ -3,12 +3,11 @@ import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
 import { loadConfig, resolveEnvValue, saveConfig } from "../config";
 import { maskEmail } from "../lib/privacy";
-import { getAccountCredential, getAccountSet, saveAccountCredential, saveCredential, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, clearOAuthRefreshIntent } from "./store";
+import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
+import { getAccountCredential, getAccountSet, replaceProviderAccountSet, saveAccountCredential, saveCredential, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, clearOAuthRefreshIntent } from "./store";
 import { loginXai, refreshXaiToken, XAI_LOCAL_CLI_DETACH_WARNING, XaiTokenRequestError } from "./xai";
 import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthropicToken } from "./anthropic";
 import { loginKimi, refreshKimiToken } from "./kimi";
-import { KiroTokenRefreshError, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
-import { requireKiroRegion } from "./kiro-credentials";
 import { loginChatGPT, refreshChatGPTToken } from "./chatgpt";
 import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
@@ -201,22 +200,6 @@ export class OAuthLoginRequiredError extends Error {
   }
 }
 
-function kiroEnvironmentRoutingMetadata(): Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion"> | undefined {
-  const profileArn = process.env.KIRO_PROFILE_ARN?.trim() || undefined;
-  const apiRegion = process.env.KIRO_API_REGION !== undefined
-    ? requireKiroRegion(process.env.KIRO_API_REGION)
-    : undefined;
-  const ssoRegion = process.env.KIRO_REGION !== undefined
-    ? requireKiroRegion(process.env.KIRO_REGION)
-    : undefined;
-  if (!profileArn && !apiRegion && !ssoRegion) return undefined;
-  return {
-    ...(profileArn ? { profileArn } : {}),
-    ...(apiRegion ? { apiRegion } : {}),
-    ...(ssoRegion ? { ssoRegion } : {}),
-  };
-}
-
 function accessSnapshot(provider: string, accountId: string, cred: OAuthCredentials): OAuthAccessSnapshot {
   const storedKiroRouting = {
     ...(cred.kiro?.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
@@ -234,7 +217,7 @@ function accessSnapshot(provider: string, accountId: string, cred: OAuthCredenti
       ? {
           kiro: Object.keys(storedKiroRouting).length > 0
             ? storedKiroRouting
-            : kiroEnvironmentRoutingMetadata() ?? {},
+            : environmentKiroRoutingMetadata() ?? {},
         }
       : {}),
   };
@@ -664,6 +647,7 @@ interface RunLoginDeps {
   loadConfig?: typeof loadConfig;
   saveConfig?: typeof saveConfig;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
+  replaceProviderAccountSet?: typeof replaceProviderAccountSet;
 }
 
 /** Run the login flow, persist the credential + upsert the provider entry to disk, return cred. */
@@ -677,6 +661,22 @@ export async function runLogin(
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   // loginKiro keys its pending CLI-session transaction by object identity. Keep this exact object
   // for settlement even when source normalization below creates a derived credential object.
+  const shouldRollbackKiroAccounts = provider === "kiro" && opts?.forceLogin === true;
+  const previousKiroAccounts = shouldRollbackKiroAccounts ? getAccountSet(provider) : undefined;
+  const previousKiroAccountsSnapshot = shouldRollbackKiroAccounts
+    ? (previousKiroAccounts
+      ? {
+          activeAccountId: previousKiroAccounts.activeAccountId,
+          accounts: previousKiroAccounts.accounts.map(account => ({
+            id: account.id,
+            credential: { ...account.credential, ...(account.credential.kiro ? { kiro: { ...account.credential.kiro } } : {}) },
+            ...(account.alias ? { alias: account.alias } : {}),
+            ...(account.needsReauth ? { needsReauth: true } : {}),
+            ...(account.addedAt !== undefined ? { addedAt: account.addedAt } : {}),
+          })),
+        }
+      : null)
+    : undefined;
   const rawCred = await def.login(ctrl, opts);
   const cred: OAuthCredentials = rawCred.source ? rawCred : { ...rawCred, source: "oauth" };
   const settleKiroTransaction = deps.settleKiroLoginTransaction ?? settleKiroLoginTransaction;
@@ -707,6 +707,9 @@ export async function runLogin(
       (deps.saveConfig ?? saveConfig)(config);
     }
   } catch (error) {
+    if (previousKiroAccountsSnapshot !== undefined) {
+      await (deps.replaceProviderAccountSet ?? replaceProviderAccountSet)(provider, previousKiroAccountsSnapshot);
+    }
     try {
       settleKiroTransaction(rawCred, false);
     } catch (restoreError) {

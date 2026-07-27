@@ -444,6 +444,29 @@ export async function removeAccount(provider: string, accountId: string): Promis
   });
 }
 
+/** Replace or clear a provider account set (used for transactional Kiro add-account rollback). */
+export async function replaceProviderAccountSet(
+  provider: string,
+  set: ProviderAccountSet | null,
+): Promise<void> {
+  await mutateStore(store => {
+    if (!set || set.accounts.length === 0) {
+      delete store[provider];
+      return;
+    }
+    store[provider] = {
+      activeAccountId: set.activeAccountId,
+      accounts: set.accounts.map(account => ({
+        id: account.id,
+        credential: { ...account.credential, ...(account.credential.kiro ? { kiro: { ...account.credential.kiro } } : {}) },
+        ...(account.alias ? { alias: account.alias } : {}),
+        ...(account.needsReauth ? { needsReauth: true } : {}),
+        ...(account.addedAt !== undefined ? { addedAt: account.addedAt } : {}),
+      })),
+    };
+  });
+}
+
 export async function markAccountNeedsReauth(provider: string, accountId: string, needsReauth: boolean): Promise<void> {
   await mutateStore(store => {
     const account = store[provider]?.accounts.find(a => a.id === accountId);

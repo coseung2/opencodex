@@ -4,13 +4,14 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getValidAccessTokenSnapshot, OAUTH_PROVIDERS, runLogin } from "../src/oauth";
+import { loginKiro, refreshKiroToken } from "../src/oauth/kiro";
 import {
   inspectKiroCliSessionSnapshot,
   persistKiroCliSessionRecovery,
   readKiroCliSqliteCredential,
   restoreStaleKiroCliSessionRecovery,
 } from "../src/oauth/kiro-credentials";
-import { getAccountCredential, getAccountSet, saveCredential } from "../src/oauth/store";
+import { getAccountCredential, getAccountSet, saveCredential, setActiveAccount } from "../src/oauth/store";
 import type { OAuthController, OAuthCredentials } from "../src/oauth/types";
 import type { OcxConfig } from "../src/types";
 
@@ -48,22 +49,43 @@ function kiroCliRecoveryPath(): string {
   return `${kiroCliDbPath()}.opencodex-recovery`;
 }
 
+function amazonQDbPath(): string {
+  return join(tmp, ".local", "share", "amazon-q", "data.sqlite3");
+}
+
 function removeKiroCliDb(): void {
   for (const suffix of ["", "-wal", "-shm", "-journal"]) {
     rmSync(`${kiroCliDbPath()}${suffix}`, { force: true });
   }
 }
 
-function seedKiroCliDb(access: string, refresh: string): void {
-  const path = kiroCliDbPath();
+function seedSqliteTokenDb(
+  path: string,
+  access: string,
+  refresh: string,
+  opts: { profileArn?: string; emptyAuthKv?: boolean } = {},
+): void {
   mkdirSync(join(path, ".."), { recursive: true });
   const db = new Database(path);
   db.run("CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)");
-  db.run("INSERT INTO auth_kv (key, value) VALUES (?, ?)", [
-    "kirocli:social:token",
-    JSON.stringify({ access_token: access, refresh_token: refresh }),
-  ]);
+  if (!opts.emptyAuthKv) {
+    db.run("INSERT INTO auth_kv (key, value) VALUES (?, ?)", [
+      "kirocli:social:token",
+      JSON.stringify({ access_token: access, refresh_token: refresh }),
+    ]);
+  }
+  if (opts.profileArn) {
+    db.run("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)");
+    db.run("INSERT INTO state (key, value) VALUES (?, ?)", [
+      "api.codewhisperer.profile",
+      JSON.stringify({ arn: opts.profileArn }),
+    ]);
+  }
   db.close();
+}
+
+function seedKiroCliDb(access: string, refresh: string, opts: { profileArn?: string; emptyAuthKv?: boolean } = {}): void {
+  seedSqliteTokenDb(kiroCliDbPath(), access, refresh, opts);
 }
 
 function rewriteRecoveryProcessInstance(processInstance: string): void {
@@ -111,7 +133,16 @@ describe("Kiro review regressions", () => {
     });
     const snapshot = await getValidAccessTokenSnapshot("kiro");
 
-    expect(credential).toMatchObject({ access: "aoa-env", refresh: "rt-env", source: "environment" });
+    expect(credential).toMatchObject({
+      access: "aoa-env",
+      refresh: "rt-env",
+      source: "environment",
+      kiro: {
+        profileArn: "arn:aws:codewhisperer:ap-southeast-2:123456789012:profile/env",
+        apiRegion: "eu-west-1",
+        ssoRegion: "eu-central-1",
+      },
+    });
     expect(snapshot).toMatchObject({
       accessToken: "aoa-env",
       kiro: {
@@ -122,12 +153,50 @@ describe("Kiro review regressions", () => {
     });
   });
 
-  test("Kiro CLI recovery rolls back config persistence failures before settling the account switch", async () => {
+  test("environment credentials refresh with KIRO_REGION instead of defaulting to us-east-1", async () => {
+    process.env.KIRO_REGION = "eu-central-1";
+    const seen: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      seen.push(url);
+      return new Response(JSON.stringify({
+        accessToken: "aoa-refreshed",
+        refreshToken: "rt-refreshed",
+        expiresIn: 3600,
+      }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const fresh = await refreshKiroToken("rt-env", undefined, {
+        access: "aoa-expired",
+        refresh: "rt-env",
+        expires: 0,
+        source: "environment",
+      });
+      expect(fresh.access).toBe("aoa-refreshed");
+      expect(seen.some(url => url.includes("prod.eu-central-1.auth.desktop.kiro.dev"))).toBe(true);
+      expect(seen.some(url => url.includes("prod.us-east-1.auth.desktop.kiro.dev"))).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Kiro CLI recovery rolls back auth and config persistence failures", async () => {
+    await saveCredential("kiro", {
+      access: "old-access",
+      refresh: "old-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "arn:aws:codewhisperer:us-east-1:123456789012:profile/old",
+      email: "old@example.test",
+      source: "local-cli",
+    });
+    const previousActive = getAccountSet("kiro")!.activeAccountId;
     const rawCredential: OAuthCredentials = {
       access: "new-access",
       refresh: "new-refresh",
       expires: Date.now() + 60_000,
       accountId: "arn:aws:codewhisperer:us-east-1:123456789012:profile/new",
+      email: "new@example.test",
       source: "local-cli",
     };
     const events: string[] = [];
@@ -135,7 +204,6 @@ describe("Kiro review regressions", () => {
     OAUTH_PROVIDERS.kiro.login = async () => rawCredential;
     try {
       await expect(runLogin("kiro", {} as OAuthController, { forceLogin: true }, {
-        saveCredential: async () => { events.push("credential"); },
         loadConfig: () => {
           events.push("load-config");
           return config();
@@ -153,7 +221,97 @@ describe("Kiro review regressions", () => {
       OAUTH_PROVIDERS.kiro.login = originalLogin;
     }
 
-    expect(events).toEqual(["credential", "load-config", "save-config", "settle:false"]);
+    expect(events).toEqual(["load-config", "save-config", "settle:false"]);
+    expect(getAccountSet("kiro")?.activeAccountId).toBe(previousActive);
+    expect(getAccountSet("kiro")?.accounts).toHaveLength(1);
+    expect(getAccountCredential("kiro", previousActive)).toMatchObject({
+      access: "old-access",
+      accountId: "arn:aws:codewhisperer:us-east-1:123456789012:profile/old",
+    });
+  });
+
+  test("forced login refuses custom import DB selectors that diverge from the CLI store", async () => {
+    seedKiroCliDb("aoa-primary", "rt-primary", {
+      profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/primary",
+    });
+    const custom = join(tmp, "custom-import.sqlite3");
+    seedSqliteTokenDb(custom, "aoa-custom", "rt-custom", {
+      profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/custom",
+    });
+    process.env.KIROCLI_DB_PATH = custom;
+    const calls: string[][] = [];
+    await expect(loginKiro({} as OAuthController, {
+      forceLogin: true,
+      cliRunner: async args => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "" };
+      },
+    })).rejects.toThrow(/will not sign it out|KIROCLI_DB_PATH|KIRO_CLI_DB_FILE/);
+    expect(calls).toEqual([]);
+    expect(readFileSync(kiroCliDbPath()).length).toBeGreaterThan(0);
+    expect(inspectKiroCliSessionSnapshot()).toMatchObject({ blocked: true, snapshot: null });
+  });
+
+  test("forced login refuses when the primary CLI store exists but only a later fallback is readable", async () => {
+    mkdirSync(join(kiroCliDbPath(), ".."), { recursive: true });
+    writeFileSync(kiroCliDbPath(), "not-a-sqlite-database", { mode: 0o600 });
+    seedSqliteTokenDb(amazonQDbPath(), "aoa-fallback", "rt-fallback", {
+      profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/fallback",
+    });
+    const calls: string[][] = [];
+    await expect(loginKiro({} as OAuthController, {
+      forceLogin: true,
+      cliRunner: async args => {
+        calls.push(args);
+        return { exitCode: 0, stdout: "" };
+      },
+    })).rejects.toThrow(/will not sign it out/);
+    expect(calls).toEqual([]);
+    expect(existsSync(kiroCliDbPath())).toBe(true);
+    expect(readFileSync(kiroCliDbPath(), "utf8")).toBe("not-a-sqlite-database");
+  });
+
+  test("Add account binds a legacy identity-less Kiro row before switching and keeps it selectable", async () => {
+    const legacyArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/legacy";
+    const nextArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/next";
+    seedKiroCliDb("aoa-legacy", "rt-legacy", { profileArn: legacyArn });
+    await saveCredential("kiro", {
+      access: "aoa-legacy",
+      refresh: "rt-legacy",
+      expires: Date.now() + 60_000,
+      source: "local-cli",
+    });
+    const legacySlot = getAccountSet("kiro")!.activeAccountId;
+
+    const credential = await loginKiro({} as OAuthController, {
+      forceLogin: true,
+      cliRunner: async args => {
+        if (args[0] === "whoami") {
+          return { exitCode: 0, stdout: JSON.stringify({ email: "legacy@example.test" }) };
+        }
+        if (args[0] === "logout") {
+          removeKiroCliDb();
+          return { exitCode: 0, stdout: "" };
+        }
+        if (args[0] === "login") {
+          seedKiroCliDb("aoa-next", "rt-next", { profileArn: nextArn });
+          return { exitCode: 0, stdout: "" };
+        }
+        return { exitCode: 1, stdout: "" };
+      },
+    });
+    await saveCredential("kiro", credential, { preserveIdentityless: true });
+
+    const set = getAccountSet("kiro")!;
+    expect(set.accounts.length).toBeGreaterThanOrEqual(2);
+    const legacy = getAccountCredential("kiro", legacySlot);
+    expect(legacy).toMatchObject({
+      accountId: legacyArn,
+      refresh: "rt-legacy",
+      kiro: { profileArn: legacyArn },
+    });
+    expect(await setActiveAccount("kiro", legacySlot)).toBe(true);
+    expect(getAccountSet("kiro")?.activeAccountId).toBe(legacySlot);
   });
 
   test("Kiro reauth accepts the same email when the refreshed credential gains a profile ARN", async () => {
