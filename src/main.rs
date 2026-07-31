@@ -4,8 +4,11 @@ mod api;
 mod model;
 
 use crate::model::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs;
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,7 +18,10 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+use windows::Win32::System::ProcessStatus::{
+    GetPerformanceInfo, K32GetProcessMemoryInfo, PERFORMANCE_INFORMATION,
+    PROCESS_MEMORY_COUNTERS_EX,
+};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -30,17 +36,61 @@ const MENU_EXIT: usize = 2;
 const MENU_THRESHOLD_DOWN: usize = 3;
 const MENU_THRESHOLD_UP: usize = 4;
 const MENU_THRESHOLD_BASE: usize = 1_000;
-const WIDTH: i32 = 640;
+const DEFAULT_WIDTH: i32 = 640;
+const MIN_WIDTH: i32 = 320;
+const MAX_WIDTH: i32 = 1_200;
+const RESIZE_EDGE: i32 = 7;
 const COLLAPSED_HEIGHT: i32 = 58;
 const USAGE_TOGGLE_HEIGHT: i32 = 42;
+const HEADER_TEXT_RIGHT: i32 = 132;
+const HEADER_CHART_LEFT: i32 = 140;
+const HEADER_LABEL_WIDTH: i32 = 82;
+const HEADER_LABEL_GAP: i32 = 8;
+const GIB: u64 = 1024 * 1024 * 1024;
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
+static LUCIDE_FONT_BYTES: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Button {
+    Power,
+    Minimize,
+}
+
+#[derive(Clone, Copy)]
+enum ResizeEdge {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct WindowPlacement {
+    x: i32,
+    y: i32,
+    width: i32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SystemMemory {
+    physical_total: u64,
+    physical_available: u64,
+    commit_total: u64,
+    commit_limit: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PressureLevel {
+    Stable,
+    Caution,
+    Danger,
+}
 
 enum Update {
     NativeMemory {
         pid: u32,
         working_set: u64,
         private_commit: u64,
+        system_memory: Option<SystemMemory>,
     },
     Health(Result<Health, String>),
     MemoryDetails(Result<MemoryDetails, String>),
@@ -55,9 +105,11 @@ enum Update {
 struct ViewState {
     online: bool,
     status: String,
+    action_error: Option<String>,
     pid: u32,
     working_set: u64,
     private_commit: u64,
+    system_memory: Option<SystemMemory>,
     details: Option<MemoryDetails>,
     configs: Vec<ProviderConfig>,
     quotas: Vec<QuotaReport>,
@@ -65,6 +117,7 @@ struct ViewState {
     pools: Vec<AccountPool>,
     providers: Vec<ProviderView>,
     auto_switch_threshold: u32,
+    active_codex_account_id: Option<String>,
 }
 
 struct App {
@@ -76,8 +129,15 @@ struct App {
     provider_hits: Vec<(RECT, String)>,
     show_usage_only: bool,
     usage_toggle_hit: Option<RECT>,
+    width: i32,
     drag_origin: Option<(POINT, RECT)>,
+    resize_origin: Option<(POINT, RECT, ResizeEdge)>,
     drag_moved: bool,
+    pressed_button: Option<Button>,
+    button_inside: bool,
+    power_hot: bool,
+    minimize_hot: bool,
+    power_pending: bool,
     user_positioned: bool,
     force_refresh: Arc<AtomicBool>,
     want_details: Arc<AtomicBool>,
@@ -91,19 +151,25 @@ impl App {
                     pid,
                     working_set,
                     private_commit,
+                    system_memory,
                 } => {
                     self.state.pid = pid;
                     self.state.working_set = working_set;
                     self.state.private_commit = private_commit;
+                    if let Some(system_memory) = system_memory {
+                        self.state.system_memory = Some(system_memory);
+                    }
                 }
                 Update::Health(result) => match result {
                     Ok(health) => {
                         self.state.online = true;
+                        self.state.action_error = None;
                         self.state.pid = health.pid;
                         self.state.status = "Connected".into();
                     }
                     Err(error) => {
                         self.state.online = false;
+                        self.state.action_error = None;
                         self.state.pid = 0;
                         self.state.working_set = 0;
                         self.state.private_commit = 0;
@@ -129,13 +195,18 @@ impl App {
                 },
                 Update::AutoSwitch(result) => match result {
                     Ok(value) => {
-                        self.state.auto_switch_threshold = value.auto_switch_threshold.min(100)
+                        self.state.auto_switch_threshold = value.auto_switch_threshold.min(100);
+                        self.state.active_codex_account_id = value.active_codex_account_id;
                     }
                     Err(error) => self.state.status = error,
                 },
                 Update::Pools(value) => self.state.pools = value,
             }
         }
+        mark_codex_active_account(
+            &mut self.state.pools,
+            self.state.active_codex_account_id.as_deref(),
+        );
         self.state.providers = merge_providers(
             &self.state.configs,
             &self.state.quotas,
@@ -267,6 +338,29 @@ fn account_height(account: &AccountView) -> i32 {
 fn main() -> windows::core::Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if let Ok(existing) = FindWindowW(CLASS_NAME, PCWSTR::null()) {
+            let _ = ShowWindow(existing, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                existing,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            return Ok(());
+        }
+        let mut lucide_font_count = 0u32;
+        let lucide_font_resource = AddFontMemResourceEx(
+            LUCIDE_FONT_BYTES.as_ptr().cast(),
+            LUCIDE_FONT_BYTES.len() as u32,
+            None,
+            &mut lucide_font_count,
+        );
+        if lucide_font_resource.is_invalid() || lucide_font_count == 0 {
+            return Err(windows::core::Error::from_win32());
+        }
         let instance = GetModuleHandleW(None)?;
         let cursor = LoadCursorW(None, IDC_ARROW)?;
         let class = WNDCLASSW {
@@ -288,7 +382,7 @@ fn main() -> windows::core::Result<()> {
             WS_POPUP,
             0,
             0,
-            WIDTH,
+            DEFAULT_WIDTH,
             COLLAPSED_HEIGHT,
             None,
             None,
@@ -296,6 +390,10 @@ fn main() -> windows::core::Result<()> {
             None,
         )?;
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 238, LWA_ALPHA)?;
+        let saved_placement = load_window_placement();
+        let initial_width = saved_placement
+            .map(|placement| placement.width.clamp(MIN_WIDTH, MAX_WIDTH))
+            .unwrap_or(DEFAULT_WIDTH);
         let (tx, rx) = mpsc::channel();
         let force_refresh = Arc::new(AtomicBool::new(true));
         let want_details = Arc::new(AtomicBool::new(false));
@@ -312,15 +410,28 @@ fn main() -> windows::core::Result<()> {
             provider_hits: Vec::new(),
             show_usage_only: false,
             usage_toggle_hit: None,
+            width: initial_width,
             drag_origin: None,
+            resize_origin: None,
             drag_moved: false,
-            user_positioned: false,
+            pressed_button: None,
+            button_inside: false,
+            power_hot: false,
+            minimize_hot: false,
+            power_pending: false,
+            user_positioned: saved_placement.is_some(),
             force_refresh: force_refresh.clone(),
             want_details: want_details.clone(),
         }))
         .ok();
-        position_window_on_cursor(hwnd, COLLAPSED_HEIGHT);
-        apply_round_region(hwnd, COLLAPSED_HEIGHT);
+        let restored_width = if let Some(placement) = saved_placement {
+            restore_window_placement(hwnd, placement, COLLAPSED_HEIGHT)
+        } else {
+            position_window_on_cursor(hwnd, initial_width, COLLAPSED_HEIGHT);
+            initial_width
+        };
+        with_app(|app| app.width = restored_width);
+        apply_round_region(hwnd, restored_width, COLLAPSED_HEIGHT);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         start_workers(hwnd.0 as isize, tx, force_refresh, want_details);
 
@@ -329,6 +440,7 @@ fn main() -> windows::core::Result<()> {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        let _ = RemoveFontMemResourceEx(lucide_font_resource);
     }
     Ok(())
 }
@@ -345,6 +457,7 @@ fn start_workers(
     thread::spawn(move || {
         let mut last_health = Instant::now() - Duration::from_secs(60);
         let mut last_usage = Instant::now() - Duration::from_secs(60);
+        let mut last_active = Instant::now() - Duration::from_secs(60);
         let mut last_slow = Instant::now() - Duration::from_secs(600);
         let mut last_details = Instant::now() - Duration::from_secs(60);
         loop {
@@ -375,12 +488,15 @@ fn start_workers(
                     &api_tx,
                     Update::Quotas(api::get_json("/api/provider-quotas", 30_000)),
                 );
+                last_slow = Instant::now();
+            }
+            if forced || last_active.elapsed() >= Duration::from_secs(5) {
                 send_update(
                     hwnd,
                     &api_tx,
-                    Update::AutoSwitch(api::get_json("/api/codex-auth/active", 10_000)),
+                    Update::AutoSwitch(api::get_json("/api/codex-auth/active", 3_000)),
                 );
-                last_slow = Instant::now();
+                last_active = Instant::now();
             }
             if want_details.load(Ordering::Relaxed)
                 && (forced || last_details.elapsed() >= Duration::from_secs(45))
@@ -400,6 +516,7 @@ fn start_workers(
         let current_pid = pid.load(Ordering::Relaxed);
         if current_pid != 0 {
             if let Some((working_set, private_commit)) = sample_process(current_pid) {
+                let system_memory = sample_system_memory();
                 send_update(
                     hwnd,
                     &tx,
@@ -407,6 +524,7 @@ fn start_workers(
                         pid: current_pid,
                         working_set,
                         private_commit,
+                        system_memory,
                     },
                 );
             }
@@ -423,6 +541,67 @@ fn send_update(hwnd: isize, tx: &Sender<Update>, update: Update) {
     }
 }
 
+fn launch_power_action(hwnd: HWND, action: &'static str) {
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::run_ocx_command(action);
+        if result.is_ok() {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                thread::sleep(Duration::from_millis(250));
+                let health = api::get_json::<Health>("/healthz", 750);
+                let reached_target = if action == "start" {
+                    health.is_ok()
+                } else {
+                    health.is_err()
+                };
+                if reached_target {
+                    with_app(|app| {
+                        app.power_pending = false;
+                        app.state.action_error = None;
+                        if let Ok(health) = health {
+                            app.state.online = true;
+                            app.state.pid = health.pid;
+                            app.state.status = "Connected".into();
+                            app.force_refresh.store(true, Ordering::Relaxed);
+                        } else {
+                            app.state.online = false;
+                            app.state.pid = 0;
+                            app.state.working_set = 0;
+                            app.state.private_commit = 0;
+                            app.state.status = "OCX offline".into();
+                        }
+                    });
+                    unsafe {
+                        let _ =
+                            PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+                    }
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+        }
+        with_app(|app| {
+            app.power_pending = false;
+            match result {
+                Ok(()) => {
+                    app.state.action_error = None;
+                    app.force_refresh.store(true, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    app.state.action_error = Some(error.clone());
+                    app.state.status = error;
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
 fn sample_process(pid: u32) -> Option<(u64, u64)> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
@@ -437,6 +616,108 @@ fn sample_process(pid: u32) -> Option<(u64, u64)> {
         let _ = CloseHandle(process);
         ok.then_some((counters.WorkingSetSize as u64, counters.PrivateUsage as u64))
     }
+}
+
+fn sample_system_memory() -> Option<SystemMemory> {
+    unsafe {
+        let mut performance = PERFORMANCE_INFORMATION::default();
+        performance.cb = size_of::<PERFORMANCE_INFORMATION>() as u32;
+        GetPerformanceInfo(&mut performance, performance.cb).ok()?;
+        let page_size = performance.PageSize as u64;
+        if page_size == 0 {
+            return None;
+        }
+        Some(SystemMemory {
+            physical_total: (performance.PhysicalTotal as u64).saturating_mul(page_size),
+            physical_available: (performance.PhysicalAvailable as u64).saturating_mul(page_size),
+            commit_total: (performance.CommitTotal as u64).saturating_mul(page_size),
+            commit_limit: (performance.CommitLimit as u64).saturating_mul(page_size),
+        })
+    }
+}
+
+fn pressure_info(memory: Option<SystemMemory>) -> Option<(PressureLevel, u64)> {
+    let memory = memory?;
+    if memory.physical_total == 0 || memory.commit_limit == 0 {
+        return None;
+    }
+
+    let physical_headroom = memory.physical_available.min(memory.physical_total);
+    let commit_headroom = memory.commit_limit.saturating_sub(memory.commit_total);
+    let caution_physical = (memory.physical_total / 10).max(2 * GIB);
+    let caution_commit = (memory.commit_limit / 10).max(2 * GIB);
+    let danger_physical = (memory.physical_total / 20).max(GIB);
+    let danger_commit = (memory.commit_limit / 20).max(GIB);
+    let danger = physical_headroom < danger_physical || commit_headroom < danger_commit;
+    let caution = physical_headroom < caution_physical || commit_headroom < caution_commit;
+    let level = if danger {
+        PressureLevel::Danger
+    } else if caution {
+        PressureLevel::Caution
+    } else {
+        PressureLevel::Stable
+    };
+    Some((level, physical_headroom.min(commit_headroom)))
+}
+
+fn pressure_label(level: PressureLevel) -> &'static str {
+    match level {
+        PressureLevel::Stable => "안정",
+        PressureLevel::Caution => "주의",
+        PressureLevel::Danger => "위험",
+    }
+}
+
+fn pressure_color(level: PressureLevel) -> u32 {
+    match level {
+        PressureLevel::Stable => 0x006ee7a8,
+        PressureLevel::Caution => 0x0024bffb,
+        PressureLevel::Danger => 0x005454f5,
+    }
+}
+
+fn header_chart_rect(width: i32, expanded: bool, top: i32, bottom: i32) -> RECT {
+    let controls_gap = if expanded { 82 } else { 50 };
+    RECT {
+        left: HEADER_CHART_LEFT,
+        top,
+        right: (width - controls_gap).max(HEADER_CHART_LEFT + 1),
+        bottom,
+    }
+}
+
+unsafe fn draw_capacity_gauge(dc: HDC, rect: RECT, current: u64, max: u64, color: u32) {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 || max == 0 {
+        return;
+    }
+
+    let step = 4;
+    let tick_count = ((width - 1) / step + 1).max(1);
+    let ratio = (current as f64 / max as f64).clamp(0.0, 1.0);
+    let filled = if current == 0 {
+        0
+    } else {
+        ((tick_count as f64 * ratio).ceil() as i32).clamp(1, tick_count)
+    };
+    let filled_pen = CreatePen(PS_SOLID, 1, COLORREF(color));
+    let empty_pen = CreatePen(PS_SOLID, 1, COLORREF(0x00423a35));
+    let old_pen = SelectObject(dc, empty_pen);
+    for index in 0..tick_count {
+        let pen = if index < filled {
+            filled_pen
+        } else {
+            empty_pen
+        };
+        let _ = SelectObject(dc, pen);
+        let x = rect.left + index * step;
+        let _ = MoveToEx(dc, x, rect.top, None);
+        let _ = LineTo(dc, x, rect.bottom);
+    }
+    let _ = SelectObject(dc, old_pen);
+    let _ = DeleteObject(filled_pen);
+    let _ = DeleteObject(empty_pen);
 }
 
 unsafe extern "system" fn window_proc(
@@ -456,24 +737,117 @@ unsafe extern "system" fn window_proc(
             paint(hwnd);
             LRESULT(0)
         }
+        WM_SETCURSOR => {
+            let mut point = POINT::default();
+            let mut rect = RECT::default();
+            let _ = GetCursorPos(&mut point);
+            let _ = ScreenToClient(hwnd, &mut point);
+            let _ = GetClientRect(hwnd, &mut rect);
+            if point.x >= 0 && point.x < rect.right && point.y >= 0 && point.y < rect.bottom {
+                let cursor_id = if point.x < RESIZE_EDGE || point.x >= rect.right - RESIZE_EDGE {
+                    IDC_SIZEWE
+                } else {
+                    IDC_ARROW
+                };
+                if let Ok(cursor) = LoadCursorW(None, cursor_id) {
+                    let _ = SetCursor(cursor);
+                    return LRESULT(1);
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
         WM_LBUTTONDOWN => {
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
             let mut cursor = POINT::default();
             let mut window = RECT::default();
             let _ = GetCursorPos(&mut cursor);
             let _ = GetWindowRect(hwnd, &mut window);
+            let mut button_down = false;
             with_app(|app| {
-                app.drag_origin = Some((cursor, window));
-                app.drag_moved = false;
+                app.power_hot = point_in(&power_hit_rect(app.width), x, y);
+                app.minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
+                let resize_edge = if x < RESIZE_EDGE {
+                    Some(ResizeEdge::Left)
+                } else if x >= app.width - RESIZE_EDGE {
+                    Some(ResizeEdge::Right)
+                } else {
+                    None
+                };
+                if let Some(edge) = resize_edge {
+                    app.resize_origin = Some((cursor, window, edge));
+                    app.pressed_button = None;
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                } else if app.power_hot {
+                    app.pressed_button = Some(Button::Power);
+                    app.button_inside = true;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
+                } else if app.minimize_hot {
+                    app.pressed_button = Some(Button::Minimize);
+                    app.button_inside = true;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
+                } else {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.button_inside = false;
+                    app.drag_origin = Some((cursor, window));
+                    app.drag_moved = false;
+                }
             });
             let _ = SetCapture(hwnd);
+            if button_down {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let x = (lparam.0 as i16) as i32;
+            let y = ((lparam.0 >> 16) as i16) as i32;
             let mut cursor = POINT::default();
             let _ = GetCursorPos(&mut cursor);
             let mut target = None;
+            let mut resize_target = None;
+            let mut changed = false;
             with_app(|app| {
-                if let Some((origin, window)) = app.drag_origin {
+                let power_hot = point_in(&power_hit_rect(app.width), x, y);
+                let minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
+                if app.power_hot != power_hot || app.minimize_hot != minimize_hot {
+                    changed = true;
+                }
+                app.power_hot = power_hot;
+                app.minimize_hot = minimize_hot;
+                if let Some(button) = app.pressed_button {
+                    let inside = match button {
+                        Button::Power => power_hot,
+                        Button::Minimize => minimize_hot,
+                    };
+                    if app.button_inside != inside {
+                        changed = true;
+                    }
+                    app.button_inside = inside;
+                } else if let Some((origin, window, edge)) = app.resize_origin {
+                    let dx = cursor.x - origin.x;
+                    let original_width = window.right - window.left;
+                    let width = match edge {
+                        ResizeEdge::Left => original_width - dx,
+                        ResizeEdge::Right => original_width + dx,
+                    }
+                    .clamp(MIN_WIDTH, MAX_WIDTH);
+                    let left = match edge {
+                        ResizeEdge::Left => window.right - width,
+                        ResizeEdge::Right => window.left,
+                    };
+                    app.width = width;
+                    app.drag_moved = true;
+                    app.user_positioned = true;
+                    resize_target = Some((left, window.top, width, window.bottom - window.top));
+                } else if let Some((origin, window)) = app.drag_origin {
                     let dx = cursor.x - origin.x;
                     let dy = cursor.y - origin.y;
                     if app.drag_moved || dx.abs() >= 4 || dy.abs() >= 4 {
@@ -486,18 +860,55 @@ unsafe extern "system" fn window_proc(
             if let Some((x, y)) = target {
                 let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
             }
+            if let Some((x, y, width, height)) = resize_target {
+                let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+                apply_round_region(hwnd, width, height);
+            }
+            if changed {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            let _ = ReleaseCapture();
             let x = (lparam.0 as i16) as i32;
             let y = ((lparam.0 >> 16) as i16) as i32;
             let mut changed = false;
             let mut was_drag = false;
+            let mut handled_button = false;
+            let mut power_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
+                let pressed_button = app.pressed_button.take();
+                let button_inside = app.button_inside;
+                app.button_inside = false;
                 app.drag_origin = None;
+                app.resize_origin = None;
                 app.drag_moved = false;
+                if let Some(button) = pressed_button {
+                    handled_button = true;
+                    changed = true;
+                    if button_inside {
+                        match button {
+                            Button::Power if !app.power_pending => {
+                                let action = if app.state.online { "stop" } else { "start" };
+                                app.power_pending = true;
+                                app.state.status = if action == "stop" {
+                                    "Stopping OCX...".into()
+                                } else {
+                                    "Starting OCX...".into()
+                                };
+                                power_action = Some(action);
+                            }
+                            Button::Minimize if app.expanded => {
+                                app.expanded = false;
+                                app.scroll_offset = 0;
+                                app.want_details.store(false, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
                 if was_drag {
                     return;
                 }
@@ -524,6 +935,20 @@ unsafe extern "system" fn window_proc(
                     changed = true;
                 }
             });
+            let _ = ReleaseCapture();
+            if was_drag {
+                save_window_placement(hwnd);
+            }
+            if let Some(action) = power_action {
+                launch_power_action(hwnd, action);
+            }
+            if handled_button {
+                if changed {
+                    resize_for_state(hwnd);
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
+                return LRESULT(0);
+            }
             if was_drag {
                 return LRESULT(0);
             }
@@ -536,7 +961,10 @@ unsafe extern "system" fn window_proc(
         WM_CAPTURECHANGED => {
             with_app(|app| {
                 app.drag_origin = None;
+                app.resize_origin = None;
                 app.drag_moved = false;
+                app.pressed_button = None;
+                app.button_inside = false;
             });
             LRESULT(0)
         }
@@ -662,122 +1090,161 @@ unsafe fn paint(hwnd: HWND) {
 unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.provider_hits.clear();
     app.usage_toggle_hit = None;
-    let title_font = make_font(18, 600);
     let body_font = make_font(14, 500);
     let small_font = make_font(12, 400);
-    let old_font = SelectObject(dc, title_font);
-    set_text_color(
+    let old_font = SelectObject(dc, body_font);
+    fill_solid(
         dc,
-        if app.state.online {
-            0x00e9f4ef
-        } else {
-            0x00b4b4bd
-        },
-    );
-    draw_text(
-        dc,
-        "OCX",
         RECT {
-            left: 18,
-            top: 8,
-            right: 72,
-            bottom: 34,
+            left: 2,
+            top: 22,
+            right: 4,
+            bottom: 36,
         },
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        0x00423a35,
     );
+    fill_solid(
+        dc,
+        RECT {
+            left: width - 4,
+            top: 22,
+            right: width - 2,
+            bottom: 36,
+        },
+        0x00423a35,
+    );
+    draw_power_control(dc, width, app);
+    if app.expanded {
+        draw_minimize_control(dc, width, app);
+    }
 
     let private_text = if app.state.online && app.state.private_commit > 0 {
         format!("Private {}", format_bytes(app.state.private_commit))
-    } else if app.state.online {
-        "Private —".into()
     } else {
-        "OCX offline".into()
+        "Private —".into()
     };
+    let private_color = if app.state.online {
+        0x006ee7a8
+    } else {
+        0x006f7380
+    };
+    let working_set_color = 0x009a9fa8;
     let _ = SelectObject(dc, body_font);
-    set_text_color(
-        dc,
-        if app.state.online {
-            0x006ee7a8
-        } else {
-            0x006f7380
-        },
-    );
+    set_text_color(dc, private_color);
     draw_text(
         dc,
         &private_text,
         RECT {
-            left: 76,
+            left: 18,
             top: 6,
-            right: 210,
+            right: HEADER_TEXT_RIGHT,
             bottom: 31,
         },
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
     let ws = if app.state.working_set > 0 {
         format!("WS {}", format_bytes(app.state.working_set))
+    } else if let Some(error) = &app.state.action_error {
+        format!("WS {error}")
     } else {
-        app.state.status.clone()
+        format!("WS {}", app.state.status)
     };
-    let _ = SelectObject(dc, small_font);
-    set_text_color(dc, 0x009a9fa8);
+    let _ = SelectObject(dc, body_font);
+    set_text_color(dc, working_set_color);
     draw_text(
         dc,
         &ws,
         RECT {
-            left: 76,
+            left: 18,
             top: 29,
-            right: 210,
+            right: HEADER_TEXT_RIGHT,
             bottom: 51,
         },
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
 
-    let mut x = 224;
-    let summary_providers = app
-        .state
-        .providers
-        .iter()
-        .filter(|provider| provider_has_quota(provider))
-        .chain(
-            app.state
-                .providers
-                .iter()
-                .filter(|provider| !provider_has_quota(provider)),
-        );
-    for provider in summary_providers.take(3) {
-        let summary = provider
-            .quota
-            .as_ref()
-            .and_then(Quota::primary)
-            .map(|(_, value)| format!("{} {}", provider.label, format_percent(value)))
-            .unwrap_or_else(|| format!("{} {}", provider.label, format_tokens(provider.tokens)));
-        set_text_color(dc, 0x00d3d8df);
-        draw_text(
+    let mut private_gauge = header_chart_rect(width, app.expanded, 11, 25);
+    let mut working_set_gauge = header_chart_rect(width, app.expanded, 35, 49);
+    if let Some(memory) = app.state.system_memory {
+        let commit_headroom = memory.commit_limit.saturating_sub(memory.commit_total);
+        let private_max = app.state.private_commit.saturating_add(commit_headroom);
+        let working_set_max = app
+            .state
+            .working_set
+            .saturating_add(memory.physical_available);
+        let available = private_gauge.right - private_gauge.left;
+        let show_max = available >= 190;
+        let pressure = pressure_info(Some(memory));
+        let show_pressure = available >= 330 && pressure.is_some();
+
+        if show_max {
+            private_gauge.right -= HEADER_LABEL_WIDTH + HEADER_LABEL_GAP;
+            working_set_gauge.right -= HEADER_LABEL_WIDTH + HEADER_LABEL_GAP;
+        }
+        if show_pressure {
+            working_set_gauge.right -= HEADER_LABEL_WIDTH + HEADER_LABEL_GAP;
+        }
+
+        draw_capacity_gauge(
             dc,
-            &summary,
-            RECT {
-                left: x,
-                top: 10,
-                right: x + 124,
-                bottom: 47,
-            },
-            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            private_gauge,
+            app.state.private_commit,
+            private_max,
+            private_color,
         );
-        x += 126;
-    }
-    if app.state.providers.len() > 3 {
-        set_text_color(dc, 0x008f949e);
-        draw_text(
+        draw_capacity_gauge(
             dc,
-            &format!("+{}", app.state.providers.len() - 3),
-            RECT {
-                left: width - 40,
-                top: 10,
-                right: width - 10,
-                bottom: 47,
-            },
-            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+            working_set_gauge,
+            app.state.working_set,
+            working_set_max,
+            working_set_color,
         );
+
+        if show_max {
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x008b8f98);
+            draw_text(
+                dc,
+                &format!("Max {}", format_bytes(private_max)),
+                RECT {
+                    left: private_gauge.right + HEADER_LABEL_GAP,
+                    top: 6,
+                    right: private_gauge.right + HEADER_LABEL_GAP + HEADER_LABEL_WIDTH,
+                    bottom: 30,
+                },
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            let ws_max_left = if show_pressure {
+                working_set_gauge.right + HEADER_LABEL_GAP + HEADER_LABEL_WIDTH + HEADER_LABEL_GAP
+            } else {
+                working_set_gauge.right + HEADER_LABEL_GAP
+            };
+            draw_text(
+                dc,
+                &format!("Max {}", format_bytes(working_set_max)),
+                RECT {
+                    left: ws_max_left,
+                    top: 30,
+                    right: ws_max_left + HEADER_LABEL_WIDTH,
+                    bottom: 52,
+                },
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+        if let Some((level, headroom)) = pressure.filter(|_| show_pressure) {
+            set_text_color(dc, pressure_color(level));
+            draw_text(
+                dc,
+                &format!("{} {}", pressure_label(level), format_bytes(headroom)),
+                RECT {
+                    left: working_set_gauge.right + HEADER_LABEL_GAP,
+                    top: 30,
+                    right: working_set_gauge.right + HEADER_LABEL_GAP + HEADER_LABEL_WIDTH,
+                    bottom: 52,
+                },
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
     }
 
     if app.expanded {
@@ -996,9 +1463,62 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
         let _ = SelectClipRgn(dc, None);
     }
     let _ = SelectObject(dc, old_font);
-    let _ = DeleteObject(title_font);
     let _ = DeleteObject(body_font);
     let _ = DeleteObject(small_font);
+}
+
+unsafe fn draw_power_control(dc: HDC, width: i32, app: &App) {
+    let pressed = app.pressed_button == Some(Button::Power) && app.button_inside;
+    let mut color = if app.power_pending {
+        0x0024bffb
+    } else if app.state.online {
+        0x006ee7a8
+    } else {
+        0x009a9fa8
+    };
+    if pressed || app.power_hot {
+        color = 0x00e9f4ef;
+    }
+    draw_lucide_icon(dc, "\u{e140}", power_control_rect(width), color);
+}
+
+unsafe fn draw_minimize_control(dc: HDC, width: i32, app: &App) {
+    let pressed = app.pressed_button == Some(Button::Minimize) && app.button_inside;
+    let color = if pressed || app.minimize_hot {
+        0x00d3d8df
+    } else {
+        0x007d817f
+    };
+    draw_lucide_icon(dc, "\u{e11c}", minimize_control_rect(width), color);
+}
+
+unsafe fn draw_lucide_icon(dc: HDC, glyph: &str, rect: RECT, color: u32) {
+    let font = CreateFontW(
+        -22,
+        0,
+        0,
+        0,
+        FW_NORMAL.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        ANTIALIASED_QUALITY.0 as u32,
+        DEFAULT_PITCH.0 as u32,
+        w!("lucide"),
+    );
+    let old_font = SelectObject(dc, font);
+    set_text_color(dc, color);
+    draw_text(
+        dc,
+        glyph,
+        rect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+    let _ = SelectObject(dc, old_font);
+    let _ = DeleteObject(font);
 }
 
 unsafe fn make_font(size: i32, weight: i32) -> HFONT {
@@ -1193,17 +1713,119 @@ fn point_in(rect: &RECT, x: i32, y: i32) -> bool {
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 }
 
+fn window_placement_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|root| PathBuf::from(root).join("OCX Notch").join("window.json"))
+}
+
+fn load_window_placement() -> Option<WindowPlacement> {
+    let bytes = fs::read(window_placement_path()?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+unsafe fn save_window_placement(hwnd: HWND) {
+    let Some(path) = window_placement_path() else {
+        return;
+    };
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        return;
+    }
+    let width = APP
+        .get()
+        .and_then(|app| app.lock().ok().map(|app| app.width))
+        .unwrap_or(rect.right - rect.left)
+        .clamp(MIN_WIDTH, MAX_WIDTH);
+    let placement = WindowPlacement {
+        x: rect.left,
+        y: rect.top,
+        width,
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Ok(bytes) = serde_json::to_vec(&placement) else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_ok() {
+        let _ = fs::write(path, bytes);
+    }
+}
+
+unsafe fn restore_window_placement(hwnd: HWND, placement: WindowPlacement, height: i32) -> i32 {
+    let saved_width = placement.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let saved_rect = RECT {
+        left: placement.x,
+        top: placement.y,
+        right: placement.x + saved_width,
+        bottom: placement.y + height,
+    };
+    let monitor = MonitorFromRect(&saved_rect, MONITOR_DEFAULTTONEAREST);
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = GetMonitorInfoW(monitor, &mut info);
+    let work_width = (info.rcWork.right - info.rcWork.left).max(MIN_WIDTH);
+    let width = saved_width.min(work_width);
+    let x = placement
+        .x
+        .clamp(info.rcWork.left, info.rcWork.right - width);
+    let y = placement.y.clamp(
+        info.rcWork.top,
+        (info.rcWork.bottom - height).max(info.rcWork.top),
+    );
+    let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    width
+}
+
+fn power_control_rect(width: i32) -> RECT {
+    RECT {
+        left: width - 36,
+        top: 16,
+        right: width - 10,
+        bottom: 42,
+    }
+}
+
+fn power_hit_rect(width: i32) -> RECT {
+    RECT {
+        left: width - 44,
+        top: 3,
+        right: width - 4,
+        bottom: 56,
+    }
+}
+
+fn minimize_control_rect(width: i32) -> RECT {
+    RECT {
+        left: width - 68,
+        top: 16,
+        right: width - 42,
+        bottom: 42,
+    }
+}
+
+fn minimize_hit_rect(width: i32) -> RECT {
+    RECT {
+        left: width - 76,
+        top: 3,
+        right: width - 36,
+        bottom: 56,
+    }
+}
+
 unsafe fn resize_for_state(hwnd: HWND) {
-    let (height, user_positioned) = APP
+    let (width, height, user_positioned) = APP
         .get()
         .and_then(|app| {
             app.lock().ok().map(|mut app| {
                 let height = app.desired_height();
                 app.clamp_scroll(height);
-                (height, app.user_positioned)
+                (app.width, height, app.user_positioned)
             })
         })
-        .unwrap_or((COLLAPSED_HEIGHT, false));
+        .unwrap_or((DEFAULT_WIDTH, COLLAPSED_HEIGHT, false));
     if user_positioned {
         let mut rect = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rect);
@@ -1212,48 +1834,48 @@ unsafe fn resize_for_state(hwnd: HWND) {
             HWND_TOPMOST,
             rect.left,
             rect.top,
-            WIDTH,
+            width,
             height,
             SWP_NOACTIVATE,
         );
     } else {
-        position_window(hwnd, height);
+        position_window(hwnd, width, height);
     }
-    apply_round_region(hwnd, height);
+    apply_round_region(hwnd, width, height);
 }
 
-unsafe fn position_window(hwnd: HWND, height: i32) {
+unsafe fn position_window(hwnd: HWND, width: i32, height: i32) {
     let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     let _ = GetMonitorInfoW(monitor, &mut info);
-    let x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - WIDTH) / 2;
+    let x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
     let y = info.rcWork.top + 6;
-    let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, WIDTH, height, SWP_NOACTIVATE);
+    let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 
-unsafe fn position_window_on_cursor(hwnd: HWND, height: i32) {
+unsafe fn position_window_on_cursor(hwnd: HWND, width: i32, height: i32) {
     let mut point = POINT::default();
     let _ = GetCursorPos(&mut point);
     let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
-    position_on_monitor(hwnd, height, monitor);
+    position_on_monitor(hwnd, width, height, monitor);
 }
 
-unsafe fn position_on_monitor(hwnd: HWND, height: i32, monitor: HMONITOR) {
+unsafe fn position_on_monitor(hwnd: HWND, width: i32, height: i32, monitor: HMONITOR) {
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     let _ = GetMonitorInfoW(monitor, &mut info);
-    let x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - WIDTH) / 2;
+    let x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
     let y = info.rcWork.top + 6;
-    let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, WIDTH, height, SWP_NOACTIVATE);
+    let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 
-unsafe fn apply_round_region(hwnd: HWND, height: i32) {
-    let region = CreateRoundRectRgn(0, 0, WIDTH + 1, height + 1, 22, 22);
+unsafe fn apply_round_region(hwnd: HWND, width: i32, height: i32) {
+    let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 22, 22);
     let _ = SetWindowRgn(hwnd, region, true);
 }
 

@@ -2,8 +2,11 @@ use crate::model::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::ffi::c_void;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Networking::WinHttp::*;
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 10100;
@@ -35,6 +38,23 @@ pub fn set_auto_switch_threshold(threshold: u32) -> Result<(), String> {
         Some(body.as_bytes()),
         10_000,
     )?;
+    Ok(())
+}
+
+pub fn run_ocx_command(action: &str) -> Result<(), String> {
+    let action = match action {
+        "start" | "stop" => action,
+        _ => return Err("Invalid OCX action".into()),
+    };
+    let command = format!("ocx {action}");
+    Command::new("cmd.exe")
+        .args(["/D", "/S", "/C", command.as_str()])
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| format!("Could not launch ocx {action}"))?;
     Ok(())
 }
 
@@ -225,6 +245,7 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
                 .unwrap_or(if active { "Active" } else { "Available" })
                 .to_string();
             Some(AccountView {
+                id,
                 identity,
                 active,
                 health,

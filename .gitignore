@@ -2,3 +2,5 @@
 *.pdb
 *.ilk
 *.exp
+/npm/vendor/win32-x64/ocx-notch.exe
+/npm/THIRD_PARTY_NOTICES.md

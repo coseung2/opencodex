@@ -43,20 +43,6 @@ pub struct Quota {
     pub custom_windows: Vec<QuotaWindow>,
 }
 
-impl Quota {
-    pub fn primary(&self) -> Option<(&str, f64)> {
-        self.five_hour_percent
-            .map(|v| ("5h", v))
-            .or_else(|| self.weekly_percent.map(|v| ("week", v)))
-            .or_else(|| self.monthly_percent.map(|v| ("month", v)))
-            .or_else(|| {
-                self.custom_windows
-                    .iter()
-                    .find_map(|w| w.percent.map(|v| (w.label.as_str(), v)))
-            })
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaReport {
@@ -125,6 +111,7 @@ impl UsageResponse {
 #[serde(rename_all = "camelCase")]
 pub struct AutoSwitchState {
     pub auto_switch_threshold: u32,
+    pub active_codex_account_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -159,6 +146,7 @@ pub struct CodexAccountsResponse {
 
 #[derive(Clone, Debug, Default)]
 pub struct AccountView {
+    pub id: String,
     pub identity: String,
     pub active: bool,
     pub health: String,
@@ -238,6 +226,7 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
                 ..Quota::default()
             });
             AccountView {
+                id: account.id,
                 identity,
                 active: account.is_main,
                 health,
@@ -245,6 +234,17 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
             }
         })
         .collect()
+}
+
+pub fn mark_codex_active_account(pools: &mut [AccountPool], active_id: Option<&str>) {
+    let Some(active_id) = active_id else {
+        return;
+    };
+    if let Some(pool) = pools.iter_mut().find(|pool| pool.provider == "openai") {
+        for account in &mut pool.accounts {
+            account.active = account.id == active_id;
+        }
+    }
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -339,6 +339,29 @@ mod tests {
             ..Default::default()
         }];
         assert!(merge_providers(&configs, &[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn active_codex_account_follows_active_endpoint() {
+        let mut pools = vec![AccountPool {
+            provider: "openai".into(),
+            accounts: vec![
+                AccountView {
+                    id: "first".into(),
+                    active: true,
+                    ..Default::default()
+                },
+                AccountView {
+                    id: "second".into(),
+                    ..Default::default()
+                },
+            ],
+        }];
+
+        mark_codex_active_account(&mut pools, Some("second"));
+
+        assert!(!pools[0].accounts[0].active);
+        assert!(pools[0].accounts[1].active);
     }
 
     #[test]
