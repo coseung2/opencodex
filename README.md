@@ -22,7 +22,7 @@ ocx-notch
 
 The npm release workflow uses npm Trusted Publishing (OIDC), so it does not keep a long-lived `NPM_TOKEN`. Because npm requires a package to exist before its trusted publisher can be configured, the package owner must publish `0.1.0` once with npm authentication, then add this GitHub repository and `.github/workflows/release.yml` in the package's Trusted Publisher settings. Later `v*` tags publish automatically.
 
-If the OCX management API is protected, set `OPENCODEX_API_AUTH_TOKEN` in the launching process environment. The token is read for requests only; it is never displayed, logged, or persisted.
+For OCX 2.8+, the notch automatically reads the existing `%USERPROFILE%\.opencodex\admin-api-token` management credential (or `OPENCODEX_HOME\admin-api-token`). `OPENCODEX_ADMIN_AUTH_TOKEN` and the legacy `OPENCODEX_API_AUTH_TOKEN` environment variables remain supported. Tokens are used for local requests only and are never displayed, logged, or copied.
 
 ## Data and polling
 
@@ -30,7 +30,7 @@ If the OCX management API is protected, set `OPENCODEX_API_AUTH_TOKEN` in the la
 - Windows `OpenProcess` + `K32GetProcessMemoryInfo` samples working set and private commit every ~2 seconds. The header shows each value on a fixed segmented capacity gauge: Private Max is current private commit plus remaining system commit headroom, and WS Max is current working set plus available physical RAM. Filled ticks show the current share and dim ticks show remaining capacity. Private commit is emphasized because it is the useful leak signal. This does not call the expensive OCX memory endpoint.
 - The same native sample collects `GetPerformanceInfo` physical total/available and commit total/limit values. The header labels the smaller available headroom as `안정`, `주의`, or `위험`; caution and danger use 10%/2 GiB and 5%/1 GiB minimum-headroom thresholds respectively. No memory history is persisted.
 - `/api/usage?range=7d` refreshes around every 30 seconds; only the newest calendar day's model rows are aggregated into the displayed per-provider usage.
-- Provider configuration, account pools, and cached `/api/provider-quotas` refresh around every 5 minutes, sequentially and without a quota refresh query.
+- OpenAI account state and per-account quotas refresh around every 5 seconds. Other provider configuration, account pools, and cached `/api/provider-quotas` refresh around every 5 minutes.
 - `/api/system/memory` is requested only while expanded, at most every ~45 seconds, for optional heap detail.
 
 All HTTP calls use WinHTTP against `127.0.0.1:10100`. There is no WebView, database, log file, runtime download, or automatic startup behavior. The last window position and width are stored in `%LOCALAPPDATA%\OCX Notch\window.json`.
@@ -44,6 +44,7 @@ All HTTP calls use WinHTTP against `127.0.0.1:10100`. There is no WebView, datab
 - Drag either side edge to resize the notch width. Position and width are restored on the next launch.
 - Drag anywhere on the notch to move it; its chosen position is preserved while it expands, collapses, or refreshes.
 - Click a provider with multiple accounts to expand or collapse its account rows.
+- Click the pause icon beside an OpenAI account to exclude it from the rotation pool. A paused account shows a play icon that includes it again. The icon updates immediately and rolls back if OCX rejects the request.
 - Providers with quota data are shown first. Providers with usage but no quota stay behind the inline usage-only toggle.
 - Press **Esc** to collapse.
 - Right-click to set the real OCX account rotation threshold, fine-tune it by 1%, **Refresh**, or **Exit**. `Off` writes threshold `0`.

@@ -2,7 +2,9 @@ use crate::model::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::ffi::c_void;
+use std::fs;
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Networking::WinHttp::*;
@@ -35,6 +37,17 @@ pub fn set_auto_switch_threshold(threshold: u32) -> Result<(), String> {
     request(
         "PUT",
         "/api/codex-auth/auto-switch",
+        Some(body.as_bytes()),
+        10_000,
+    )?;
+    Ok(())
+}
+
+pub fn set_codex_account_paused(id: &str, paused: bool) -> Result<(), String> {
+    let body = serde_json::json!({ "id": id, "paused": paused }).to_string();
+    request(
+        "PUT",
+        "/api/codex-auth/accounts/pause",
         Some(body.as_bytes()),
         10_000,
     )?;
@@ -99,12 +112,10 @@ fn request(
         if body.is_some() {
             headers.push_str("Content-Type: application/json\r\n");
         }
-        if let Ok(token) = std::env::var("OPENCODEX_API_AUTH_TOKEN") {
-            if !token.is_empty() && !token.contains(['\r', '\n']) {
-                headers.push_str("Authorization: Bearer ");
-                headers.push_str(&token);
-                headers.push_str("\r\n");
-            }
+        if let Some(token) = management_token() {
+            headers.push_str("Authorization: Bearer ");
+            headers.push_str(&token);
+            headers.push_str("\r\n");
         }
         let headers = wide(&headers);
         WinHttpAddRequestHeaders(
@@ -164,6 +175,29 @@ fn request(
     }
 }
 
+fn management_token() -> Option<String> {
+    for name in ["OPENCODEX_ADMIN_AUTH_TOKEN", "OPENCODEX_API_AUTH_TOKEN"] {
+        if let Ok(token) = std::env::var(name) {
+            let token = token.trim();
+            if !token.is_empty() && !token.contains(['\r', '\n']) {
+                return Some(token.to_string());
+            }
+        }
+    }
+    let config_dir = std::env::var_os("OPENCODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".opencodex"))
+        })?;
+    let token = fs::read_to_string(config_dir.join("admin-api-token")).ok()?;
+    let token = token.trim();
+    if token.starts_with("ocx_admin_") && !token.contains(['\r', '\n']) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
 fn win_error(error: windows::core::Error) -> String {
     format!("OCX unavailable: {}", error.message())
 }
@@ -178,13 +212,10 @@ fn valid_handle(handle: *mut c_void) -> Result<*mut c_void, String> {
 
 pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
     if config.name == "openai" {
-        let accounts = get_json::<CodexAccountsResponse>("/api/codex-auth/accounts", 20_000)
-            .map(codex_account_views)
-            .unwrap_or_default();
-        return AccountPool {
+        return fetch_codex_account_pool().unwrap_or_else(|_| AccountPool {
             provider: config.name.clone(),
-            accounts,
-        };
+            accounts: Vec::new(),
+        });
     }
 
     let mode = config.auth_mode.as_deref().unwrap_or_default();
@@ -250,6 +281,7 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
                 active,
                 health,
                 quota: None,
+                paused: false,
             })
         })
         .collect();
@@ -257,6 +289,15 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
         provider: config.name.clone(),
         accounts,
     }
+}
+
+pub fn fetch_codex_account_pool() -> Result<AccountPool, String> {
+    let accounts = get_json::<CodexAccountsResponse>("/api/codex-auth/accounts", 20_000)
+        .map(codex_account_views)?;
+    Ok(AccountPool {
+        provider: "openai".into(),
+        accounts,
+    })
 }
 
 fn encode_component(value: &str) -> String {

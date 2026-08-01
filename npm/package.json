@@ -1,6 +1,6 @@
 {
   "name": "@coseung2/ocx-notch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows x64 native status widget for OpenCodex.",
   "repository": {
     "type": "git",

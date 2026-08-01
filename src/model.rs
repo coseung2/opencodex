@@ -122,6 +122,8 @@ pub struct CodexAccount {
     pub email: Option<String>,
     #[serde(default)]
     pub is_main: bool,
+    #[serde(default)]
+    pub paused: bool,
     pub quota: Option<AccountQuota>,
     #[serde(default)]
     pub needs_reauth: bool,
@@ -151,6 +153,7 @@ pub struct AccountView {
     pub active: bool,
     pub health: String,
     pub quota: Option<Quota>,
+    pub paused: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -231,6 +234,7 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
                 active: account.is_main,
                 health,
                 quota,
+                paused: account.paused,
             }
         })
         .collect()
@@ -362,6 +366,21 @@ mod tests {
 
         assert!(!pools[0].accounts[0].active);
         assert!(pools[0].accounts[1].active);
+    }
+
+    #[test]
+    fn codex_account_views_preserve_paused_state() {
+        let response: CodexAccountsResponse = serde_json::from_str(
+            r#"{"accounts":[
+                {"id":"__main__","email":"a***@example.com","paused":true},
+                {"id":"second","paused":false}
+            ]}"#,
+        )
+        .expect("account response parses");
+        let accounts = codex_account_views(response);
+
+        assert!(accounts[0].paused);
+        assert!(!accounts[1].paused);
     }
 
     #[test]

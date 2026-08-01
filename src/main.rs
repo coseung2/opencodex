@@ -5,7 +5,7 @@ mod model;
 
 use crate::model::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -46,6 +46,10 @@ const HEADER_TEXT_RIGHT: i32 = 132;
 const HEADER_CHART_LEFT: i32 = 140;
 const HEADER_LABEL_WIDTH: i32 = 82;
 const HEADER_LABEL_GAP: i32 = 8;
+const ACCOUNT_IDENTITY_LEFT: i32 = 42;
+const ACCOUNT_ACTION_WIDTH: i32 = 26;
+const ACCOUNT_ACTION_HEIGHT: i32 = 30;
+const ACCOUNT_ACTION_GAP: i32 = 4;
 const GIB: u64 = 1024 * 1024 * 1024;
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
@@ -55,6 +59,12 @@ static LUCIDE_FONT_BYTES: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
 enum Button {
     Power,
     Minimize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AccountControl {
+    id: String,
+    paused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +109,7 @@ enum Update {
     Quotas(Result<QuotaResponse, String>),
     AutoSwitch(Result<AutoSwitchState, String>),
     Pools(Vec<AccountPool>),
+    OpenAiPool(Result<AccountPool, String>),
 }
 
 #[derive(Default)]
@@ -127,6 +138,11 @@ struct App {
     scroll_offset: i32,
     expanded_providers: HashSet<String>,
     provider_hits: Vec<(RECT, String)>,
+    account_pause_hits: Vec<(RECT, AccountControl)>,
+    hot_account_control: Option<AccountControl>,
+    pressed_account_control: Option<AccountControl>,
+    account_mutation: Option<String>,
+    pause_overrides: HashMap<String, bool>,
     show_usage_only: bool,
     usage_toggle_hit: Option<RECT>,
     width: i32,
@@ -200,7 +216,11 @@ impl App {
                     }
                     Err(error) => self.state.status = error,
                 },
-                Update::Pools(value) => self.state.pools = value,
+                Update::Pools(value) => self.install_pools(value),
+                Update::OpenAiPool(result) => match result {
+                    Ok(pool) => self.install_pool(pool),
+                    Err(error) => self.state.status = error,
+                },
             }
         }
         mark_codex_active_account(
@@ -213,6 +233,46 @@ impl App {
             &self.state.usage,
             &self.state.pools,
         );
+    }
+
+    fn apply_pause_overrides(&mut self, pool: &mut AccountPool) {
+        if pool.provider != "openai" {
+            return;
+        }
+        let mut confirmed = Vec::new();
+        for account in &mut pool.accounts {
+            if let Some(&desired) = self.pause_overrides.get(&account.id) {
+                if account.paused == desired {
+                    confirmed.push(account.id.clone());
+                } else {
+                    account.paused = desired;
+                }
+            }
+        }
+        for id in confirmed {
+            self.pause_overrides.remove(&id);
+        }
+    }
+
+    fn install_pool(&mut self, mut pool: AccountPool) {
+        self.apply_pause_overrides(&mut pool);
+        if let Some(existing) = self
+            .state
+            .pools
+            .iter_mut()
+            .find(|existing| existing.provider == pool.provider)
+        {
+            *existing = pool;
+        } else {
+            self.state.pools.push(pool);
+        }
+    }
+
+    fn install_pools(&mut self, mut pools: Vec<AccountPool>) {
+        for pool in &mut pools {
+            self.apply_pause_overrides(pool);
+        }
+        self.state.pools = pools;
     }
 
     fn desired_height(&self) -> i32 {
@@ -408,6 +468,11 @@ fn main() -> windows::core::Result<()> {
             scroll_offset: 0,
             expanded_providers: HashSet::new(),
             provider_hits: Vec::new(),
+            account_pause_hits: Vec::new(),
+            hot_account_control: None,
+            pressed_account_control: None,
+            account_mutation: None,
+            pause_overrides: HashMap::new(),
             show_usage_only: false,
             usage_toggle_hit: None,
             width: initial_width,
@@ -457,6 +522,7 @@ fn start_workers(
     thread::spawn(move || {
         let mut last_health = Instant::now() - Duration::from_secs(60);
         let mut last_usage = Instant::now() - Duration::from_secs(60);
+        let mut last_openai_pool = Instant::now() - Duration::from_secs(60);
         let mut last_active = Instant::now() - Duration::from_secs(60);
         let mut last_slow = Instant::now() - Duration::from_secs(600);
         let mut last_details = Instant::now() - Duration::from_secs(60);
@@ -475,6 +541,14 @@ fn start_workers(
                     Update::Usage(api::get_json("/api/usage?range=7d", 20_000)),
                 );
                 last_usage = Instant::now();
+            }
+            if forced || last_openai_pool.elapsed() >= Duration::from_secs(5) {
+                send_update(
+                    hwnd,
+                    &api_tx,
+                    Update::OpenAiPool(api::fetch_codex_account_pool()),
+                );
+                last_openai_pool = Instant::now();
             }
             if forced || last_slow.elapsed() >= Duration::from_secs(300) {
                 let configs = api::get_json::<Vec<ProviderConfig>>("/api/providers", 20_000);
@@ -592,6 +666,82 @@ fn launch_power_action(hwnd: HWND, action: &'static str) {
                 }
                 Err(error) => {
                     app.state.action_error = Some(error.clone());
+                    app.state.status = error;
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn account_action_rect(width: i32, top: i32, identity_width: i32) -> RECT {
+    let min_left = ACCOUNT_IDENTITY_LEFT + 58;
+    let max_left = (width - 244 - ACCOUNT_ACTION_GAP - ACCOUNT_ACTION_WIDTH).max(min_left);
+    let left = (ACCOUNT_IDENTITY_LEFT + identity_width.max(0) + ACCOUNT_ACTION_GAP)
+        .min(max_left)
+        .max(min_left);
+    RECT {
+        left,
+        top,
+        right: left + ACCOUNT_ACTION_WIDTH,
+        bottom: top + ACCOUNT_ACTION_HEIGHT,
+    }
+}
+
+fn set_openai_account_paused(pools: &mut [AccountPool], id: &str, paused: bool) -> bool {
+    let Some(account) = pools
+        .iter_mut()
+        .find(|pool| pool.provider == "openai")
+        .and_then(|pool| pool.accounts.iter_mut().find(|account| account.id == id))
+    else {
+        return false;
+    };
+    account.paused = paused;
+    true
+}
+
+fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
+    let mut started = false;
+    with_app(|app| {
+        if app.account_mutation.is_some() {
+            return;
+        }
+        app.account_mutation = Some(id.clone());
+        app.pause_overrides.insert(id.clone(), paused);
+        set_openai_account_paused(&mut app.state.pools, &id, paused);
+        app.state.status = if paused {
+            "Pausing account…".into()
+        } else {
+            "Resuming account…".into()
+        };
+        started = true;
+    });
+    if !started {
+        return;
+    }
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::set_codex_account_paused(&id, paused);
+        with_app(|app| {
+            app.account_mutation = None;
+            match result {
+                Ok(()) => {
+                    app.state.status = if paused {
+                        "Account paused · excluded from pool".into()
+                    } else {
+                        "Account resumed · included in pool".into()
+                    };
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => {
+                    app.pause_overrides.remove(&id);
+                    set_openai_account_paused(&mut app.state.pools, &id, !paused);
                     app.state.status = error;
                 }
             }
@@ -767,6 +917,11 @@ unsafe extern "system" fn window_proc(
             with_app(|app| {
                 app.power_hot = point_in(&power_hit_rect(app.width), x, y);
                 app.minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
+                let account_control = app
+                    .account_pause_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
                 let resize_edge = if x < RESIZE_EDGE {
                     Some(ResizeEdge::Left)
                 } else if x >= app.width - RESIZE_EDGE {
@@ -780,17 +935,28 @@ unsafe extern "system" fn window_proc(
                     app.button_inside = false;
                     app.drag_origin = None;
                     app.drag_moved = false;
+                    app.pressed_account_control = None;
+                } else if let Some(control) = account_control {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_account_control = Some(control);
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
                 } else if app.power_hot {
                     app.pressed_button = Some(Button::Power);
                     app.button_inside = true;
                     app.drag_origin = None;
                     app.drag_moved = false;
+                    app.pressed_account_control = None;
                     button_down = true;
                 } else if app.minimize_hot {
                     app.pressed_button = Some(Button::Minimize);
                     app.button_inside = true;
                     app.drag_origin = None;
                     app.drag_moved = false;
+                    app.pressed_account_control = None;
                     button_down = true;
                 } else {
                     app.resize_origin = None;
@@ -798,6 +964,7 @@ unsafe extern "system" fn window_proc(
                     app.button_inside = false;
                     app.drag_origin = Some((cursor, window));
                     app.drag_moved = false;
+                    app.pressed_account_control = None;
                 }
             });
             let _ = SetCapture(hwnd);
@@ -817,11 +984,20 @@ unsafe extern "system" fn window_proc(
             with_app(|app| {
                 let power_hot = point_in(&power_hit_rect(app.width), x, y);
                 let minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
-                if app.power_hot != power_hot || app.minimize_hot != minimize_hot {
+                let hot_account_control = app
+                    .account_pause_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
+                if app.power_hot != power_hot
+                    || app.minimize_hot != minimize_hot
+                    || app.hot_account_control != hot_account_control
+                {
                     changed = true;
                 }
                 app.power_hot = power_hot;
                 app.minimize_hot = minimize_hot;
+                app.hot_account_control = hot_account_control;
                 if let Some(button) = app.pressed_button {
                     let inside = match button {
                         Button::Power => power_hot,
@@ -831,6 +1007,8 @@ unsafe extern "system" fn window_proc(
                         changed = true;
                     }
                     app.button_inside = inside;
+                } else if app.pressed_account_control.is_some() {
+                    // Account controls never initiate a window drag.
                 } else if let Some((origin, window, edge)) = app.resize_origin {
                     let dx = cursor.x - origin.x;
                     let original_width = window.right - window.left;
@@ -876,14 +1054,28 @@ unsafe extern "system" fn window_proc(
             let mut was_drag = false;
             let mut handled_button = false;
             let mut power_action = None;
+            let mut pause_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
                 let pressed_button = app.pressed_button.take();
+                let pressed_account_control = app.pressed_account_control.take();
                 let button_inside = app.button_inside;
                 app.button_inside = false;
                 app.drag_origin = None;
                 app.resize_origin = None;
                 app.drag_moved = false;
+                if let Some(control) = pressed_account_control {
+                    handled_button = true;
+                    changed = true;
+                    let released_inside = app
+                        .account_pause_hits
+                        .iter()
+                        .any(|(rect, hit)| hit.id == control.id && point_in(rect, x, y));
+                    if released_inside && app.account_mutation.is_none() {
+                        pause_action = Some((control.id, !control.paused));
+                    }
+                    return;
+                }
                 if let Some(button) = pressed_button {
                     handled_button = true;
                     changed = true;
@@ -942,6 +1134,9 @@ unsafe extern "system" fn window_proc(
             if let Some(action) = power_action {
                 launch_power_action(hwnd, action);
             }
+            if let Some((id, paused)) = pause_action {
+                launch_pause_action(hwnd, id, paused);
+            }
             if handled_button {
                 if changed {
                     resize_for_state(hwnd);
@@ -964,6 +1159,7 @@ unsafe extern "system" fn window_proc(
                 app.resize_origin = None;
                 app.drag_moved = false;
                 app.pressed_button = None;
+                app.pressed_account_control = None;
                 app.button_inside = false;
             });
             LRESULT(0)
@@ -1089,6 +1285,7 @@ unsafe fn paint(hwnd: HWND) {
 
 unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.provider_hits.clear();
+    app.account_pause_hits.clear();
     app.usage_toggle_hit = None;
     let body_font = make_font(14, 500);
     let small_font = make_font(12, 400);
@@ -1380,29 +1577,64 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             }
             y += provider_height;
             if app.expanded_providers.contains(&provider.name) {
+                let show_pause_control = provider.name == "openai";
                 for account in provider.accounts {
                     let account_height = account_height(&account);
+                    let identity_width = measure_text_width(dc, &account.identity);
+                    let action_rect = account_action_rect(width, y, identity_width);
+                    let busy = app.account_mutation.as_deref() == Some(account.id.as_str());
                     set_text_color(dc, 0x00c7cbd2);
                     draw_text(
                         dc,
                         &account.identity,
                         RECT {
-                            left: 42,
+                            left: ACCOUNT_IDENTITY_LEFT,
                             top: y,
-                            right: width - 250,
+                            right: if show_pause_control {
+                                action_rect.left - ACCOUNT_ACTION_GAP
+                            } else {
+                                width - 250
+                            },
                             bottom: y + 30,
                         },
                         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                     );
+                    if show_pause_control {
+                        let control = AccountControl {
+                            id: account.id.clone(),
+                            paused: account.paused,
+                        };
+                        let hot = !busy && app.hot_account_control.as_ref() == Some(&control);
+                        let pressed = app.pressed_account_control.as_ref() == Some(&control);
+                        draw_account_pause_control(
+                            dc,
+                            action_rect,
+                            account.paused,
+                            hot,
+                            pressed,
+                            busy,
+                        );
+                        if !busy && action_rect.bottom > 101 && action_rect.top < height {
+                            app.account_pause_hits.push((action_rect, control));
+                        }
+                    }
                     set_text_color(
                         dc,
-                        if account.active {
+                        if account.paused {
+                            0x008e949e
+                        } else if account.active {
                             0x006ee7a8
                         } else {
                             0x008e949e
                         },
                     );
-                    let suffix = if account.active { " · active" } else { "" };
+                    let suffix = if account.paused {
+                        " · paused"
+                    } else if account.active {
+                        " · active"
+                    } else {
+                        ""
+                    };
                     draw_text(
                         dc,
                         &format!("{}{}", account.health, suffix),
@@ -1492,6 +1724,65 @@ unsafe fn draw_minimize_control(dc: HDC, width: i32, app: &App) {
     draw_lucide_icon(dc, "\u{e11c}", minimize_control_rect(width), color);
 }
 
+unsafe fn draw_account_pause_control(
+    dc: HDC,
+    rect: RECT,
+    paused: bool,
+    hot: bool,
+    pressed: bool,
+    busy: bool,
+) {
+    let color = if busy {
+        0x006f7380
+    } else if hot || pressed {
+        0x00e9f4ef
+    } else if paused {
+        0x0024bffb
+    } else {
+        0x009a9fa8
+    };
+    let cx = (rect.left + rect.right) / 2;
+    let cy = (rect.top + rect.bottom) / 2;
+    if paused {
+        // Play means include this account in the rotation pool again.
+        for step in 0..7 {
+            let half = 6 - step;
+            fill_solid(
+                dc,
+                RECT {
+                    left: cx - 4 + step,
+                    top: cy - half,
+                    right: cx - 2 + step,
+                    bottom: cy + half,
+                },
+                color,
+            );
+        }
+    } else {
+        // Pause means exclude this account from the rotation pool.
+        fill_solid(
+            dc,
+            RECT {
+                left: cx - 5,
+                top: cy - 6,
+                right: cx - 2,
+                bottom: cy + 6,
+            },
+            color,
+        );
+        fill_solid(
+            dc,
+            RECT {
+                left: cx + 2,
+                top: cy - 6,
+                right: cx + 5,
+                bottom: cy + 6,
+            },
+            color,
+        );
+    }
+}
+
 unsafe fn draw_lucide_icon(dc: HDC, glyph: &str, rect: RECT, color: u32) {
     let font = CreateFontW(
         -22,
@@ -1547,6 +1838,18 @@ unsafe fn set_text_color(dc: HDC, color: u32) {
 unsafe fn draw_text(dc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORMAT) {
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     let _ = DrawTextW(dc, &mut wide, &mut rect, format);
+}
+
+unsafe fn measure_text_width(dc: HDC, text: &str) -> i32 {
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT::default();
+    let _ = DrawTextW(
+        dc,
+        &mut wide,
+        &mut rect,
+        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    rect.right - rect.left
 }
 
 unsafe fn draw_quota_row(
@@ -1812,6 +2115,25 @@ fn minimize_hit_rect(width: i32) -> RECT {
         top: 3,
         right: width - 36,
         bottom: 56,
+    }
+}
+
+#[cfg(test)]
+mod account_control_tests {
+    use super::*;
+
+    #[test]
+    fn action_follows_short_identity_and_stays_before_health_column() {
+        let rect = account_action_rect(DEFAULT_WIDTH, 120, 96);
+        assert_eq!(rect.left, ACCOUNT_IDENTITY_LEFT + 96 + ACCOUNT_ACTION_GAP);
+        assert_eq!(rect.right - rect.left, ACCOUNT_ACTION_WIDTH);
+        assert!(rect.right <= DEFAULT_WIDTH - 244);
+    }
+
+    #[test]
+    fn long_identity_cannot_push_action_into_health_column() {
+        let rect = account_action_rect(DEFAULT_WIDTH, 120, 2_000);
+        assert_eq!(rect.right, DEFAULT_WIDTH - 244 - ACCOUNT_ACTION_GAP);
     }
 }
 
