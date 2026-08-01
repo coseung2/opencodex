@@ -88,6 +88,32 @@ pub struct UsageDayModel {
     pub total_tokens: u64,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RequestLogEntry {
+    pub timestamp: u64,
+    pub model: String,
+    pub provider: String,
+    pub resolved_model: Option<String>,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub total_tokens: Option<u64>,
+    pub usage_status: Option<String>,
+    pub error_code: Option<String>,
+}
+
+impl RequestLogEntry {
+    pub fn display_model(&self) -> &str {
+        self.resolved_model.as_deref().unwrap_or(&self.model)
+    }
+}
+
+pub fn latest_request_logs(mut logs: Vec<RequestLogEntry>) -> Vec<RequestLogEntry> {
+    logs.sort_by_key(|log| std::cmp::Reverse(log.timestamp));
+    logs.truncate(10);
+    logs
+}
+
 impl UsageResponse {
     pub fn latest_day_providers(self) -> Vec<UsageProvider> {
         let Some(day) = self.days.into_iter().max_by(|a, b| a.date.cmp(&b.date)) else {
@@ -303,6 +329,22 @@ mod tests {
         assert_eq!(format_tokens(1_250_000), "125만");
         assert_eq!(format_tokens(140_462_493), "1.4억");
         assert_eq!(format_percent(45.6), "46%");
+    }
+
+    #[test]
+    fn request_logs_are_newest_first_and_limited_to_ten() {
+        let logs = (0..12)
+            .map(|timestamp| RequestLogEntry {
+                timestamp,
+                ..Default::default()
+            })
+            .collect();
+
+        let logs = latest_request_logs(logs);
+
+        assert_eq!(logs.len(), 10);
+        assert_eq!(logs.first().map(|log| log.timestamp), Some(11));
+        assert_eq!(logs.last().map(|log| log.timestamp), Some(2));
     }
 
     #[test]

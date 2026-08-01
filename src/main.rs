@@ -41,7 +41,10 @@ const MIN_WIDTH: i32 = 320;
 const MAX_WIDTH: i32 = 1_200;
 const RESIZE_EDGE: i32 = 7;
 const COLLAPSED_HEIGHT: i32 = 58;
+const CONTENT_TOP: i32 = 101;
 const USAGE_TOGGLE_HEIGHT: i32 = 42;
+const LOG_ROW_HEIGHT: i32 = 44;
+const EMPTY_LOG_HEIGHT: i32 = 84;
 const HEADER_TEXT_RIGHT: i32 = 132;
 const HEADER_CHART_LEFT: i32 = 140;
 const HEADER_LABEL_WIDTH: i32 = 82;
@@ -59,6 +62,12 @@ static LUCIDE_FONT_BYTES: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
 enum Button {
     Power,
     Minimize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentTab {
+    Providers,
+    Logs,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -105,6 +114,7 @@ enum Update {
     Health(Result<Health, String>),
     MemoryDetails(Result<MemoryDetails, String>),
     Usage(Result<UsageResponse, String>),
+    Logs(Result<Vec<RequestLogEntry>, String>),
     Providers(Result<Vec<ProviderConfig>, String>),
     Quotas(Result<QuotaResponse, String>),
     AutoSwitch(Result<AutoSwitchState, String>),
@@ -125,6 +135,8 @@ struct ViewState {
     configs: Vec<ProviderConfig>,
     quotas: Vec<QuotaReport>,
     usage: Vec<UsageProvider>,
+    logs: Vec<RequestLogEntry>,
+    logs_error: Option<String>,
     pools: Vec<AccountPool>,
     providers: Vec<ProviderView>,
     auto_switch_threshold: u32,
@@ -135,6 +147,8 @@ struct App {
     rx: Receiver<Update>,
     state: ViewState,
     expanded: bool,
+    content_tab: ContentTab,
+    hot_tab: Option<ContentTab>,
     scroll_offset: i32,
     expanded_providers: HashSet<String>,
     provider_hits: Vec<(RECT, String)>,
@@ -157,6 +171,7 @@ struct App {
     user_positioned: bool,
     force_refresh: Arc<AtomicBool>,
     want_details: Arc<AtomicBool>,
+    want_logs: Arc<AtomicBool>,
 }
 
 impl App {
@@ -200,6 +215,13 @@ impl App {
                 Update::Usage(result) => match result {
                     Ok(value) => self.state.usage = value.latest_day_providers(),
                     Err(error) => self.state.status = error,
+                },
+                Update::Logs(result) => match result {
+                    Ok(value) => {
+                        self.state.logs = latest_request_logs(value);
+                        self.state.logs_error = None;
+                    }
+                    Err(error) => self.state.logs_error = Some(error),
                 },
                 Update::Providers(result) => match result {
                     Ok(value) => self.state.configs = value,
@@ -279,20 +301,17 @@ impl App {
         if !self.expanded {
             return COLLAPSED_HEIGHT;
         }
-        let mut height = 114;
-        for provider in self.visible_providers() {
-            height += provider_height(provider);
-            if self.expanded_providers.contains(&provider.name) {
-                height += provider.accounts.iter().map(account_height).sum::<i32>();
-            }
-        }
-        if self.usage_only_count() > 0 {
-            height += USAGE_TOGGLE_HEIGHT;
-        }
-        height.clamp(180, 720)
+        (114 + self.content_height()).clamp(180, 720)
     }
 
     fn content_height(&self) -> i32 {
+        if self.content_tab == ContentTab::Logs {
+            return if self.state.logs.is_empty() {
+                EMPTY_LOG_HEIGHT
+            } else {
+                self.state.logs.len() as i32 * LOG_ROW_HEIGHT
+            };
+        }
         let mut height = 0;
         for provider in self.visible_providers() {
             height += provider_height(provider);
@@ -322,7 +341,7 @@ impl App {
     }
 
     fn clamp_scroll(&mut self, window_height: i32) {
-        let viewport = (window_height - 101).max(1);
+        let viewport = (window_height - CONTENT_TOP).max(1);
         self.scroll_offset = self
             .scroll_offset
             .clamp(0, (self.content_height() - viewport).max(0));
@@ -457,6 +476,7 @@ fn main() -> windows::core::Result<()> {
         let (tx, rx) = mpsc::channel();
         let force_refresh = Arc::new(AtomicBool::new(true));
         let want_details = Arc::new(AtomicBool::new(false));
+        let want_logs = Arc::new(AtomicBool::new(false));
         APP.set(Mutex::new(App {
             rx,
             state: ViewState {
@@ -465,6 +485,8 @@ fn main() -> windows::core::Result<()> {
                 ..Default::default()
             },
             expanded: false,
+            content_tab: ContentTab::Providers,
+            hot_tab: None,
             scroll_offset: 0,
             expanded_providers: HashSet::new(),
             provider_hits: Vec::new(),
@@ -487,6 +509,7 @@ fn main() -> windows::core::Result<()> {
             user_positioned: saved_placement.is_some(),
             force_refresh: force_refresh.clone(),
             want_details: want_details.clone(),
+            want_logs: want_logs.clone(),
         }))
         .ok();
         let restored_width = if let Some(placement) = saved_placement {
@@ -498,7 +521,7 @@ fn main() -> windows::core::Result<()> {
         with_app(|app| app.width = restored_width);
         apply_round_region(hwnd, restored_width, COLLAPSED_HEIGHT);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        start_workers(hwnd.0 as isize, tx, force_refresh, want_details);
+        start_workers(hwnd.0 as isize, tx, force_refresh, want_details, want_logs);
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).into() {
@@ -515,6 +538,7 @@ fn start_workers(
     tx: Sender<Update>,
     force_refresh: Arc<AtomicBool>,
     want_details: Arc<AtomicBool>,
+    want_logs: Arc<AtomicBool>,
 ) {
     let pid = Arc::new(AtomicU32::new(0));
     let api_pid = pid.clone();
@@ -526,6 +550,7 @@ fn start_workers(
         let mut last_active = Instant::now() - Duration::from_secs(60);
         let mut last_slow = Instant::now() - Duration::from_secs(600);
         let mut last_details = Instant::now() - Duration::from_secs(60);
+        let mut last_logs = Instant::now() - Duration::from_secs(60);
         loop {
             let forced = force_refresh.swap(false, Ordering::Relaxed);
             if forced || last_health.elapsed() >= Duration::from_secs(30) {
@@ -541,6 +566,16 @@ fn start_workers(
                     Update::Usage(api::get_json("/api/usage?range=7d", 20_000)),
                 );
                 last_usage = Instant::now();
+            }
+            if want_logs.load(Ordering::Relaxed)
+                && (forced || last_logs.elapsed() >= Duration::from_secs(2))
+            {
+                send_update(
+                    hwnd,
+                    &api_tx,
+                    Update::Logs(api::get_json("/api/logs?tail=10", 8_000)),
+                );
+                last_logs = Instant::now();
             }
             if forced || last_openai_pool.elapsed() >= Duration::from_secs(5) {
                 send_update(
@@ -989,15 +1024,21 @@ unsafe extern "system" fn window_proc(
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
+                let hot_tab = app
+                    .expanded
+                    .then(|| content_tab_at(app.width, x, y))
+                    .flatten();
                 if app.power_hot != power_hot
                     || app.minimize_hot != minimize_hot
                     || app.hot_account_control != hot_account_control
+                    || app.hot_tab != hot_tab
                 {
                     changed = true;
                 }
                 app.power_hot = power_hot;
                 app.minimize_hot = minimize_hot;
                 app.hot_account_control = hot_account_control;
+                app.hot_tab = hot_tab;
                 if let Some(button) = app.pressed_button {
                     let inside = match button {
                         Button::Power => power_hot,
@@ -1095,6 +1136,7 @@ unsafe extern "system" fn window_proc(
                                 app.expanded = false;
                                 app.scroll_offset = 0;
                                 app.want_details.store(false, Ordering::Relaxed);
+                                app.want_logs.store(false, Ordering::Relaxed);
                             }
                             _ => {}
                         }
@@ -1107,7 +1149,20 @@ unsafe extern "system" fn window_proc(
                 if !app.expanded {
                     app.expanded = true;
                     app.want_details.store(true, Ordering::Relaxed);
+                    app.want_logs
+                        .store(app.content_tab == ContentTab::Logs, Ordering::Relaxed);
                     changed = true;
+                } else if let Some(tab) = content_tab_at(app.width, x, y) {
+                    if app.content_tab != tab {
+                        app.content_tab = tab;
+                        app.scroll_offset = 0;
+                        app.want_logs
+                            .store(tab == ContentTab::Logs, Ordering::Relaxed);
+                        if tab == ContentTab::Logs {
+                            app.force_refresh.store(true, Ordering::Relaxed);
+                        }
+                        changed = true;
+                    }
                 } else if app
                     .usage_toggle_hit
                     .as_ref()
@@ -1235,6 +1290,7 @@ unsafe extern "system" fn window_proc(
                 app.expanded = false;
                 app.scroll_offset = 0;
                 app.want_details.store(false, Ordering::Relaxed);
+                app.want_logs.store(false, Ordering::Relaxed);
             });
             resize_for_state(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
@@ -1457,45 +1513,18 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             divider,
         );
         let _ = DeleteObject(divider);
-        let detail = app.state.details.as_ref();
-        let detail_text = format!(
-            "PID {}   ·   Private {}   ·   Working set {}{}   ·   Rotate {}",
-            app.state.pid,
-            if app.state.private_commit > 0 {
-                format_bytes(app.state.private_commit)
-            } else {
-                "—".into()
-            },
-            if app.state.working_set > 0 {
-                format_bytes(app.state.working_set)
-            } else {
-                "—".into()
-            },
-            detail
-                .and_then(|d| d.heap_used)
-                .map(|v| format!("   ·   Heap {}", format_bytes(v)))
-                .unwrap_or_default(),
-            if app.state.auto_switch_threshold == 0 {
-                "off".into()
-            } else {
-                format!("{}%", app.state.auto_switch_threshold)
-            },
-        );
-        let _ = SelectObject(dc, small_font);
-        set_text_color(dc, 0x009da3ad);
-        draw_text(
-            dc,
-            &detail_text,
-            RECT {
-                left: 18,
-                top: 64,
-                right: width - 18,
-                bottom: 96,
-            },
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-        );
-        let mut y = 101 - app.scroll_offset;
-        let _ = IntersectClipRect(dc, 0, 101, width, height);
+        draw_content_tabs(dc, width, app, small_font);
+        let mut y = CONTENT_TOP - app.scroll_offset;
+        let _ = IntersectClipRect(dc, 0, CONTENT_TOP, width, height);
+        if app.content_tab == ContentTab::Logs {
+            draw_log_list(dc, width, height, app, body_font, small_font);
+            let _ = SelectClipRgn(dc, None);
+            let _ = SelectObject(dc, old_font);
+            let _ = DeleteObject(body_font);
+            let _ = DeleteObject(small_font);
+            return;
+        }
+
         let usage_only_count = app.usage_only_count();
         let mut providers = app.state.providers.clone();
         providers.sort_by_key(|provider| !provider_has_quota(provider));
@@ -1697,6 +1726,269 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     let _ = SelectObject(dc, old_font);
     let _ = DeleteObject(body_font);
     let _ = DeleteObject(small_font);
+}
+
+fn content_tab_rect(tab: ContentTab) -> RECT {
+    let left = match tab {
+        ContentTab::Providers => 14,
+        ContentTab::Logs => 112,
+    };
+    RECT {
+        left,
+        top: 58,
+        right: left + 98,
+        bottom: CONTENT_TOP,
+    }
+}
+
+fn content_tab_at(width: i32, x: i32, y: i32) -> Option<ContentTab> {
+    if x >= width - 84 {
+        return None;
+    }
+    [ContentTab::Providers, ContentTab::Logs]
+        .into_iter()
+        .find(|tab| point_in(&content_tab_rect(*tab), x, y))
+}
+
+unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
+    let _ = SelectObject(dc, font);
+    for (tab, label) in [
+        (ContentTab::Providers, "프로바이더"),
+        (ContentTab::Logs, "로그"),
+    ] {
+        let rect = content_tab_rect(tab);
+        let selected = app.content_tab == tab;
+        let hot = app.hot_tab == Some(tab);
+        if hot && !selected {
+            fill_solid(
+                dc,
+                RECT {
+                    left: rect.left + 4,
+                    top: rect.top + 6,
+                    right: rect.right - 4,
+                    bottom: rect.bottom - 5,
+                },
+                0x002a2420,
+            );
+        }
+        set_text_color(
+            dc,
+            if selected {
+                0x00f0ece8
+            } else if hot {
+                0x00c7cbd2
+            } else {
+                0x008e949e
+            },
+        );
+        draw_text(
+            dc,
+            label,
+            RECT {
+                left: rect.left + 6,
+                top: rect.top + 3,
+                right: rect.right - 6,
+                bottom: rect.bottom - 3,
+            },
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        if selected {
+            fill_solid(
+                dc,
+                RECT {
+                    left: rect.left + 18,
+                    top: rect.bottom - 3,
+                    right: rect.right - 18,
+                    bottom: rect.bottom,
+                },
+                0x009dcb4e,
+            );
+        }
+    }
+    if width >= 520 {
+        let details = app.state.details.as_ref();
+        let summary = format!(
+            "PID {}{}  ·  Rotate {}",
+            app.state.pid,
+            details
+                .and_then(|value| value.heap_used)
+                .map(|heap| format!("  ·  Heap {}", format_bytes(heap)))
+                .unwrap_or_default(),
+            if app.state.auto_switch_threshold == 0 {
+                "off".into()
+            } else {
+                format!("{}%", app.state.auto_switch_threshold)
+            },
+        );
+        set_text_color(dc, 0x007f858e);
+        draw_text(
+            dc,
+            &summary,
+            RECT {
+                left: 224,
+                top: 61,
+                right: width - 18,
+                bottom: CONTENT_TOP - 2,
+            },
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+    }
+    fill_solid(
+        dc,
+        RECT {
+            left: 14,
+            top: CONTENT_TOP - 1,
+            right: width - 14,
+            bottom: CONTENT_TOP,
+        },
+        0x003a322d,
+    );
+}
+
+unsafe fn draw_log_list(
+    dc: HDC,
+    width: i32,
+    height: i32,
+    app: &App,
+    body_font: HFONT,
+    small_font: HFONT,
+) {
+    if app.state.logs.is_empty() {
+        let message = if app.state.logs_error.is_some() {
+            "로그를 불러오지 못했습니다"
+        } else {
+            "아직 표시할 로그가 없습니다"
+        };
+        let _ = SelectObject(dc, body_font);
+        set_text_color(dc, 0x008e949e);
+        draw_text(
+            dc,
+            message,
+            RECT {
+                left: 18,
+                top: CONTENT_TOP,
+                right: width - 18,
+                bottom: CONTENT_TOP + EMPTY_LOG_HEIGHT,
+            },
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        return;
+    }
+
+    let mut y = CONTENT_TOP - app.scroll_offset;
+    for log in &app.state.logs {
+        let bottom = y + LOG_ROW_HEIGHT;
+        if bottom > CONTENT_TOP && y < height {
+            let route = match (log.provider.is_empty(), log.display_model().is_empty()) {
+                (false, false) => format!("{}  ·  {}", log.provider, log.display_model()),
+                (false, true) => log.provider.clone(),
+                (true, false) => log.display_model().to_string(),
+                (true, true) => "알 수 없는 요청".into(),
+            };
+            let status = if log.status == 0 {
+                "—".into()
+            } else {
+                log.status.to_string()
+            };
+            let summary = format!("{}  {}", status, format_duration(log.duration_ms));
+            let mut metadata = vec![format_log_age(log.timestamp)];
+            if let Some(tokens) = log.total_tokens {
+                metadata.push(format!("{} 토큰", format_tokens(tokens)));
+            }
+            if log.usage_status.as_deref() == Some("estimated") {
+                metadata.push("추정".into());
+            }
+            if let Some(error) = log.error_code.as_deref().filter(|value| !value.is_empty()) {
+                metadata.push(error.to_string());
+            }
+
+            let _ = SelectObject(dc, body_font);
+            set_text_color(dc, 0x00f0ece8);
+            draw_text(
+                dc,
+                &route,
+                RECT {
+                    left: 18,
+                    top: y + 1,
+                    right: width - 126,
+                    bottom: y + 24,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            set_text_color(dc, log_status_color(log.status));
+            draw_text(
+                dc,
+                &summary,
+                RECT {
+                    left: width - 122,
+                    top: y + 1,
+                    right: width - 18,
+                    bottom: y + 24,
+                },
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x008e949e);
+            draw_text(
+                dc,
+                &metadata.join("  ·  "),
+                RECT {
+                    left: 18,
+                    top: y + 21,
+                    right: width - 18,
+                    bottom: bottom - 2,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            fill_solid(
+                dc,
+                RECT {
+                    left: 18,
+                    top: bottom - 1,
+                    right: width - 18,
+                    bottom,
+                },
+                0x00322a25,
+            );
+        }
+        y = bottom;
+    }
+}
+
+fn log_status_color(status: u16) -> u32 {
+    match status {
+        200..=299 => 0x006ee7a8,
+        300..=399 => 0x00dfaa72,
+        400..=499 => 0x0024bffb,
+        500..=599 => 0x006c70ff,
+        _ => 0x008e949e,
+    }
+}
+
+fn format_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        format!("{duration_ms}ms")
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
+    }
+}
+
+fn format_log_age(timestamp_ms: u64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(timestamp_ms, |duration| duration.as_millis() as u64);
+    format_log_age_at(timestamp_ms, now_ms)
+}
+
+fn format_log_age_at(timestamp_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(timestamp_ms) / 1_000;
+    match seconds {
+        0..=4 => "방금".into(),
+        5..=59 => format!("{seconds}초 전"),
+        60..=3_599 => format!("{}분 전", seconds / 60),
+        3_600..=86_399 => format!("{}시간 전", seconds / 3_600),
+        _ => format!("{}일 전", seconds / 86_400),
+    }
 }
 
 unsafe fn draw_power_control(dc: HDC, width: i32, app: &App) {
@@ -2134,6 +2426,15 @@ mod account_control_tests {
     fn long_identity_cannot_push_action_into_health_column() {
         let rect = account_action_rect(DEFAULT_WIDTH, 120, 2_000);
         assert_eq!(rect.right, DEFAULT_WIDTH - 244 - ACCOUNT_ACTION_GAP);
+    }
+
+    #[test]
+    fn log_age_uses_compact_relative_units() {
+        let now = 10_000_000;
+        assert_eq!(format_log_age_at(now - 2_000, now), "방금");
+        assert_eq!(format_log_age_at(now - 42_000, now), "42초 전");
+        assert_eq!(format_log_age_at(now - 180_000, now), "3분 전");
+        assert_eq!(format_log_age_at(now - 7_200_000, now), "2시간 전");
     }
 }
 
