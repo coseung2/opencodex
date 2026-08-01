@@ -1892,6 +1892,15 @@ unsafe fn draw_log_list(
             };
             let summary = format!("{}  {}", status, format_duration(log.duration_ms));
             let mut metadata = vec![format_log_age(log.timestamp)];
+            metadata.push(format!(
+                "추론 {}",
+                log.requested_effort.as_deref().unwrap_or("—")
+            ));
+            metadata.push(match log.fast_state() {
+                Some(true) => "Fast ON".into(),
+                Some(false) => "Fast OFF".into(),
+                None => "Fast —".into(),
+            });
             if let Some(tokens) = log.total_tokens {
                 metadata.push(format!("{} 토큰", format_tokens(tokens)));
             }

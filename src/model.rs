@@ -100,11 +100,39 @@ pub struct RequestLogEntry {
     pub total_tokens: Option<u64>,
     pub usage_status: Option<String>,
     pub error_code: Option<String>,
+    pub requested_effort: Option<String>,
+    pub requested_speed_label: Option<String>,
+    pub configured_speed_label: Option<String>,
+    pub requested_service_tier: Option<String>,
+    pub configured_service_tier: Option<String>,
+    pub response_service_tier: Option<String>,
 }
 
 impl RequestLogEntry {
     pub fn display_model(&self) -> &str {
         self.resolved_model.as_deref().unwrap_or(&self.model)
+    }
+
+    pub fn fast_state(&self) -> Option<bool> {
+        let values = [
+            self.requested_speed_label.as_deref(),
+            self.configured_speed_label.as_deref(),
+            self.requested_service_tier.as_deref(),
+            self.configured_service_tier.as_deref(),
+            self.response_service_tier.as_deref(),
+        ];
+        let mut has_signal = false;
+        for value in values.into_iter().flatten() {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            has_signal = true;
+            if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
+                return Some(true);
+            }
+        }
+        has_signal.then_some(false)
     }
 }
 
@@ -345,6 +373,36 @@ mod tests {
         assert_eq!(logs.len(), 10);
         assert_eq!(logs.first().map(|log| log.timestamp), Some(11));
         assert_eq!(logs.last().map(|log| log.timestamp), Some(2));
+    }
+
+    #[test]
+    fn request_log_preserves_effort_and_resolves_fast_state() {
+        let standard: RequestLogEntry = serde_json::from_str(
+            r#"{
+                "timestamp": 1785577719897,
+                "provider": "openai",
+                "model": "gpt-5.6-sol",
+                "requestedEffort": "high",
+                "responseServiceTier": "default"
+            }"#,
+        )
+        .expect("standard log parses");
+        let fast: RequestLogEntry = serde_json::from_str(
+            r#"{
+                "timestamp": 1785577719898,
+                "provider": "openai",
+                "model": "gpt-5.6-sol",
+                "requestedEffort": "xhigh",
+                "requestedSpeedLabel": "fast"
+            }"#,
+        )
+        .expect("fast log parses");
+
+        assert_eq!(standard.requested_effort.as_deref(), Some("high"));
+        assert_eq!(standard.fast_state(), Some(false));
+        assert_eq!(fast.requested_effort.as_deref(), Some("xhigh"));
+        assert_eq!(fast.fast_state(), Some(true));
+        assert_eq!(RequestLogEntry::default().fast_state(), None);
     }
 
     #[test]
