@@ -36,6 +36,9 @@ devlog/**/security-advisory-draft*
 .omo/
 **/.omo/
 
+# Package-staged native assets (built or downloaded deterministically before pack).
+vendor/ocx-notch/win32-x64/ocx-notch.exe
+
 # Test-generated artifacts
 tests/.tmp-*/
 .claude/

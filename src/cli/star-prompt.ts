@@ -7,7 +7,7 @@ import { commandInvocation } from "../lib/win-exec";
 import { agentDrivenMarkers, isAgentDriven } from "./agent-driven";
 import { interactiveConfirm } from "./interactive-confirm";
 
-const REPO = "lidge-jun/opencodex";
+const REPO = "coseung2/opencodex";
 /** Fires exactly once from the first interactive `ocx start`. */
 const MARKER = ".star-prompted";
 

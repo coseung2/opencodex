@@ -13,7 +13,7 @@ available for interactive configuration; see [Web Dashboard](/guides/web-dashboa
 Install the published package and confirm that `ocx` is on `PATH`:
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx --version
 ```
 

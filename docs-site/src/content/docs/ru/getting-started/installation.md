@@ -3,10 +3,10 @@ title: Установка
 description: Установите прокси opencodex (ocx) и необходимые компоненты и убедитесь, что он запускается.
 ---
 
-opencodex устанавливает два эквивалентных имени команды: `ocx` и `opencodex`. Обе запускают один и
-тот же небольшой локальный HTTP-сервер (построенный на Bun). Запросы к моделям идут к провайдеру,
-выбранному маршрутизацией; опциональные сайдкары для vision и веб-поиска также могут использовать
-ваш вход в ChatGPT, когда они нужны маршрутизируемой модели.
+`@coseung2/opencodex` устанавливает два эквивалентных прокси-команды, `ocx` и `opencodex`, а также
+вспомогательную команду `ocx-notch` только для Windows x64. Обе прокси-команды запускают один и тот же
+небольшой локальный HTTP-сервер на Bun. Запросы к моделям идут к провайдеру, выбранному маршрутизацией;
+опциональные сайдкары для vision и веб-поиска также могут использовать ваш вход в ChatGPT.
 
 ## Предварительные требования
 
@@ -19,7 +19,7 @@ opencodex устанавливает два эквивалентных имен�
 ## Установка
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ```
 
 :::note[npm заблокировал postinstall-скрипт bun?]
@@ -31,10 +31,10 @@ install-scripts ... blocked because they are not covered by allowScripts`),
 текущий каталог:
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @coseung2/opencodex@next
 
 # если изначально устанавливали через sudo, продолжайте использовать sudo:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @coseung2/opencodex@next
 ```
 :::
 
@@ -45,16 +45,19 @@ ocx --version
 opencodex --version
 ```
 
+На Windows x64 команда `ocx-notch` запускает нативный Notch, включённый в тот же npm-пакет.
+На Linux, macOS и Windows не-x64 только эта команда завершается с явной ошибкой о неподдерживаемой
+платформе; `ocx` и `opencodex` продолжают работать.
+
 ### Каналы релизов
 
-Стабильный канал `latest` уже включает поддержку каталога GPT-5.6 Sol/Terra/Luna для маршрутов
-ChatGPT, OpenAI по API-ключу, OpenRouter и экспериментального Cursor. Доступ у вышестоящего
-провайдера по-прежнему зависит от аккаунта; сами по себе записи каталога доступ не дают.
-Используйте канал preview только для тестирования ещё не выпущенных сборок opencodex:
+Форк coseung2 начинает выпуск версий `2.8.0-cs.*` в канале `next`. До явного повышения до
+стабильного релиза оставайтесь на этом канале. Канал upstream `preview` не является каналом
+релизов этого пакета:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
-ocx update --tag preview
+npm install -g @coseung2/opencodex@next
+ocx update --tag next
 ```
 
 ## Запуск из исходного кода
@@ -62,7 +65,7 @@ ocx update --tag preview
 Чтобы работать над самим opencodex:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # запускает API прокси в режиме разработки (src/cli/index.ts start)

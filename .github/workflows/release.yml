@@ -18,7 +18,8 @@ on:
         options:
           - latest
           - preview
-        default: latest
+          - next
+        default: next
       dry-run:
         description: "Dry run (build + pack, no actual publish)"
         required: false
@@ -40,7 +41,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build-notch-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Verify dispatched SHA
+        env:
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+        shell: bash
+        run: |
+          if [ -n "$EXPECTED_SHA" ] && [ "$GITHUB_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::branch moved after the release audit (expected ${EXPECTED_SHA}, got ${GITHUB_SHA})"
+            exit 1
+          fi
+
+      - name: Build release executable
+        run: cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml
+
+      - name: Upload release executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocx-notch-win32-x64
+          path: packages/ocx-notch/target/release/ocx-notch.exe
+          if-no-files-found: error
+          retention-days: 3
+
   publish:
+    needs: build-notch-windows
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -59,6 +91,12 @@ jobs:
             echo "::error::branch moved after the release audit (expected ${EXPECTED_SHA}, got ${GITHUB_SHA}) — refusing to publish an unaudited commit"
             exit 1
           fi
+
+      - name: Download ocx-notch release executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ocx-notch-win32-x64
+          path: vendor/ocx-notch/win32-x64
 
       # opencodex is bun-native (the prepublishOnly GUI build + typecheck run under bun).
       - name: Setup Bun
@@ -113,10 +151,13 @@ jobs:
 
           case "$GITHUB_REF" in
             refs/heads/main)
-              expected_tag="latest"
-              if [[ "$RELEASE_VERSION" == *-* ]]; then
-                echo "::error::main releases must use a stable semver version; got ${RELEASE_VERSION}"
+              if [[ "$RELEASE_VERSION" == *-cs.* ]]; then
+                expected_tag="next"
+              elif [[ "$RELEASE_VERSION" == *-* ]]; then
+                echo "::error::main prereleases must use the -cs.* channel; got ${RELEASE_VERSION}"
                 exit 1
+              else
+                expected_tag="latest"
               fi
               ;;
             refs/heads/preview)
@@ -262,18 +303,19 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          package_name="$(node -p "require('./package.json').name")"
           for attempt in $(seq 1 30); do
-            if VERSION=$(npm view "@bitkyc08/opencodex@${RELEASE_VERSION}" version 2>/dev/null); then
+            if VERSION=$(npm view "${package_name}@${RELEASE_VERSION}" version 2>/dev/null); then
               echo "registry version=$VERSION"
               test "$VERSION" = "$RELEASE_VERSION"
-              npm dist-tag ls @bitkyc08/opencodex
+              npm dist-tag ls "$package_name"
               exit 0
             fi
-            echo "::notice::@bitkyc08/opencodex@${RELEASE_VERSION} not visible in npm registry yet (attempt $attempt/30)"
+            echo "::notice::${package_name}@${RELEASE_VERSION} not visible in npm registry yet (attempt $attempt/30)"
             sleep 10
           done
           echo "::error::npm registry smoke failed after 30 attempts"
-          npm view @bitkyc08/opencodex versions dist-tags --json || true
+          npm view "$package_name" versions dist-tags --json || true
           exit 1
 
       - name: Create GitHub release
@@ -301,12 +343,13 @@ jobs:
             git tag --merged HEAD --list 'v[0-9]*' |
               bun scripts/release-notes.ts previous-release-tag "$RELEASE_VERSION"
           )"
-          npm_metadata="Published to npm as \`@bitkyc08/opencodex@${RELEASE_VERSION}\` with dist-tag \`${NPM_DIST_TAG}\`."
+          package_name="$(node -p "require('./package.json').name")"
+          npm_metadata="Published to npm as \`${package_name}@${RELEASE_VERSION}\` with dist-tag \`${NPM_DIST_TAG}\`."
 
-          # Preview builds must be marked prerelease so GitHub "latest" keeps pointing at the
-          # stable channel (matching npm dist-tags); see issue #64.
+          # Every semver prerelease (upstream preview or coseung2 cs channel) must be marked
+          # prerelease so GitHub "latest" keeps pointing at the stable channel.
           prerelease_flag=""
-          if [[ "$RELEASE_VERSION" == *-preview.* ]]; then
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
             prerelease_flag="--prerelease"
           fi
 
@@ -329,7 +372,7 @@ jobs:
           # advance the baseline to a later preview that is missing/empty — that would
           # drop the gap between the last carried preview and that later tag.
           notes_range_start="$previous_tag"
-          if [[ "$RELEASE_VERSION" != *-preview.* ]]; then
+          if [[ "$RELEASE_VERSION" != *-* ]]; then
             preview_carry_tags="$(
               git tag --list "v${RELEASE_VERSION}-preview.*" |
                 bun scripts/release-notes.ts matching-preview-tags "$RELEASE_VERSION"

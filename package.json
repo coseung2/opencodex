@@ -1,6 +1,6 @@
 {
-  "name": "@bitkyc08/opencodex",
-  "version": "2.8.0",
+  "name": "@coseung2/opencodex",
+  "version": "2.8.0-cs.1",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -13,12 +13,16 @@
   },
   "bin": {
     "opencodex": "./bin/ocx.mjs",
-    "ocx": "./bin/ocx.mjs"
+    "ocx": "./bin/ocx.mjs",
+    "ocx-notch": "./bin/ocx-notch.mjs"
   },
   "files": [
     "bin",
     "src",
     "gui/dist",
+    "vendor/ocx-notch/win32-x64/ocx-notch.exe",
+    "packages/ocx-notch/README.md",
+    "packages/ocx-notch/THIRD_PARTY_NOTICES.md",
     "assets/banner.png",
     "assets/architecture.png",
     "assets/claude-code-models.gif",
@@ -42,6 +46,7 @@
     "privacy:scan": "bun scripts/privacy-scan.ts",
     "generate:jawcode-metadata": "bun scripts/generate-jawcode-metadata.ts",
     "build:gui": "cd gui && bun install --frozen-lockfile && bun run build && cd .. && bun run prepare:package",
+    "build:notch": "cargo build --release --manifest-path packages/ocx-notch/Cargo.toml",
     "prepare:package": "bun scripts/prepare-package.ts",
     "prepack": "bun run prepare:package",
     "prepublishOnly": "bun run typecheck && bun run build:gui",
@@ -88,11 +93,15 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lidge-jun/opencodex.git"
+    "url": "git+https://github.com/coseung2/opencodex.git"
   },
-  "homepage": "https://lidge-jun.github.io/opencodex/",
+  "homepage": "https://github.com/coseung2/opencodex#readme",
   "bugs": {
-    "url": "https://github.com/lidge-jun/opencodex/issues"
+    "url": "https://github.com/coseung2/opencodex/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
   },
   "license": "MIT"
 }

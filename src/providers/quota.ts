@@ -4,6 +4,8 @@ import { resolveEnvValue } from "../config";
 import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
+import { resolveKiroApiRegion, resolveKiroProfileArn } from "../oauth/kiro";
+import type { KiroOAuthMetadata } from "../oauth/types";
 import { getProviderRegistryEntry, providerCodexAccountMode } from "./registry";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "./openai-tiers";
@@ -20,6 +22,7 @@ const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_USAGE_URL = `${KIMI_CODE_BASE_URL}/usages`;
+const KIRO_USAGE_LIMITS_PATH = "getUsageLimits";
 /** Keep a failed probe's previous row at most this long before dropping it. */
 const LAST_GOOD_MAX_AGE_MS = 30 * 60_000;
 
@@ -196,6 +199,56 @@ function parseClaudeBucket(value: unknown): { percent?: number; resetAt?: number
   return { percent, resetAt };
 }
 
+function kiroCreditRow(body: Record<string, unknown>): Record<string, unknown> | null {
+  const rows = Array.isArray(body.usageBreakdownList) ? body.usageBreakdownList : [];
+  const credit = rows
+    .map(row => asRecord(row))
+    .find((row): row is Record<string, unknown> => row?.resourceType === "CREDIT");
+  return credit ?? asRecord(body.usageBreakdown);
+}
+
+/**
+ * Probe one Kiro credential using only that account's persisted routing metadata.
+ * Passing an explicit metadata object is load-bearing: the Kiro resolvers then
+ * cannot borrow environment or local-CLI state from a different account.
+ */
+async function fetchKiroUsageQuota(
+  accessToken: string,
+  metadata: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion">,
+): Promise<ProviderQuota | null> {
+  const region = resolveKiroApiRegion(metadata);
+  const profileArn = resolveKiroProfileArn(metadata);
+  const url = new URL(`https://q.${region}.amazonaws.com/${KIRO_USAGE_LIMITS_PATH}`);
+  url.searchParams.set("origin", "KIRO_CLI");
+  url.searchParams.set("resourceType", "AGENTIC_REQUEST");
+  if (profileArn) url.searchParams.set("profileArn", profileArn);
+
+  const response = await fetch(url, {
+    headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) return null;
+  const body = asRecord(await response.json().catch(() => null));
+  if (!body) return null;
+  const credit = kiroCreditRow(body);
+  if (!credit) return null;
+
+  const used = toFiniteNumber(credit.currentUsageWithPrecision)
+    ?? toFiniteNumber(credit.currentUsage);
+  const limit = toFiniteNumber(credit.usageLimitWithPrecision)
+    ?? toFiniteNumber(credit.usageLimit);
+  if (used === undefined || limit === undefined || limit <= 0) return null;
+  const percent = normalizePercent((used / limit) * 100);
+  if (percent === undefined) return null;
+  const resetAt = normalizeResetAt(credit.nextDateReset)
+    ?? normalizeResetAt(body.nextDateReset);
+  return {
+    monthlyPercent: percent,
+    ...(resetAt !== undefined ? { monthlyResetAt: resetAt } : {}),
+    updatedAt: Date.now(),
+  };
+}
+
 /** Claude's OAuth usage endpoint, probed with ONE account's own bearer token. */
 const anthropicUsageInflight = new Map<string, Promise<ProviderQuota | null>>();
 
@@ -312,7 +365,7 @@ export interface ProviderAccountQuota {
 
 /** Providers whose per-account quota can be probed. Extend as other OAuth APIs are covered. */
 export function supportsPerAccountQuota(provider: string): boolean {
-  return provider === "anthropic";
+  return provider === "anthropic" || provider === "kiro";
 }
 
 function accountCacheKey(provider: string, accountId: string): string {
@@ -410,6 +463,22 @@ async function getTokenForAccountQuotaProbe(provider: string, accountId: string)
   return getValidAccessTokenForAccount(provider, accountId);
 }
 
+async function fetchUsageQuotaForAccount(
+  provider: string,
+  accountId: string,
+  accessToken: string,
+): Promise<ProviderQuota | null> {
+  if (provider === "anthropic") return fetchAnthropicUsageQuota(accessToken);
+  if (provider === "kiro") {
+    const credential = getAccountCredential(provider, accountId);
+    if (!credential || credential.access !== accessToken) {
+      throw new Error("account credential changed during Kiro quota probe");
+    }
+    return fetchKiroUsageQuota(accessToken, credential.kiro ?? {});
+  }
+  return null;
+}
+
 async function fetchAccountQuota(
   provider: string,
   accountId: string,
@@ -425,7 +494,7 @@ async function fetchAccountQuota(
   const probe = (async (): Promise<AccountQuotaCacheEntry> => {
     try {
       const token = await getTokenForAccountQuotaProbe(provider, accountId);
-      const quota = await fetchAnthropicUsageQuota(token);
+      const quota = await fetchUsageQuotaForAccount(provider, accountId, token);
       if (!quota) {
         // Preserve last-good bars and mark unavailable; advance TTL so failures
         // negative-cache instead of re-probing on every GUI poll.
@@ -484,6 +553,13 @@ export async function fetchProviderAccountQuotas(
       ...(entry.unavailable ? { unavailable: true as const } : {}),
     };
   }));
+}
+
+async function fetchKiroQuota(provider: string, forceRefresh: boolean): Promise<ProviderQuotaReport | null> {
+  const activeAccountId = getAccountSet("kiro")?.activeAccountId;
+  if (!activeAccountId) return null;
+  const entry = await fetchAccountQuota("kiro", activeAccountId, forceRefresh);
+  return entry.quota ? report(provider, "kiro:getUsageLimits", entry.quota) : null;
 }
 
 function normalizedBaseUrl(value: string): string | null {
@@ -902,6 +978,7 @@ async function maybeFetchProviderQuota(
     if (isBuiltInChatGptForwardProvider(name, provider)) return fetchChatGptForwardQuota(config, name, provider, forceRefresh);
     if (provider.authMode === "oauth" && name === "xai") return fetchXaiQuota(name);
     if (provider.authMode === "oauth" && name === "anthropic") return fetchAnthropicQuota(name);
+    if (provider.authMode === "oauth" && name === "kiro") return fetchKiroQuota(name, forceRefresh);
     if (provider.authMode === "oauth" && name === "cursor") return fetchCursorQuota(name);
     if (provider.authMode === "oauth" && name === "google-antigravity") return fetchAntigravityQuota(name, provider);
     // Kimi Code `/usages` accepts OAuth or coding-plan API keys, but only on the canonical

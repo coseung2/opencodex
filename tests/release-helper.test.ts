@@ -276,6 +276,27 @@ describe("release helper", () => {
     )).toBeGreaterThanOrEqual(0);
   });
 
+  test("coseung2 prereleases on main default to the next tag", () => {
+    const { calls, result } = runRelease("9.9.9-cs.1", { branch: "main" });
+
+    expect(result.status).toBe(0);
+    expect(findCallIndex(calls, "gh", call =>
+      call.args[0] === "workflow"
+      && call.args[1] === "run"
+      && call.args.includes("release.yml")
+      && call.args.includes("tag=next")
+      && call.args.includes("dry-run=true"),
+    )).toBeGreaterThanOrEqual(0);
+  });
+
+  test("main rejects unrelated prerelease channels", () => {
+    const { calls, result } = runRelease("9.9.9-rc.1", { branch: "main" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("must use the -cs.* channel");
+    expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
+  });
+
   test("dispatch pins the audited release SHA via expected-sha", () => {
     const { calls, result } = runRelease("9.9.9", { headSha: "deadbeefcafe1234" });
 

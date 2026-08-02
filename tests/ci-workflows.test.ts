@@ -40,12 +40,17 @@ describe("GitHub Actions hardening", () => {
     // (unref'd oauth waitMs / shell kill-grace). Selector stays at 2; smoke at 8.
     expect(ci.jobs?.["select-windows-runner"]?.["timeout-minutes"]).toBe(2);
     expect(ci.jobs?.test?.["timeout-minutes"]).toBe(30);
+    expect(ci.jobs?.["build-notch-windows"]?.["timeout-minutes"]).toBe(12);
     expect(ci.jobs?.["npm-global-smoke"]?.["timeout-minutes"]).toBe(8);
     // Every job must stay bounded — an unbounded job can hang a queue for hours.
-    expect(count(workflow, "timeout-minutes:")).toBe(3);
+    expect(count(workflow, "timeout-minutes:")).toBe(4);
     expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0");
     expect(workflow).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
     expect(workflow).toContain("actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e");
+    expect(workflow).toContain("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
+    expect(workflow).toContain("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093");
+    expect(workflow).toContain("cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml");
+    expect(workflow).toContain("name: ocx-notch-win32-x64");
     expect(workflow).toContain("bun test --isolate tests");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
   });
@@ -210,6 +215,7 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("pull-requests: read");
     expect(workflow).toContain("id-token: write");
     expect(workflow).toContain("cancel-in-progress: false");
+    expect(workflow).toContain("timeout-minutes: 12");
     expect(workflow).toContain("timeout-minutes: 15");
 
     // Dry-run first by default; tokenless trusted publishing only.
@@ -221,6 +227,10 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0");
     expect(workflow).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
     expect(workflow).toContain("actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e");
+    expect(workflow).toContain("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
+    expect(workflow).toContain("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093");
+    expect(workflow).toContain("cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml");
+    expect(workflow).toContain("name: ocx-notch-win32-x64");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
 
     // Workflow-dispatch inputs must reach shell code via env, never by direct
@@ -271,7 +281,8 @@ describe("GitHub Actions hardening", () => {
 
     // Channel guards stay branch-exact.
     expect(workflow).toContain("Release must run from main or preview");
-    expect(workflow).toContain("main releases must use a stable semver version");
+    expect(workflow).toContain("main prereleases must use the -cs.* channel");
+    expect(workflow).toContain('expected_tag="next"');
     expect(workflow).toContain("preview releases must use a preview prerelease version");
 
     // Release notes must include PR categories and the full channel commit range

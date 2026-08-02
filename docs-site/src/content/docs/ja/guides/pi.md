@@ -88,7 +88,7 @@ export OPENCODEX_API_KEY=<your key>
 ## スキーマのステータス
 
 :::note[実際のインストールに対して未検証]
-上の形状は、Pi が公開しているカスタム プロバイダーのドキュメントに従っています。 Pi がインストールされたマシン上の実際の `~/.pi/agent/models.json` に対して検証されていません**。 Pi がエクスポートされたブロックを拒否した場合、不一致は私たちの側にあります。Pi が報告した内容を [問題を開く](https://github.com/lidge-jun/opencodex/issues) してください。
+上の形状は、Pi が公開しているカスタム プロバイダーのドキュメントに従っています。 Pi がインストールされたマシン上の実際の `~/.pi/agent/models.json` に対して検証されていません**。 Pi がエクスポートされたブロックを拒否した場合、不一致は私たちの側にあります。Pi が報告した内容を [問題を開く](https://github.com/coseung2/opencodex/issues) してください。
 :::
 
 ## 要件

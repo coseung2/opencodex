@@ -17,7 +17,12 @@ import {
   updateJobPath,
   type UpdateJobState,
 } from "../src/update/job";
-import { checkUpdatePackageIntegrity, updateCommand, updateCommandStr } from "../src/update/index";
+import {
+  checkUpdatePackageIntegrity,
+  defaultUpdateTag,
+  updateCommand,
+  updateCommandStr,
+} from "../src/update/index";
 
 type SpawnResult = { status: number | null; stdout: string };
 function fakeSpawn(result: SpawnResult): typeof import("node:child_process").spawnSync {
@@ -978,7 +983,7 @@ describe("GUI update execution decisions", () => {
       installer: "npm",
       restart: true,
       command: "node /pkg/bin/ocx.mjs update --tag latest",
-      releaseNotesUrl: "https://github.com/lidge-jun/opencodex/releases/latest",
+      releaseNotesUrl: "https://github.com/coseung2/opencodex/releases/latest",
       log: [],
     };
     writeFileSync(updateJobPath(), `${JSON.stringify(job)}\n`);
@@ -1013,8 +1018,8 @@ describe("GUI update execution decisions", () => {
       channel: "latest",
       installer: "bun",
       restart: true,
-      command: "bun add -g @bitkyc08/opencodex@2.7.41",
-      releaseNotesUrl: "https://github.com/lidge-jun/opencodex/releases/latest",
+      command: "bun add -g @coseung2/opencodex@2.7.41",
+      releaseNotesUrl: "https://github.com/coseung2/opencodex/releases/latest",
       log: [],
       pid: 777,
     };
@@ -1031,8 +1036,8 @@ describe("GUI update execution decisions", () => {
         installer: "bun",
         updateAvailable: true,
         canUpdate: true,
-        command: "bun add -g @bitkyc08/opencodex@2.7.41",
-        releaseNotesUrl: "https://github.com/lidge-jun/opencodex/releases/latest",
+        command: "bun add -g @coseung2/opencodex@2.7.41",
+        releaseNotesUrl: "https://github.com/coseung2/opencodex/releases/latest",
       }),
       spawnWorkerFn: () => ({
         pid: 888,
@@ -1056,8 +1061,8 @@ describe("GUI update execution decisions", () => {
         installer: "bun",
         updateAvailable: true,
         canUpdate: true,
-        command: "bun add -g @bitkyc08/opencodex@2.7.41",
-        releaseNotesUrl: "https://github.com/lidge-jun/opencodex/releases/latest",
+        command: "bun add -g @coseung2/opencodex@2.7.41",
+        releaseNotesUrl: "https://github.com/coseung2/opencodex/releases/latest",
       }),
       spawnWorkerFn: () => { throw new Error("spawn denied"); },
     })).toThrow("Could not start update worker");
@@ -1066,20 +1071,29 @@ describe("GUI update execution decisions", () => {
   });
 });
 
+describe("update channel identity", () => {
+  test("coseung2 prereleases stay on next by default", () => {
+    expect(defaultUpdateTag("2.8.0-cs.1")).toBe("next");
+    expect(defaultUpdateTag("2.8.0-preview.1")).toBe("preview");
+    expect(defaultUpdateTag("2.8.0")).toBe("latest");
+  });
+});
+
 describe("immutable update target (WP160)", () => {
   test("a resolved version pins the install target instead of the movable tag", () => {
-    expect(updateCommand("bun", "latest", "2.7.24").args).toEqual(["add", "-g", "@bitkyc08/opencodex@2.7.24"]);
-    expect(updateCommand("npm", "latest", "2.7.24").args).toEqual(["install", "-g", "@bitkyc08/opencodex@2.7.24"]);
-    expect(updateCommandStr("bun", "latest", "2.7.24")).toContain("@bitkyc08/opencodex@2.7.24");
+    expect(updateCommand("bun", "latest", "2.7.24").args).toEqual(["add", "-g", "@coseung2/opencodex@2.7.24"]);
+    expect(updateCommand("npm", "latest", "2.7.24").args).toEqual(["install", "-g", "@coseung2/opencodex@2.7.24"]);
+    expect(updateCommandStr("bun", "latest", "2.7.24")).toContain("@coseung2/opencodex@2.7.24");
     // Unknown version falls back to the tag (best-effort lane).
-    expect(updateCommand("bun", "latest").args).toEqual(["add", "-g", "@bitkyc08/opencodex@latest"]);
-    expect(updateCommand("bun", "latest", null).args).toEqual(["add", "-g", "@bitkyc08/opencodex@latest"]);
+    expect(updateCommand("bun", "latest").args).toEqual(["add", "-g", "@coseung2/opencodex@latest"]);
+    expect(updateCommand("bun", "latest", null).args).toEqual(["add", "-g", "@coseung2/opencodex@latest"]);
+    expect(updateCommand("npm", "next").args).toEqual(["install", "-g", "@coseung2/opencodex@next"]);
   });
 
   test("bun worker execution pins the resolved version through updateExecutionCommand", () => {
     const cmd = updateExecutionCommand("bun", "latest", "/pkg/bin/ocx.mjs", "2.7.24");
     expect(cmd.bin).toBe(process.platform === "win32" ? process.execPath : "bun");
-    expect(cmd.args).toEqual(["add", "-g", "@bitkyc08/opencodex@2.7.24"]);
+    expect(cmd.args).toEqual(["add", "-g", "@coseung2/opencodex@2.7.24"]);
     expect(cmd.display).toContain("@2.7.24");
   });
 

@@ -71,7 +71,11 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     expect(sseBranch).toContain("config.streamMode ?? \"auto\",");
     expect(selector).toContain('platform !== "win32" && platform !== "darwin"');
     expect(selector).toContain('decision.reason === "config-eager"');
-    expect(sseBranch).toContain("relaySseEagerBounded(upstreamResponse.body, turnAc,");
+    expect(sseBranch).toContain("trackActiveTurnLease(upstream, options.turnAdmissionLease)");
+    expect(sseBranch).toContain("relaySseEagerBounded(upstreamResponse.body, upstream,");
+    expect(sseBranch).toContain("upstream.signal");
+    expect(sseBranch).not.toContain("const turnAc = new AbortController()");
+    expect(sseBranch).not.toContain("linkAbortSignal(upstream, turnAc.signal)");
     expect(sseBranch).not.toContain("relaySseWithHeartbeat(");
     expect(sseBranch).not.toContain("trackStreamLifetime(");
     expect(logWrapper.indexOf("isNativePassthroughSseResponse(response)")).toBeGreaterThanOrEqual(0);

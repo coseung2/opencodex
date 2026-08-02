@@ -71,10 +71,10 @@ describe("install scripts", () => {
     const script = await readText("scripts/install.sh");
 
     expect(script).toContain("Node.js 18+ is required");
-    expect(script).toContain("npm install -g @bitkyc08/opencodex");
+    expect(script).toContain("npm install -g @coseung2/opencodex@next");
     expect(script).toContain("command -v ocx");
     expect(script).toContain("ocx help");
-    expect(script).not.toContain("bun install -g @bitkyc08/opencodex");
+    expect(script).not.toContain("bun install -g @coseung2/opencodex");
     expect(script).not.toContain("bun.sh/install");
   });
 
@@ -82,12 +82,12 @@ describe("install scripts", () => {
     const script = await readText("scripts/install.ps1");
 
     expect(script).toContain("Node.js 18+ is required");
-    expect(script).toContain("& $npm.Source install -g @bitkyc08/opencodex");
+    expect(script).toContain("& $npm.Source install -g @coseung2/opencodex@next");
     expect(script).toContain("$LASTEXITCODE");
     expect(script).toContain("Get-Command ocx.cmd");
     expect(script).toContain("Get-Command ocx");
     expect(script).toContain("& $ocx.Source help");
-    expect(script).not.toContain("bun install -g @bitkyc08/opencodex");
+    expect(script).not.toContain("bun install -g @coseung2/opencodex");
     expect(script).not.toContain("bun.sh/install.ps1");
   });
 
@@ -96,7 +96,8 @@ describe("install scripts", () => {
 
     expect(launcher).toContain('process.argv[2] === "update"');
     expect(launcher).toContain('["install", "-g", `${PKG}@${tag}`]');
-    expect(launcher).toContain('return String(currentVersion).includes("-preview.") ? "preview" : "latest"');
+    expect(launcher).toContain('if (version.includes("-preview.")) return "preview"');
+    expect(launcher).toContain('if (version.includes("-cs.")) return "next"');
     expect(launcher).toContain("!isBunGlobalInstall()");
     expect(launcher).toContain("repairCodexShimIfNeeded()");
     expect(launcher).toContain("runNpmSelfUpdate()");

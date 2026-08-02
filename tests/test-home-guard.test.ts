@@ -135,7 +135,9 @@ describe("real-home write guard", () => {
     const { realHome, opencodexHome } = sentinelHome();
     const linkDir = mkdtempSync(join(tmpdir(), "ocx-symlink-"));
     const link = join(linkDir, "looks-like-temp");
-    symlinkSync(opencodexHome, link);
+    // Directory junctions exercise realpath alias rejection on Windows without
+    // requiring Developer Mode or an elevated file-symlink privilege.
+    symlinkSync(opencodexHome, link, process.platform === "win32" ? "junction" : "dir");
     const probe = runProbe(`
       import { assertNotRealHomeUnderTest } from "${REPO_ROOT_URL}src/lib/test-home-guard";
       try { assertNotRealHomeUnderTest(${JSON.stringify(link)}); console.log("allowed"); }

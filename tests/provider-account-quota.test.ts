@@ -35,6 +35,48 @@ function usageBody(fiveHour: number, sevenDay: number): string {
   });
 }
 
+function kiroUsageBody(used: number, limit: number, resetAt = 1_785_542_400): string {
+  return JSON.stringify({
+    nextDateReset: resetAt,
+    subscriptionInfo: { subscriptionTitle: "PRIVATE PLAN" },
+    usageBreakdownList: [{
+      resourceType: "CREDIT",
+      currentUsage: Math.trunc(used),
+      currentUsageWithPrecision: used,
+      usageLimit: Math.trunc(limit),
+      usageLimitWithPrecision: limit,
+      nextDateReset: resetAt,
+    }],
+    userInfo: { userId: "private-kiro-user" },
+  });
+}
+
+async function seedTwoKiroAccounts(): Promise<void> {
+  const expires = Date.now() + 60 * 60_000;
+  await saveCredential("kiro", {
+    access: "kiro-token-first",
+    refresh: "kiro-refresh-first",
+    expires,
+    accountId: "kiro-first",
+    source: "oauth",
+    kiro: {
+      profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/first",
+      apiRegion: "us-east-1",
+    },
+  });
+  await saveCredential("kiro", {
+    access: "kiro-token-second",
+    refresh: "kiro-refresh-second",
+    expires,
+    accountId: "kiro-second",
+    source: "oauth",
+    kiro: {
+      profileArn: "arn:aws:codewhisperer:eu-west-1:123456789012:profile/second",
+      apiRegion: "eu-west-1",
+    },
+  });
+}
+
 beforeEach(() => {
   opencodexHome = mkdtempSync(join(tmpdir(), "ocx-account-quota-"));
   process.env.OPENCODEX_HOME = opencodexHome;
@@ -199,12 +241,137 @@ describe("fetchProviderAccountQuotas", () => {
     expect(after?.credential.source).toBe("local-cli");
   });
 
+  test("Kiro reports each account with its own bearer, region, and profile", async () => {
+    await seedTwoKiroAccounts();
+    const previousProfile = process.env.KIRO_PROFILE_ARN;
+    const previousRegion = process.env.KIRO_API_REGION;
+    process.env.KIRO_PROFILE_ARN = "arn:aws:codewhisperer:ap-south-1:999999999999:profile/unrelated";
+    process.env.KIRO_API_REGION = "ap-south-1";
+    const seen: Array<{ url: URL; authorization: string }> = [];
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        seen.push({ url, authorization });
+        const body = authorization.endsWith("kiro-token-first")
+          ? kiroUsageBody(4578.66, 5000)
+          : kiroUsageBody(125, 1000);
+        return new Response(body, { status: 200 });
+      }) as typeof fetch;
+
+      const rows = await fetchProviderAccountQuotas("kiro");
+      expect(rows).toHaveLength(2);
+      expect(rows.map(row => row.quota?.monthlyPercent).sort((a, b) => (a ?? 0) - (b ?? 0)))
+        .toEqual([12.5, 91.5732]);
+      expect(rows.every(row => row.unavailable === undefined)).toBe(true);
+      expect(seen.map(item => item.authorization).sort()).toEqual([
+        "Bearer kiro-token-first",
+        "Bearer kiro-token-second",
+      ]);
+      const first = seen.find(item => item.authorization.endsWith("kiro-token-first"));
+      const second = seen.find(item => item.authorization.endsWith("kiro-token-second"));
+      expect(first?.url.host).toBe("q.us-east-1.amazonaws.com");
+      expect(first?.url.searchParams.get("profileArn")).toContain("profile/first");
+      expect(second?.url.host).toBe("q.eu-west-1.amazonaws.com");
+      expect(second?.url.searchParams.get("profileArn")).toContain("profile/second");
+      expect(seen.every(item => item.url.searchParams.get("origin") === "KIRO_CLI")).toBe(true);
+      expect(seen.every(item => item.url.searchParams.get("resourceType") === "AGENTIC_REQUEST")).toBe(true);
+      const serialized = JSON.stringify(rows);
+      expect(serialized).not.toContain("kiro-token");
+      expect(serialized).not.toContain("private-kiro-user");
+      expect(serialized).not.toContain("PRIVATE PLAN");
+      expect(serialized).not.toContain("unrelated");
+    } finally {
+      if (previousProfile === undefined) delete process.env.KIRO_PROFILE_ARN;
+      else process.env.KIRO_PROFILE_ARN = previousProfile;
+      if (previousRegion === undefined) delete process.env.KIRO_API_REGION;
+      else process.env.KIRO_API_REGION = previousRegion;
+    }
+  });
+
+  test("Kiro account failures stay unavailable and never borrow another account", async () => {
+    const expires = Date.now() + 60 * 60_000;
+    await saveCredential("kiro", {
+      access: "kiro-token-good",
+      refresh: "kiro-refresh-good",
+      expires,
+      accountId: "kiro-good",
+      source: "oauth",
+      kiro: { apiRegion: "us-west-2" },
+    });
+    await saveCredential("kiro", {
+      access: "kiro-token-bad",
+      refresh: "kiro-refresh-bad",
+      expires,
+      accountId: "kiro-bad",
+      source: "oauth",
+      kiro: { apiRegion: "eu-central-1" },
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      const url = new URL(String(input));
+      if (authorization.endsWith("kiro-token-bad")) {
+        expect(url.host).toBe("q.eu-central-1.amazonaws.com");
+        return new Response("{malformed", { status: 200 });
+      }
+      expect(url.host).toBe("q.us-west-2.amazonaws.com");
+      expect(url.searchParams.has("profileArn")).toBe(false);
+      return new Response(kiroUsageBody(20, 100), { status: 200 });
+    }) as typeof fetch;
+
+    const rows = await fetchProviderAccountQuotas("kiro");
+    const good = rows.find(row => row.quota?.monthlyPercent === 20);
+    const bad = rows.find(row => row.unavailable);
+    expect(good?.unavailable).toBeUndefined();
+    expect(bad?.quota).toBeNull();
+    expect(bad?.unavailable).toBe(true);
+  });
+
+  test("Kiro provider report follows the active account and seeds its account cache", async () => {
+    await seedTwoKiroAccounts();
+    const { getAccountSet, setActiveAccount } = await import("../src/oauth/store");
+    const set = getAccountSet("kiro");
+    const second = set?.accounts.find(account => account.credential.access === "kiro-token-second");
+    expect(second).toBeTruthy();
+    await setActiveAccount("kiro", second!.id);
+    let calls = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      expect(authorization).toBe("Bearer kiro-token-second");
+      return new Response(kiroUsageBody(250, 1000), { status: 200 });
+    }) as typeof fetch;
+    const config: OcxConfig = {
+      defaultProvider: "kiro",
+      providers: {
+        kiro: { adapter: "kiro", authMode: "oauth", baseUrl: "https://runtime.us-east-1.kiro.dev" },
+      },
+    };
+
+    const report = await fetchProviderQuotaReports(config, true);
+    expect(report.reports).toMatchObject([{ provider: "kiro", source: "kiro:getUsageLimits" }]);
+    expect(report.reports[0]?.quota.monthlyPercent).toBe(25);
+    expect(calls).toBe(1);
+
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      expect(authorization).toBe("Bearer kiro-token-first");
+      return new Response(kiroUsageBody(100, 1000), { status: 200 });
+    }) as typeof fetch;
+    const rows = await fetchProviderAccountQuotas("kiro");
+    expect(calls).toBe(2);
+    expect(rows.find(row => row.accountId === second!.id)?.quota?.monthlyPercent).toBe(25);
+    expect(rows.find(row => row.accountId !== second!.id)?.quota?.monthlyPercent).toBe(10);
+  });
+
   test("providers without a per-account usage API are skipped", async () => {
     expect(supportsPerAccountQuota("anthropic")).toBe(true);
-    expect(supportsPerAccountQuota("kiro")).toBe(false);
+    expect(supportsPerAccountQuota("kiro")).toBe(true);
+    expect(supportsPerAccountQuota("cursor")).toBe(false);
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
-    expect(await fetchProviderAccountQuotas("kiro")).toEqual([]);
+    expect(await fetchProviderAccountQuotas("cursor")).toEqual([]);
     expect(called).toBe(false);
   });
 

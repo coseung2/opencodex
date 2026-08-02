@@ -138,10 +138,24 @@ Invariants:
 
 ## Release workflow
 
-Package release is npm-focused. `package.json` exposes `opencodex` and `ocx`, `prepublishOnly` runs
-typecheck and GUI build, and `scripts/release.ts` now runs local typecheck, `bun test --isolate tests`, and
-`bun run privacy:scan` before the version bump, commit/push, Cross-platform CI wait, and GitHub
-Release workflow dispatch. Docs publishing is separate from npm release publishing.
+Package release is npm-focused. The canonical package is `@coseung2/opencodex`; one tarball exposes
+`opencodex`, `ocx`, and `ocx-notch`. The first two commands remain cross-platform Node shims into the
+bundled Bun runtime. `ocx-notch` is a Node launcher that starts the packaged Windows x64 release EXE
+from `vendor/ocx-notch/win32-x64/ocx-notch.exe` and fails explicitly on unsupported OS/architecture.
+The standalone `@coseung2/ocx-notch@0.1.1` package remains a compatibility distribution; do not
+remove or repurpose it when changing the integrated package.
+
+`prepublishOnly` runs typecheck and GUI/package preparation. Package preparation must find either the
+local Cargo release output at `packages/ocx-notch/target/release/ocx-notch.exe` or the exact Windows
+CI artifact already downloaded to the vendor destination. It rejects a missing, undersized, or
+non-PE asset and logs its SHA-256. `scripts/release.ts` runs local typecheck,
+`bun test --isolate tests`, and `bun run privacy:scan` before the version bump, commit/push,
+Cross-platform CI wait, and GitHub Release workflow dispatch. Docs publishing is separate from npm
+release publishing.
+
+The coseung2 prerelease line uses versions such as `2.8.0-cs.1` with npm dist-tag `next`. Stable
+versions use `latest`; the upstream-compatible `-preview.*` line continues to use `preview` only on
+the preview branch.
 
 ## Release metadata invariants
 
@@ -150,7 +164,7 @@ Every npm release version must map cleanly across four surfaces:
 | Surface | Required state |
 | --- | --- |
 | `package.json` | `version` equals the release workflow `version` input. |
-| npm registry | `@bitkyc08/opencodex@<version>` does not exist before publish, then exists after publish with the requested dist-tag. |
+| npm registry | `@coseung2/opencodex@<version>` does not exist before publish, then exists after publish with the requested dist-tag. |
 | Git tag | `v<version>` does not exist before publish, then points at the exact release commit. |
 | GitHub Release | `v<version>` does not exist before publish, then is created from the exact release commit. |
 
@@ -165,7 +179,7 @@ after an explicit human decision that the public history rewrite is acceptable.
 Manual preflight checks when debugging a release:
 
 ```bash
-npm view @bitkyc08/opencodex@<version> version
+npm view @coseung2/opencodex@<version> version
 git ls-remote origin refs/tags/v<version>
 gh release view v<version>
 ```
@@ -189,20 +203,51 @@ cd gui && bun install --frozen-lockfile && bun run lint && bun run build
 bun run src/cli/index.ts help
 ```
 
-and the Node-only global-install smoke path:
+and the package-install smoke path. A dedicated hosted Windows job first builds the locked Cargo
+release executable and uploads it as `ocx-notch-win32-x64`; every OS smoke job downloads that same
+artifact before packing:
 
 ```bash
+cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml
 npm install
+# download artifact -> vendor/ocx-notch/win32-x64/ocx-notch.exe
 npm run build:gui
 npm pack --json > pack.json
-npm install -g ./bitkyc08-opencodex-*.tgz
+npm install -g ./coseung2-opencodex-*.tgz
 ocx help
+command -v ocx-notch
 ```
+
+The pack check requires `gui/dist/index.html`, `bin/ocx-notch.mjs`, the Windows x64 EXE, and all
+three `bin` mappings. Non-Windows smoke invokes `ocx-notch` without arguments and requires the
+explicit Windows-x64-only error; Windows verifies command installation without opening the desktop
+application.
 
 The CI intentionally does not build docs, run coverage, or perform remote Ubuntu/RDP smoke tests.
 Those stay outside the default gate until a concrete regression justifies the extra runtime.
 
 The Release workflow remains manual and publish-focused. Before any dry-run or publish step, it
 checks that the exact release commit (`GITHUB_SHA`) already has a successful Cross-platform CI run.
-This keeps release runs short and makes release a deployment of a verified commit rather than a
-second CI pipeline.
+A separate Windows release job rebuilds and uploads the native EXE for that same immutable SHA; the
+Ubuntu publish job downloads it before `prepublishOnly`, pack, or publish. This makes release a
+deployment of a verified commit rather than an unrelated second build.
+
+### First publish and namespace prerequisites
+
+Do not publish from an unauthenticated workstation or assume npm namespace ownership. Before the
+first public version, a human maintainer must verify all of the following without exposing tokens:
+
+```bash
+npm whoami
+npm view @coseung2/opencodex versions dist-tags --json
+npm access ls-packages
+```
+
+The authenticated npm identity must control the `@coseung2` scope and the requested version must be
+unused. Trusted Publishing cannot be configured for a package that does not yet exist; the first
+version therefore requires an explicit authenticated human publish (or other npm-supported bootstrap
+chosen by the maintainer). Use `npm publish --tag next --access public` for the initial `-cs.*`
+version only after the local pack contents, clean-prefix install, EXE SHA, and CI are verified. Then
+configure the repository/workflow as the npm Trusted Publisher before later automated publishes.
+Never run publish, push, tag creation, or global installation as part of ordinary implementation or
+verification work.

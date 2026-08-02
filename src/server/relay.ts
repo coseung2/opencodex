@@ -498,6 +498,7 @@ export type SseInspector = {
 
 export type SseInspectorHandlers = {
   onTerminal?: (status: ResponsesTerminalStatus, httpStatusOverride?: number) => void;
+  onObservedTerminal?: (status: ResponsesTerminalStatus) => void;
   logCtx?: RequestLogContext;
   onCompletedResponse?: (response: { id?: unknown; output?: unknown; status?: unknown }) => void;
   onFirstOutput?: () => void;
@@ -666,7 +667,14 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
     }
     reportFirstOutput.parsed(parsed);
     const status = terminalStatusFromParsed(parsed);
-    if (status) sawTerminal = true;
+    if (status && !sawTerminal) {
+      sawTerminal = true;
+      try {
+        handlers.onObservedTerminal?.(status);
+      } catch {
+        // Lifecycle observation must not break stream inspection.
+      }
+    }
     if (!reported && handlers.onTerminal && status) {
       try {
         reported = true;
@@ -817,6 +825,7 @@ export type InspectionConsumerOptions = {
   now?: () => number;
   /** Test seam for proving both public consumers dispose their owned inspector. */
   inspectorFactory?: (handlers: SseInspectorHandlers) => SseInspector;
+  onObservedTerminal?: (status: ResponsesTerminalStatus) => void;
 };
 
 const DEFAULT_INSPECTION_DRAIN_MS = 15_000;
@@ -968,6 +977,7 @@ export function consumeForInspection(
   const reader = body.getReader();
   const inspector = (options?.inspectorFactory ?? createSseInspector)({
     onTerminal,
+    onObservedTerminal: options?.onObservedTerminal,
     logCtx,
     onCompletedResponse,
     onFirstOutput,
@@ -1013,6 +1023,7 @@ export function consumeForResponseLogMetadata(
   // No onTerminal → the inspector's `reported` gate stays permanently false,
   // reproducing this consumer's unconditional logCtx inspection.
   const inspector = (options?.inspectorFactory ?? createSseInspector)({
+    onObservedTerminal: options?.onObservedTerminal,
     logCtx,
     onCompletedResponse,
     onFirstOutput,

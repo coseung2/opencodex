@@ -4,13 +4,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Подписывайтесь на @claudeebum в X"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/@coseung2/opencodex"><img src="https://img.shields.io/npm/v/@coseung2/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/coseung2/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@coseung2/opencodex?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/@coseung2/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start        # прокси + дашборд: localhost:10100
 ```
 
@@ -27,6 +27,11 @@ ocx start        # прокси + дашборд: localhost:10100
 <p align="center">
   <a href="../README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <b>Русский</b> · <a href="README.ja.md">日本語</a> · 📖 <a href="https://opencodex.me/ru/"><b>Полная документация →</b></a>
 </p>
+
+Эта npm-сборка поддерживается **coseung2** как форк
+[`lidge-jun/opencodex`](https://github.com/lidge-jun/opencodex). Она сохраняет лицензию MIT и
+атрибуцию upstream, а также включает в тот же пакет Windows x64 launcher `ocx-notch` и нативный EXE.
+Отдельный пакет `@coseung2/ocx-notch@0.1.1` сохранён для совместимости.
 
 <p align="center">
   <img src="../assets/architecture.png" alt="Архитектура opencodex — Codex CLI направляет запросы через прокси opencodex к любому LLM-провайдеру" width="820">
@@ -73,14 +78,14 @@ flowchart LR
 | Linux (x64 / arm64) | Полная поддержка | systemd (пользовательский unit) |
 | Windows (x64) | Полная поддержка | Task Scheduler (скрыто) / опциональная нативная служба (`--native`, WinSW) |
 
-Требуется [Node](https://nodejs.org) 18+. Рантайм Bun добавляется автоматически при `npm install` — отдельно устанавливать Bun не нужно. Все три платформы работают нативно (WSL на Windows не требуется).
+Требуется [Node](https://nodejs.org) 18+. Рантайм Bun добавляется автоматически при `npm install`. Команды `ocx` и `opencodex` работают на всех трёх платформах; встроенная `ocx-notch` поддерживает только Windows x64.
 
 ## Быстрый старт
 
 ### Для людей
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; the Bun runtime is bundled automatically
+npm install -g @coseung2/opencodex@next   # Node 18+; the Bun runtime is bundled automatically
 ocx start                            # or `ocx service` to run it in the background
 ```
 
@@ -91,7 +96,7 @@ ocx start                            # or `ocx service` to run it in the backgro
 ### Для агентов
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start     # or `ocx service`
 ocx init      # interactive setup: writes ~/.opencodex/config.json and wires Codex
 ```
@@ -318,7 +323,7 @@ shim включён по умолчанию и отключается в GUI-п�
 
 ```bash
 ocx uninstall
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @coseung2/opencodex
 ```
 
 `ocx uninstall` останавливает прокси, удаляет установленную службу, удаляет shim для Codex,
@@ -449,7 +454,7 @@ ocx recover-history --legacy-openai
 ## Разработка
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # запустить API прокси в dev-режиме

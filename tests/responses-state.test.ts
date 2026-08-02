@@ -1175,12 +1175,14 @@ describe("Responses previous_response_id state", () => {
     const dir = responseSpillDirectory(home);
     mkdirSync(dir, { recursive: true });
     const old = new Date(Date.now() - 20 * 60_000);
-    const target = join(dir, "target.txt");
-    writeFileSync(target, "target");
+    const target = join(dir, "target-dir");
+    mkdirSync(target);
     const symlinkRef = writeResponseSpillDurably("symlink", { createdAt: Date.now(), items: ["target"] });
     const symlinkName = symlinkRef.fileName;
     unlinkSync(join(dir, symlinkName));
-    symlinkSync(target, join(dir, symlinkName));
+    // Windows file symlinks require Developer Mode or elevation; directory junctions
+    // preserve the lstat-isSymbolicLink contract without those host prerequisites.
+    symlinkSync(target, join(dir, symlinkName), process.platform === "win32" ? "junction" : "dir");
     for (let i = 0; i < 520; i++) {
       const ref = writeResponseSpillDurably(`orphan-${i}`, { createdAt: Date.now(), items: [i] });
       const path = join(dir, ref.fileName);

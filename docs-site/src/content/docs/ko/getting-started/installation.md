@@ -3,9 +3,10 @@ title: 설치
 description: opencodex(ocx) 프록시와 사전 요구 사항을 설치하고, 정상 실행되는지 확인합니다.
 ---
 
-opencodex를 설치하면 같은 실행 파일을 가리키는 `ocx`와 `opencodex` 명령이 함께 제공됩니다.
-둘 다 Bun 기반의 작은 로컬 HTTP 서버를 실행합니다. 모델 요청은 라우팅으로 선택된 프로바이더에
-전달되며, 필요할 때 vision 및 웹 검색 sidecar가 ChatGPT 로그인을 사용할 수도 있습니다.
+`@coseung2/opencodex`를 설치하면 같은 프록시 실행 파일을 가리키는 `ocx`와 `opencodex`,
+그리고 Windows x64 전용 보조 명령 `ocx-notch`가 함께 제공됩니다. 두 프록시 명령은 Bun 기반의
+작은 로컬 HTTP 서버를 실행합니다. 모델 요청은 라우팅으로 선택된 프로바이더에 전달되며,
+필요할 때 vision 및 웹 검색 sidecar가 ChatGPT 로그인을 사용할 수도 있습니다.
 
 ## 사전 요구 사항
 
@@ -18,7 +19,7 @@ opencodex를 설치하면 같은 실행 파일을 가리키는 `ocx`와 `opencod
 ## 설치
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ```
 
 :::note[npm이 bun postinstall을 차단했다면?]
@@ -29,10 +30,10 @@ install-scripts ... blocked because they are not covered by allowScripts`).
 디렉터리를 재설치하게 되니, 항상 패키지 이름을 명시해야 합니다:
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @coseung2/opencodex@next
 
 # 처음에 sudo로 설치했다면 sudo를 유지하세요:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @coseung2/opencodex@next
 ```
 :::
 
@@ -43,15 +44,18 @@ ocx --version
 opencodex --version
 ```
 
+Windows x64에서는 같은 npm 패키지에 포함된 네이티브 Notch를 `ocx-notch`로 실행할 수 있습니다.
+Linux, macOS, Windows 비-x64 환경에서는 이 명령만 명확한 미지원 오류로 종료되며,
+`ocx`와 `opencodex`는 계속 지원됩니다.
+
 ### 배포 채널
 
-안정화 채널인 `latest`에도 ChatGPT, OpenAI API 키, OpenRouter, 실험 단계의 Cursor 경로를 위한
-GPT-5.6 Sol/Terra/Luna 카탈로그 정보가 이미 들어 있습니다. 다만 모델 사용 권한까지 생기는 것은
-아닙니다. 아직 정식 배포되지 않은 opencodex 빌드를 시험할 때만 preview 채널을 사용하세요:
+coseung2 포크는 `2.8.0-cs.*` 버전을 `next` 채널로 시작합니다. 안정 버전으로 명시적으로
+승격되기 전까지는 이 채널을 유지하세요. upstream의 `preview` 채널은 이 패키지의 배포 채널이 아닙니다:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
-ocx update --tag preview
+npm install -g @coseung2/opencodex@next
+ocx update --tag next
 ```
 
 ## 소스에서 실행
@@ -59,7 +63,7 @@ ocx update --tag preview
 opencodex 자체를 직접 수정하며 작업하려면:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # 개발 모드로 프록시 API 시작 (src/cli/index.ts start)

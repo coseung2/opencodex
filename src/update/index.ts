@@ -20,11 +20,11 @@ export function historyRestoreIncomplete(configDir = getConfigDir()): boolean {
   }
 }
 
-export const PKG = "@bitkyc08/opencodex";
+export const PKG = "@coseung2/opencodex";
 const HERE = dirname(fileURLToPath(import.meta.url)); // .../opencodex/src/update
 
 export type Installer = "bun" | "npm" | "source";
-export type Channel = "latest" | "preview";
+export type Channel = "latest" | "preview" | "next";
 
 /** Infer how opencodex is installed from the running module's path. */
 export function detectInstall(): Installer {
@@ -41,13 +41,15 @@ export function currentVersion(): string {
 }
 
 export function defaultUpdateTag(current: string): Channel {
-  return current.includes("-preview.") ? "preview" : "latest";
+  if (current.includes("-preview.")) return "preview";
+  if (current.includes("-cs.")) return "next";
+  return "latest";
 }
 
 export function updateTag(current: string): Channel {
   const tagIndex = process.argv.indexOf("--tag");
   const explicit = tagIndex !== -1 ? process.argv[tagIndex + 1] : undefined;
-  if (explicit === "preview" || explicit === "latest") return explicit;
+  if (explicit === "preview" || explicit === "latest" || explicit === "next") return explicit;
   return defaultUpdateTag(current);
 }
 

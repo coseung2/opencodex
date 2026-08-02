@@ -3,9 +3,10 @@ title: インストール
 description: opencodex(ocx)プロキシと前提条件をインストールし、正常に実行できるか確認します。
 ---
 
-opencodex をインストールすると同じ実行ファイルを指す `ocx` と `opencodex` コマンドが一緒に提供されます。
-どちらも Bun ベースの小さなローカル HTTP サーバーを実行します。モデルリクエストはルーティングで選ばれたプロバイダーに
-転送され、必要に応じて vision とウェブ検索のサイドカーが ChatGPT ログインを使うこともあります。
+`@coseung2/opencodex` をインストールすると、同じプロキシを指す `ocx` と `opencodex`、
+さらに Windows x64 専用の補助コマンド `ocx-notch` が提供されます。2つのプロキシコマンドは
+Bun ベースの小さなローカル HTTP サーバーを実行します。モデルリクエストはルーティングで
+選ばれたプロバイダーに転送され、必要に応じて vision とウェブ検索のサイドカーが ChatGPT ログインを使います。
 
 ## 前提条件
 
@@ -18,7 +19,7 @@ opencodex をインストールすると同じ実行ファイルを指す `ocx` 
 ## インストール
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ```
 
 :::note[npm が bun の postinstall をブロックした?]
@@ -29,10 +30,10 @@ install-scripts ... blocked because they are not covered by allowScripts`)。
 ディレクトリを再インストールしてしまうので、必ずパッケージ名を明示してください:
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @coseung2/opencodex@next
 
 # 最初に sudo でインストールした場合は sudo を維持してください:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @coseung2/opencodex@next
 ```
 :::
 
@@ -43,15 +44,18 @@ ocx --version
 opencodex --version
 ```
 
+Windows x64 では `ocx-notch` が同じ npm パッケージに含まれるネイティブ Notch を起動します。
+Linux、macOS、Windows 非 x64 ではこのコマンドだけが明示的な未対応エラーで終了し、
+`ocx` と `opencodex` は引き続き利用できます。
+
 ### 配布チャネル
 
-安定チャネルの `latest` にも ChatGPT、OpenAI API キー、OpenRouter、実験段階の Cursor 経路のための
-GPT-5.6 Sol/Terra/Luna カタログ情報がすでに含まれています。ただしモデルの利用権まで付与されるわけでは
-ありません。まだ正式配布されていない opencodex ビルドを試す場合のみ preview チャネルを使ってください:
+coseung2 フォークは `2.8.0-cs.*` を `next` チャネルで開始します。安定版へ明示的に昇格するまでは
+このチャネルを維持してください。upstream の `preview` はこのパッケージの配布チャネルではありません:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
-ocx update --tag preview
+npm install -g @coseung2/opencodex@next
+ocx update --tag next
 ```
 
 ## ソースから実行
@@ -59,7 +63,7 @@ ocx update --tag preview
 opencodex 自体を直接修正しながら作業するには:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # 開発モードでプロキシ API を起動 (src/cli/index.ts start)

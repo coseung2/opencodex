@@ -115,7 +115,7 @@ export OPENCODEX_API_KEY=<your key>
 Форма выше соответствует опубликованной документации Pi по custom-провайдерам. Она **не была
 проверена** на реальном `~/.pi/agent/models.json` на машине с установленным Pi. Если Pi отвергнет
 экспортированный блок, несоответствие на нашей стороне — пожалуйста,
-[создайте issue](https://github.com/lidge-jun/opencodex/issues) и приложите то, что сообщил Pi.
+[создайте issue](https://github.com/coseung2/opencodex/issues) и приложите то, что сообщил Pi.
 :::
 
 ## Требования

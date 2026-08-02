@@ -103,7 +103,7 @@ describe("GET /api/update/badge", () => {
     expect(typeof badge.updateAvailable).toBe("boolean");
     expect(typeof badge.canUpdate).toBe("boolean");
     expect(typeof badge.unknown).toBe("boolean");
-    expect(["latest", "preview"]).toContain(badge.channel);
+    expect(["latest", "preview", "next"]).toContain(badge.channel);
   });
 
   test("serializes scalars only — no paths, commands, or registry output", async () => {
@@ -128,8 +128,8 @@ describe("GET /api/github/star", () => {
       expect(status).toBe(200);
       const star = body as Record<string, unknown>;
       expect(["starred", "not-starred", "unauthenticated"]).toContain(star.state);
-      expect(star.repo).toBe("lidge-jun/opencodex");
-      expect(star.url).toBe("https://github.com/lidge-jun/opencodex");
+      expect(star.repo).toBe("coseung2/opencodex");
+      expect(star.url).toBe("https://github.com/coseung2/opencodex");
     });
     expect(calls).toEqual([["auth", "status", "--hostname", "github.com"]]);
   });

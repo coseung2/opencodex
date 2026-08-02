@@ -634,7 +634,7 @@ async function handleUninstall() {
     console.error(`\nUninstall finished with ${failures.length} failed step(s): ${failures.join(", ")}`);
     process.exit(1);
   }
-  console.log("\n✅ opencodex local state removed. Remove the package with: npm uninstall -g @bitkyc08/opencodex");
+  console.log("\n✅ opencodex local state removed. Remove the package with: npm uninstall -g @coseung2/opencodex");
 }
 
 async function handleStatus() {
@@ -931,7 +931,7 @@ switch (command) {
     // Hidden, detached helper spawned by the update prompt to refresh the
     // cached latest version without blocking the foreground start. Not in help.
     const { refreshVersionCache } = await import("../update/notify");
-    const channel = args[1] === "preview" ? "preview" : "latest";
+    const channel = args[1] === "preview" || args[1] === "next" ? args[1] : "latest";
     await refreshVersionCache(channel);
     break;
   }

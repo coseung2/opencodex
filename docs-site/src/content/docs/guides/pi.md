@@ -113,7 +113,7 @@ a guess.
 The shape above follows Pi's published custom-provider documentation. It has **not** been verified
 against a real `~/.pi/agent/models.json` on a machine with Pi installed. If Pi rejects the exported
 block, the mismatch is on our side — please
-[open an issue](https://github.com/lidge-jun/opencodex/issues) with what Pi reported.
+[open an issue](https://github.com/coseung2/opencodex/issues) with what Pi reported.
 :::
 
 ## Requirements

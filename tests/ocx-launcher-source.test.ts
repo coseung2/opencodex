@@ -24,7 +24,7 @@ describe("ocx.mjs npm launcher (source invariants)", () => {
   });
 
   test("--tag is allowlisted before reaching package-manager arguments", () => {
-    expect(source).toContain('if (explicit === "preview" || explicit === "latest") return explicit;');
+    expect(source).toContain('if (explicit === "preview" || explicit === "latest" || explicit === "next") return explicit;');
     expect(source).not.toMatch(/if \(tagIndex !== -1 && process\.argv\[tagIndex \+ 1\]\) return process\.argv/);
   });
 

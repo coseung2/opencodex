@@ -4,13 +4,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="X에서 @claudeebum 팔로우"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/@coseung2/opencodex"><img src="https://img.shields.io/npm/v/@coseung2/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/coseung2/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@coseung2/opencodex?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/@coseung2/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start        # 프록시 + 대시보드: localhost:10100
 ```
 
@@ -27,6 +27,11 @@ ocx start        # 프록시 + 대시보드: localhost:10100
 <p align="center">
   <a href="../README.md">English</a> · <b>한국어</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ru.md">Русский</a> · <a href="README.ja.md">日本語</a> · 📖 <a href="https://opencodex.me/ko/"><b>전체 문서 →</b></a>
 </p>
+
+이 npm 배포본은 **coseung2**가 [`lidge-jun/opencodex`](https://github.com/lidge-jun/opencodex)를
+기반으로 유지하는 포크입니다. upstream MIT 라이선스와 저작자 표기를 보존하며, 동일 패키지에
+Windows x64용 `ocx-notch` launcher와 네이티브 EXE를 포함합니다. 기존 독립 패키지
+`@coseung2/ocx-notch@0.1.1`도 호환성을 위해 그대로 유지됩니다.
 
 <p align="center">
   <img src="../assets/architecture.png" alt="opencodex 아키텍처 — Codex CLI가 opencodex 프록시를 통해 모든 LLM 프로바이더로 라우팅" width="820">
@@ -71,14 +76,14 @@ flowchart LR
 | Linux (x64 / arm64) | 완전 지원 | systemd (user unit) |
 | Windows (x64) | 완전 지원 | Task Scheduler |
 
-[Node](https://nodejs.org) 18 이상이 필요합니다. Bun 런타임은 `npm install` 시 자동으로 번들되므로 따로 설치할 필요가 없습니다. 세 플랫폼 모두 네이티브로 동작합니다 (Windows에서도 WSL 없이 사용 가능합니다).
+[Node](https://nodejs.org) 18 이상이 필요합니다. Bun 런타임은 `npm install` 시 자동으로 번들되므로 따로 설치할 필요가 없습니다. `ocx`와 `opencodex`는 세 플랫폼에서 동작하며, 번들된 `ocx-notch`는 Windows x64 전용입니다.
 
 ## 빠른 시작
 
 ### 사람용
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start        # 또는 백그라운드에서 실행하려면 `ocx service`
 ```
 
@@ -87,7 +92,7 @@ http://localhost:10100에서 웹 대시보드를 열어 프로바이더, 모델,
 ### 에이전트용
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start     # 또는 `ocx service`
 ocx init      # 대화형 설정: ~/.opencodex/config.json을 쓰고 Codex를 연결합니다
 ```
@@ -295,7 +300,7 @@ npm 패키지를 지우기 전에 로컬 상태를 먼저 정리하세요:
 
 ```bash
 ocx uninstall
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @coseung2/opencodex
 ```
 
 `ocx uninstall`은 프록시 중지, 설치된 service 제거, Codex shim 제거, Codex config/catalog/history
@@ -417,7 +422,7 @@ ocx recover-history --legacy-openai
 ## 개발
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # dev 모드로 프록시 API 시작

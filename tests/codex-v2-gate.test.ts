@@ -466,8 +466,16 @@ describe("config-surface parity: agents.enabled, max_depth, subagent_developer_i
   });
 
   test("feature toggling delegates to exactly the multi_agent_v2 native key", () => {
-    expect(codexFeaturesInvocation("enable").args).toEqual(["features", "enable", "multi_agent_v2"]);
-    expect(codexFeaturesInvocation("disable").args).toEqual(["features", "disable", "multi_agent_v2"]);
+    const deps = {
+      env: { PATH: "" },
+      configDir: mkdtempSync(join(tmpdir(), "ocx-v2-key-")),
+      existsSync: () => false,
+      execFileSync: () => "codex-cli 0.145.0",
+    };
+    expect(codexFeaturesInvocation("enable", "darwin", deps).args)
+      .toEqual(["features", "enable", "multi_agent_v2"]);
+    expect(codexFeaturesInvocation("disable", "darwin", deps).args)
+      .toEqual(["features", "disable", "multi_agent_v2"]);
   });
 
   test("getAgentsEnabled is tri-state: absent, true, false", () => {

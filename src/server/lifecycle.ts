@@ -85,6 +85,84 @@ export function unregisterTurn(ac: AbortController): void {
   }
   lease.release();
 }
+
+export const DEFAULT_TERMINAL_TURN_LEASE_MS = 15_000;
+
+export type ActiveTurnFinishReason =
+  | "inspection_settled"
+  | "upstream_abort"
+  | "terminal_lease_expired";
+
+export type TrackedActiveTurn = {
+  finish(reason?: ActiveTurnFinishReason): void;
+  noteProtocolTerminal(): void;
+};
+
+/**
+ * Track the controller that owns the actual upstream request.
+ *
+ * A valid protocol terminal starts a bounded bookkeeping lease because the
+ * native response branch is intentionally not JS-wrapped on some platforms and
+ * a tee inspection reader may never settle. Lease expiry releases admission
+ * only; it never aborts the upstream or the client response.
+ */
+export function trackActiveTurnLease(
+  ac: AbortController,
+  lease?: AdmissionLease,
+  options: {
+    terminalLeaseMs?: number;
+    onFinish?: (reason: ActiveTurnFinishReason) => void;
+  } = {},
+): TrackedActiveTurn {
+  const terminalLeaseMs = Math.max(
+    0,
+    options.terminalLeaseMs ?? DEFAULT_TERMINAL_TURN_LEASE_MS,
+  );
+  let finished = false;
+  let terminalTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const finish = (
+    reason: ActiveTurnFinishReason = "inspection_settled",
+  ): void => {
+    if (finished) return;
+    finished = true;
+    if (terminalTimer !== undefined) {
+      clearTimeout(terminalTimer);
+      terminalTimer = undefined;
+    }
+    ac.signal.removeEventListener("abort", onAbort);
+    unregisterTurn(ac);
+    try {
+      options.onFinish?.(reason);
+    } catch {
+      // Observability must never break lifecycle teardown.
+    }
+  };
+  const onAbort = () => finish("upstream_abort");
+
+  const noteProtocolTerminal = (): void => {
+    if (finished || terminalTimer !== undefined) return;
+    if (terminalLeaseMs === 0) {
+      finish("terminal_lease_expired");
+      return;
+    }
+    terminalTimer = setTimeout(
+      () => finish("terminal_lease_expired"),
+      terminalLeaseMs,
+    );
+    (terminalTimer as { unref?: () => void }).unref?.();
+  };
+
+  registerTurn(ac, lease);
+  if (ac.signal.aborted) {
+    finish("upstream_abort");
+  } else {
+    ac.signal.addEventListener("abort", onAbort, { once: true });
+    if (ac.signal.aborted) onAbort();
+  }
+
+  return { finish, noteProtocolTerminal };
+}
 export function isDraining(): boolean { return draining; }
 export function getActiveTurnCount(): number { return turnGate.metrics().active; }
 export function activeRegistryMetrics(): Record<string, AdmissionMetrics> {

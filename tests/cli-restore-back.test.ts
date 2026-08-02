@@ -66,7 +66,7 @@ describe("ocx restore back", () => {
       rmSync(codexHome, { recursive: true, force: true });
       rmSync(ocxHome, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test("help documents both directions of the switch", () => {
     expect(helpSource).toContain("ocx restore [back]");

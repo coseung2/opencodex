@@ -38,7 +38,7 @@ import { isNewer } from "./notify";
 import { isRealBunBinary } from "../lib/bun-binary-validator.mjs";
 import { handoffWindowsTrayForUpdate, planWindowsTrayUpdate } from "./tray-update-plan.mjs";
 
-const RELEASE_NOTES_URL = "https://github.com/lidge-jun/opencodex/releases/latest";
+const RELEASE_NOTES_URL = "https://github.com/coseung2/opencodex/releases/latest";
 const UPDATE_JOB_FILENAME = "update-job.json";
 const UPDATE_TIMEOUT_MS = 180_000;
 const RESTART_TIMEOUT_MS = 60_000;
@@ -148,7 +148,7 @@ function spawnBindProbe(bin: string, script: string): boolean {
 
 /**
  * Live global package Bun — not the npm rename tree the update worker may still
- * be executing from (`@bitkyc08/.opencodex-*`). Reject the tiny postinstall
+ * be executing from (`@coseung2/.opencodex-*`). Reject the tiny postinstall
  * stub so probes fall back to the worker runtime instead of failing forever.
  */
 function livePackageBunPath(): string | null {
@@ -209,10 +209,11 @@ async function waitForGhostListenClear(
 function packageLauncherPath(): string {
   // This module lives at src/update/job.ts — the launcher is <pkg-root>/bin/ocx.mjs.
   // After `npm install -g`, import.meta.url can still point at npm's renamed temp
-  // tree (`@bitkyc08/.opencodex-*`). Prefer the live package path when that happens.
+  // tree (`@coseung2/.opencodex-*`). Prefer the live package path when that happens.
+  // Recognize the upstream scope as a migration input, but always target this fork's live package.
   const fromMeta = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "ocx.mjs");
   if (!/[\\/]\.opencodex-/i.test(fromMeta) && existsSync(fromMeta)) return fromMeta;
-  const live = fromMeta.replace(/[\\/]@bitkyc08[\\/]\.opencodex-[^\\/]+/i, `${sep}@bitkyc08${sep}opencodex`);
+  const live = fromMeta.replace(/[\\/]@(bitkyc08|coseung2)[\\/]\.opencodex-[^\\/]+/i, `${sep}@coseung2${sep}opencodex`);
   if (live !== fromMeta && existsSync(live)) return live;
   return fromMeta;
 }
@@ -226,7 +227,7 @@ function manualSourceCommand(): string {
 }
 
 export function normalizeUpdateChannel(raw: string | null | undefined, current = currentVersion()): Channel {
-  return raw === "latest" || raw === "preview" ? raw : defaultUpdateTag(current);
+  return raw === "latest" || raw === "preview" || raw === "next" ? raw : defaultUpdateTag(current);
 }
 
 export function updateJobPath(): string {
@@ -766,7 +767,7 @@ async function restartAfterUpdate(
     killOcxHolders: true,
     // Windows scheduler wrappers can mint a *new* bun PID during the wait; keep
     // killing every ocx listener on this port, not only the pre-wait snapshot.
-    // npm rename trees under `@bitkyc08/.opencodex-*` are classified as ocx by
+    // npm rename trees under either the current or upstream scope are classified as ocx by
     // isOcxStartCommandLine — never kill unknown foreign claimants on this port.
     killAllOcxOnPort: true,
     onlyKillPids,
@@ -1068,7 +1069,7 @@ function restartFailureHint(port: number): string {
   return `Update installed, but the restarted proxy did not stay healthy on port ${port}. `
     + `Try 'ocx start --port ${port}'. `
     + "If the update log shows bun postinstall or EPERM warnings, "
-    + "reinstall with 'npm install -g --allow-scripts=bun @bitkyc08/opencodex'.";
+    + "reinstall with 'npm install -g --allow-scripts=bun @coseung2/opencodex'.";
 }
 
 type AwaitHealthyResult =

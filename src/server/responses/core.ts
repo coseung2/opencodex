@@ -100,7 +100,7 @@ import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../provider
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import { resolveProviderTransport } from "../../providers/xai-transport";
 import type { WsData } from "../ws-bridge";
-import { registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle";
+import { trackActiveTurnLease, trackStreamLifetime } from "../lifecycle";
 import { redactSecretString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import type { AdmissionLease } from "../../lib/admission";
@@ -1776,9 +1776,7 @@ async function handleResponsesInner(
         config.streamMode ?? "auto",
       );
       if (eagerPath?.useEagerRelay || win32EagerRewrite) {
-        const turnAc = new AbortController();
-        linkAbortSignal(upstream, turnAc.signal);
-        registerTurn(turnAc, options.turnAdmissionLease);
+        const turn = trackActiveTurnLease(upstream, options.turnAdmissionLease);
         const reportNativeTerminal = recordTerminalOutcomes
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
@@ -1803,11 +1801,12 @@ async function handleResponsesInner(
           : undefined;
         const inspector = createSseInspector({
           onTerminal: reportNativeTerminal,
+          onObservedTerminal: () => turn.noteProtocolTerminal(),
           logCtx,
           onCompletedResponse: rememberPassthroughResponse,
           onFirstOutput: options.onFirstOutput,
         });
-        const eagerBody = relaySseEagerBounded(upstreamResponse.body, turnAc, {
+        const eagerBody = relaySseEagerBounded(upstreamResponse.body, upstream, {
           inspectChunk: chunk => inspector.feed(chunk),
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
@@ -1827,7 +1826,7 @@ async function handleResponsesInner(
             }
           },
           onClientCancel: () => options.onNativePassthroughCancel?.(),
-          onDone: () => unregisterTurn(turnAc),
+          onDone: () => turn.finish("inspection_settled"),
         }, win32EagerRewrite ? { rewriteBudget: translatorBudget } : undefined);
         // selectEagerPath admits only no-rewrite traffic on both eligible platforms;
         // win32 rewrite traffic reaches this relay too, but with the payload rewrite
@@ -1841,14 +1840,13 @@ async function handleResponsesInner(
         );
       }
       const [nativeBody, inspectBody] = upstreamResponse.body.tee();
-      const turnAc = new AbortController();
       const clientGone = new AbortController();
-      linkAbortSignal(upstream, turnAc.signal);
-      registerTurn(turnAc, options.turnAdmissionLease);
+      const turn = trackActiveTurnLease(upstream, options.turnAdmissionLease);
       const inspectionConsumerOptions = {
         clientGoneSignal: clientGone.signal,
         drainBounds: { ms: 15_000, bytes: 32 * 1024 * 1024 },
         upstream,
+        onObservedTerminal: () => turn.noteProtocolTerminal(),
       };
       if (recordTerminalOutcomes) {
         // A real terminal was parsed from the (teed) inspection stream — record it as the outcome
@@ -1878,8 +1876,8 @@ async function handleResponsesInner(
         consumeForInspection(
           inspectBody,
           reportNativeTerminal,
-          turnAc.signal,
-          () => unregisterTurn(turnAc),
+          upstream.signal,
+          () => turn.finish("inspection_settled"),
           logCtx,
           () => options.onNativePassthroughCancel?.(),
           rememberPassthroughResponse,
@@ -1890,8 +1888,8 @@ async function handleResponsesInner(
         consumeForResponseLogMetadata(
           inspectBody,
           logCtx,
-          turnAc.signal,
-          () => unregisterTurn(turnAc),
+          upstream.signal,
+          () => turn.finish("inspection_settled"),
           rememberPassthroughResponse,
           options.onFirstOutput,
           inspectionConsumerOptions,

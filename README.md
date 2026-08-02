@@ -4,13 +4,13 @@ Two commands, and every one of them runs any LLM you point it at.</p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Follow @claudeebum on X"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/@coseung2/opencodex"><img src="https://img.shields.io/npm/v/@coseung2/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/coseung2/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@coseung2/opencodex?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/@coseung2/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start        # proxy + dashboard on localhost:10100
 ```
 
@@ -41,6 +41,12 @@ ocx start        # proxy + dashboard on localhost:10100
   <a href="README.md">English</a> · <a href="readme/README.ko.md">한국어</a> · <a href="readme/README.zh-CN.md">简体中文</a> · <a href="readme/README.ru.md">Русский</a> · <a href="readme/README.ja.md">日本語</a> · 📖 <a href="https://opencodex.me/"><b>Full documentation →</b></a>
 </p>
 
+This npm distribution is maintained by **coseung2** as a fork of
+[`lidge-jun/opencodex`](https://github.com/lidge-jun/opencodex). It preserves the upstream MIT
+license and attribution while shipping fork-specific integration work. The same package also
+includes the Windows x64 `ocx-notch` launcher and native executable; the standalone
+`@coseung2/ocx-notch@0.1.1` package remains available for compatibility.
+
 opencodex is a lightweight local proxy that translates Codex's Responses API into whatever your
 provider speaks — streaming, tool calls, reasoning tokens, images, in both directions. Use Claude,
 Gemini, Grok, GLM, DeepSeek, Kimi, Qwen, Ollama, or any other LLM with Codex, Claude Code, Claude
@@ -53,7 +59,7 @@ account while existing threads stay pinned to the account that started them.
 ### For humans
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; the Bun runtime is bundled automatically
+npm install -g @coseung2/opencodex@next   # Node 18+; the Bun runtime is bundled automatically
 ocx start                            # or `ocx service` to run it in the background
 ```
 
@@ -64,7 +70,7 @@ re-opens the dashboard at any time.
 ### For agents
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start     # or `ocx service`
 ocx init      # interactive setup: writes ~/.opencodex/config.json and wires Codex
 ```
@@ -89,7 +95,8 @@ when it is unreachable). `ocx status` / `ocx doctor` / `ocx health` report the r
 | Windows (x64) | Fully supported | Task Scheduler (hidden) / opt-in native service (`--native`, WinSW) |
 
 Requires [Node](https://nodejs.org) 18+. The Bun runtime is bundled on `npm install` — no separate
-Bun install needed, no WSL needed on Windows. If npm blocked the bundled runtime's install scripts,
+Bun install needed, no WSL needed on Windows. The bundled `ocx-notch` command is available only on
+Windows x64; `ocx` and `opencodex` remain cross-platform. If npm blocked the bundled runtime's install scripts,
 see the [installation docs](https://opencodex.me/getting-started/installation/).
 
 ## Highlights
@@ -147,7 +154,8 @@ ocx provider <...>             # manage providers (list/add/edit/test/remove)
 ocx account <...>              # manage ChatGPT accounts & API-key pools
 ocx combo <...>                # manage failover / round-robin combos
 ocx v2 <...>                   # multi-agent v1/v2 surface controls
-ocx update [--tag preview]     # update opencodex
+ocx update [--tag next]        # update this fork's prerelease channel
+ocx-notch                      # launch the Windows x64 Notch companion
 ```
 
 Unpinned starts may pick another free port if the preferred one is busy; an explicit `--port`
@@ -163,7 +171,7 @@ daemon. Remove them with `ocx service uninstall` / `ocx codex-shim uninstall`.
 
 ```bash
 ocx uninstall                  # stop, remove service/shim, restore native Codex, clean up state
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @coseung2/opencodex
 ```
 
 ## Remote access
@@ -182,7 +190,7 @@ published to **[opencodex.me](https://opencodex.me/)**.
 Maintainer source-of-truth notes live under [`structure/`](./structure), contributor setup in
 [`CONTRIBUTING.md`](./CONTRIBUTING.md), and security reporting in [`SECURITY.md`](./SECURITY.md).
 Report undisclosed vulnerabilities privately through
-[GitHub private vulnerability reporting](https://github.com/lidge-jun/opencodex/security/advisories/new),
+[GitHub private vulnerability reporting](https://github.com/coseung2/opencodex/security/advisories/new),
 not a public issue.
 
 ## Development
@@ -191,7 +199,7 @@ Source development requires the `bun` CLI on your `PATH`. This is separate from 
 package's bundled Bun runtime, which is used only by installed `ocx` commands.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run typecheck

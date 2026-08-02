@@ -17,8 +17,8 @@ const USAGE = `Usage:
   ocx system startup <health|install-service|install-shim> [--json]
   ocx system diagnostics [--json]
   ocx system sync [--json]
-  ocx system update check [--channel <latest|preview>] [--json]
-  ocx system update run [--channel <latest|preview>] [--restart <on|off>] --yes [--json]
+  ocx system update check [--channel <latest|preview|next>] [--json]
+  ocx system update run [--channel <latest|preview|next>] [--restart <on|off>] --yes [--json]
   ocx system update status <job-id> [--json]`;
 
 async function status(argv: string[], deps: RuntimeApiDeps): Promise<void> {
@@ -77,7 +77,9 @@ async function update(argv: string[], deps: RuntimeApiDeps): Promise<void> {
     return;
   }
   const channel = takeOption(args, "--channel") ?? "latest";
-  if (channel !== "latest" && channel !== "preview") throw new CliUsageError("--channel must be latest or preview", USAGE);
+  if (channel !== "latest" && channel !== "preview" && channel !== "next") {
+    throw new CliUsageError("--channel must be latest, preview, or next", USAGE);
+  }
   if (action === "check") {
     rejectArgs(args, USAGE);
     printData(await runtimeRequest(`/api/update/check?tag=${channel}`, {}, deps), wantsJson);

@@ -4,13 +4,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="在 X 上关注 @claudeebum"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/@coseung2/opencodex"><img src="https://img.shields.io/npm/v/@coseung2/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/coseung2/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@coseung2/opencodex?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/@coseung2/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start        # 代理 + 仪表盘: localhost:10100
 ```
 
@@ -27,6 +27,10 @@ ocx start        # 代理 + 仪表盘: localhost:10100
 <p align="center">
   <a href="../README.md">English</a> · <a href="README.ko.md">한국어</a> · <b>简体中文</b> · <a href="README.ru.md">Русский</a> · <a href="README.ja.md">日本語</a> · 📖 <a href="https://opencodex.me/zh-cn/"><b>完整文档 →</b></a>
 </p>
+
+此 npm 发行版由 **coseung2** 基于 [`lidge-jun/opencodex`](https://github.com/lidge-jun/opencodex)
+维护。它保留上游 MIT 许可证和署名，并在同一个包中包含 Windows x64 的 `ocx-notch` 启动器与
+原生 EXE。独立的 `@coseung2/ocx-notch@0.1.1` 包仍为兼容性保留。
 
 <p align="center">
   <img src="../assets/architecture.png" alt="opencodex 架构 — Codex CLI 通过 opencodex 代理路由到任意 LLM 提供商" width="820">
@@ -70,14 +74,14 @@ flowchart LR
 | Linux (x64 / arm64) | 完整支持 | systemd（用户级） |
 | Windows (x64) | 完整支持 | Task Scheduler |
 
-需要 [Node](https://nodejs.org) 18+。Bun 运行时会在 `npm install` 时自动打包，无需单独安装。三个平台都原生运行（Windows 不需要 WSL）。
+需要 [Node](https://nodejs.org) 18+。Bun 运行时会在 `npm install` 时自动打包，无需单独安装。`ocx` 和 `opencodex` 支持三个平台；捆绑的 `ocx-notch` 仅支持 Windows x64。
 
 ## 快速开始
 
 ### 面向用户
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+；自动捆绑 Bun 运行时
+npm install -g @coseung2/opencodex@next   # Node 18+；自动捆绑 Bun 运行时
 ocx start                            # 或使用 `ocx service` 在后台运行
 ```
 
@@ -87,7 +91,7 @@ provider，或任意 OpenAI 兼容端点）、选择模型并管理账户。随�
 ### 面向代理
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ocx start     # 或使用 `ocx service`
 ocx init      # 交互式设置：写入 ~/.opencodex/config.json 并接入 Codex
 ```
@@ -110,14 +114,14 @@ ocx init      # 交互式设置：写入 ~/.opencodex/config.json 并接入 Code
 opencodex 把 Bun 运行时作为依赖打包，并通过 Node 启动器运行，所以你**不需要**自己安装 Bun。如果看到 "bundled Bun runtime is missing" 错误，说明安装时跳过了 lifecycle 脚本（包括 npm 通过 `allowScripts` 拦截 bun postinstall 的情况）或 optional 依赖。请允许 bun 安装脚本后重新安装：
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex   # 不要加 --ignore-scripts、--omit=optional
+npm install -g --allow-scripts=bun @coseung2/opencodex@next   # 不要加 --ignore-scripts、--omit=optional
 
 # 如果最初是用 sudo 安装的，请继续使用 sudo：
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @coseung2/opencodex@next
 ```
 
 npm 警告里给出的缩写命令缺少包名，会把当前目录重新安装进去，
-请始终显式写上 `@bitkyc08/opencodex`。
+请始终显式写上 `@coseung2/opencodex@next`。
 
 如果之前用 sudo 安装到了 root 前缀，上面的 sudo 重装可以解除该前缀的拦截 ——
 但建议在条件允许时迁移到用户自有的 Node（nvm、fnm 或用户 npm prefix）。
@@ -318,7 +322,7 @@ shim。仍在变化的启动器不会被改动，而会在后续命令中重试�
 
 ```bash
 ocx uninstall
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @coseung2/opencodex
 ```
 
 `ocx uninstall` 会停止代理、移除已安装的 service、移除 Codex shim、恢复原生 Codex config/catalog/history，并删除 `~/.opencodex`。
@@ -425,7 +429,7 @@ ocx recover-history --legacy-openai
 ## 开发
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # 以开发模式启动代理 API

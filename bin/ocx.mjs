@@ -3,7 +3,7 @@
  * opencodex npm bin launcher.
  *
  * The package source is TypeScript that runs on the Bun runtime. To let
- * `npm install -g @bitkyc08/opencodex` work without a separately-installed Bun,
+ * `npm install -g @coseung2/opencodex` work without a separately-installed Bun,
  * we bundle the runtime via the `bun` npm dependency and exec it from this
  * Node shim. (Dev still runs `bun run src/cli/index.ts` directly via the shebang on
  * src/cli/index.ts — only the published npm `bin` routes through here.)
@@ -18,7 +18,7 @@ import { isRealBunBinary } from "../src/lib/bun-binary-validator.mjs";
 import { npmInvocation } from "../src/update/npm-invocation.mjs";
 import { handoffWindowsTrayForUpdate, planWindowsTrayUpdate } from "../src/update/tray-update-plan.mjs";
 
-const PKG = "@bitkyc08/opencodex";
+const PKG = "@coseung2/opencodex";
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const cliPath = join(here, "..", "src", "cli", "index.ts");
@@ -44,8 +44,11 @@ function updateTag(currentVersion) {
   // shell-joined spawnSync — never forward arbitrary strings.
   const tagIndex = process.argv.indexOf("--tag");
   const explicit = tagIndex !== -1 ? process.argv[tagIndex + 1] : undefined;
-  if (explicit === "preview" || explicit === "latest") return explicit;
-  return String(currentVersion).includes("-preview.") ? "preview" : "latest";
+  if (explicit === "preview" || explicit === "latest" || explicit === "next") return explicit;
+  const version = String(currentVersion);
+  if (version.includes("-preview.")) return "preview";
+  if (version.includes("-cs.")) return "next";
+  return "latest";
 }
 
 function expandUserPath(raw) {
@@ -334,7 +337,7 @@ function fail(msg) {
       "The bundled Bun runtime could not be prepared. This usually means the\n" +
       "install skipped lifecycle scripts (e.g. npm blocked bun's postinstall\n" +
       "under allowScripts) or optional dependencies. Reinstall with:\n" +
-      "  npm install -g --allow-scripts=bun @bitkyc08/opencodex\n" +
+      "  npm install -g --allow-scripts=bun @coseung2/opencodex\n" +
       "(use sudo if the original install used sudo; without --ignore-scripts\n" +
       "and without --omit=optional / optional=false)"
   );
@@ -381,7 +384,7 @@ function resolveBun() {
 const updateHelpRequested = process.argv[2] === "update" &&
   process.argv.slice(3).some(a => a === "--help" || a === "-h" || a === "help");
 if (updateHelpRequested) {
-  console.log("Usage: ocx update [--tag latest|preview]\n\nUpdate opencodex. Preview installs stay on the preview tag unless overridden.");
+  console.log("Usage: ocx update [--tag latest|preview|next]\n\nUpdate opencodex. Preview and coseung2 prerelease installs stay on their current channel unless overridden.");
   process.exit(0);
 }
 

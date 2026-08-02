@@ -319,5 +319,5 @@ ocx update
 ocx update --tag preview
 ```
 
-New versions become available when the [Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
+New versions become available when the [Release workflow](https://github.com/coseung2/opencodex/actions/workflows/release.yml)
 publishes them to npm.

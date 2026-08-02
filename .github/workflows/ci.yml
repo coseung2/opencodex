@@ -201,8 +201,38 @@ jobs:
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
 
+  build-notch-windows:
+    name: build ocx-notch (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Build release executable
+        run: cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml
+
+      - name: Verify release executable
+        shell: pwsh
+        run: |
+          $path = "packages/ocx-notch/target/release/ocx-notch.exe"
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing $path" }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+          "ocx-notch.exe sha256=$hash"
+
+      - name: Upload release executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocx-notch-win32-x64
+          path: packages/ocx-notch/target/release/ocx-notch.exe
+          if-no-files-found: error
+          retention-days: 3
+
   npm-global-smoke:
     name: npm-global ${{ matrix.os }}
+    needs: build-notch-windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
     strategy:
@@ -227,6 +257,12 @@ jobs:
       - name: Install package dependencies
         run: npm install
 
+      - name: Download ocx-notch release executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ocx-notch-win32-x64
+          path: vendor/ocx-notch/win32-x64
+
       - name: Build package assets
         run: npm run build:gui
 
@@ -234,12 +270,25 @@ jobs:
         shell: bash
         run: npm pack --json > pack.json
 
-      - name: Verify packed GUI asset
-        run: node -e "const p=require('./pack.json')[0]; if (!p.files.some(f => f.path === 'gui/dist/index.html')) { console.error('missing gui/dist/index.html in npm pack'); process.exit(1); }"
+      - name: Verify packed assets and commands
+        run: node -e "const p=require('./pack.json')[0]; const files=new Set(p.files.map(f=>f.path)); for (const f of ['gui/dist/index.html','vendor/ocx-notch/win32-x64/ocx-notch.exe','bin/ocx-notch.mjs']) if (!files.has(f)) { console.error('missing '+f+' in npm pack'); process.exit(1); } const pkg=require('./package.json'); for (const b of ['ocx','opencodex','ocx-notch']) if (!pkg.bin[b]) { console.error('missing bin '+b); process.exit(1); }"
 
       - name: Install globally (downloads bundled bun)
         shell: bash
-        run: npm install -g ./bitkyc08-opencodex-*.tgz
+        run: npm install -g ./coseung2-opencodex-*.tgz
 
       - name: ocx help via bundled bun
         run: ocx help
+
+      - name: Verify installed ocx-notch command
+        shell: bash
+        run: |
+          command -v ocx-notch
+          ocx-notch --version | grep -q "ocx-notch 0.1.1"
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            if ocx-notch 2>notch.err; then
+              echo "ocx-notch unexpectedly succeeded on $RUNNER_OS"
+              exit 1
+            fi
+            grep -q "Windows x64 only" notch.err
+          fi

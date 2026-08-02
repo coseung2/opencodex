@@ -88,7 +88,7 @@ export OPENCODEX_API_KEY=<your key>
 ## Schema 状态
 
 :::note[未在真实安装上验证]
-上面的结构遵循了 Pi 已公开的自定义 provider 文档。它**尚未**在一台安装了 Pi 的机器上、针对真实的 `~/.pi/agent/models.json` 进行验证。如果 Pi 拒绝这个导出块，问题在我们这边 - 请带上 Pi 的报错信息[提交 issue](https://github.com/lidge-jun/opencodex/issues)。
+上面的结构遵循了 Pi 已公开的自定义 provider 文档。它**尚未**在一台安装了 Pi 的机器上、针对真实的 `~/.pi/agent/models.json` 进行验证。如果 Pi 拒绝这个导出块，问题在我们这边 - 请带上 Pi 的报错信息[提交 issue](https://github.com/coseung2/opencodex/issues)。
 :::
 
 ## 需求

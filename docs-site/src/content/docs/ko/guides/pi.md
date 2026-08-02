@@ -114,7 +114,7 @@ export OPENCODEX_API_KEY=<your key>
 위의 형태는 Pi가 공개한 custom-provider 문서를 따른 것입니다. Pi가 설치된 머신의
 실제 `~/.pi/agent/models.json`으로는 아직 검증하지 않았습니다. Pi가 내보낸 블록을
 거부하면 문제는 우리 쪽에 있습니다. Pi가 무엇을 보고했는지와 함께
-[issue를 열어주세요](https://github.com/lidge-jun/opencodex/issues).
+[issue를 열어주세요](https://github.com/coseung2/opencodex/issues).
 :::
 
 ## 요구 사항

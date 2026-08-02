@@ -1443,8 +1443,13 @@ describe("opencodex config defaults", () => {
   test("recognizes opencodex start command lines", () => {
     expect(isOcxStartCommandLine('bun run src/cli.ts start')).toBe(true);
     expect(isOcxStartCommandLine('"C:/tools/bun/bin/bun.exe" "run" "src/cli/index.ts" "start"')).toBe(true);
+    expect(isOcxStartCommandLine('bun C:/tools/bun/install/global/node_modules/@coseung2/opencodex/src/cli.ts start')).toBe(true);
+    // Keep recognizing the upstream package during an in-place scope migration.
     expect(isOcxStartCommandLine('bun C:/tools/bun/install/global/node_modules/@bitkyc08/opencodex/src/cli.ts start')).toBe(true);
     // npm's in-place rename during `npm install -g` (Windows service wrapper respawn mid-update).
+    expect(isOcxStartCommandLine(
+      'bun C:/nvm/node_modules/@coseung2/.opencodex-1JejBqbZ/src/cli/index.ts start --port 10100',
+    )).toBe(true);
     expect(isOcxStartCommandLine(
       'bun C:/nvm/node_modules/@bitkyc08/.opencodex-1JejBqbZ/src/cli/index.ts start --port 10100',
     )).toBe(true);

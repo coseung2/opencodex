@@ -97,8 +97,8 @@ const helpEntries: Record<string, HelpEntry> = {
   logout: { usage: "ocx logout <provider>", summary: "Remove a stored provider login." },
   gui: { usage: "ocx gui", summary: "Open the opencodex dashboard." },
   update: {
-    usage: "ocx update [--tag latest|preview]",
-    summary: "Update opencodex. Preview installs stay on the preview tag unless overridden.",
+    usage: "ocx update [--tag latest|preview|next]",
+    summary: "Update opencodex. Preview and coseung2 prerelease installs stay on their current channel unless overridden.",
   },
   provider: {
     usage: "ocx provider <list|add|edit|test|remove|show|set-default|selected|quota|presets|account-mode>",
@@ -285,7 +285,7 @@ Usage:
   ocx login <provider>        OAuth or API-key provider login
   ocx logout <provider>       Remove a stored OAuth login
   ocx gui                     Open the opencodex dashboard
-  ocx update [--tag <tag>]    Update opencodex (keeps preview installs on @preview)
+  ocx update [--tag <tag>]    Update opencodex (keeps preview/@preview and cs/@next channels)
   ocx restart                  Stop and restart the proxy
   ocx v2 <sub>                multi_agent_v2 surface (status|on|off|mode|threads)
   ocx health [--json]          Check proxy health (exit 0=healthy, 1=not)

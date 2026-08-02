@@ -3,9 +3,10 @@ title: 安装
 description: 安装 opencodex(ocx)代理及其前置条件,并验证它能够运行。
 ---
 
-安装 opencodex 后会得到 `ocx` 和 `opencodex` 两个等价命令，它们都指向同一个基于 Bun 的
-小型本地 HTTP 服务器。模型请求会发往路由所选的 provider；当已路由模型需要时，可选的
-vision 和网络搜索 sidecar 也可以使用你的 ChatGPT 登录凭据。
+安装 `@coseung2/opencodex` 后会得到 `ocx` 和 `opencodex` 两个等价的代理命令，以及仅支持
+Windows x64 的辅助命令 `ocx-notch`。两个代理命令都指向同一个基于 Bun 的小型本地 HTTP
+服务器。模型请求会发往路由所选的 provider；当已路由模型需要时，可选的 vision 和网络搜索
+sidecar 也可以使用你的 ChatGPT 登录凭据。
 
 ## 前置条件
 
@@ -18,7 +19,7 @@ vision 和网络搜索 sidecar 也可以使用你的 ChatGPT 登录凭据。
 ## 安装
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ```
 
 :::note[npm 拦截了 bun postinstall？]
@@ -28,10 +29,10 @@ blocked because they are not covered by allowScripts`），导致捆绑的 Bun
 缺少包名，会把当前目录重新安装进去，请始终显式写上包名：
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @coseung2/opencodex@next
 
 # 如果最初是用 sudo 安装的，请继续使用 sudo：
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @coseung2/opencodex@next
 ```
 :::
 
@@ -42,15 +43,18 @@ ocx --version
 opencodex --version
 ```
 
+在 Windows x64 上，`ocx-notch` 会启动同一 npm 包中包含的原生 Notch 辅助程序。
+在 Linux、macOS 或非 x64 Windows 上，只有该命令会明确提示平台不受支持；
+`ocx` 和 `opencodex` 仍然可用。
+
 ### 发布渠道
 
-稳定的 `latest` 渠道已经包含 ChatGPT、OpenAI API key、OpenRouter 以及实验性 Cursor 路由所需的
-GPT-5.6 Sol/Terra/Luna 目录信息，但这些条目本身不会授予上游模型权限。只有在测试尚未正式发布的
-opencodex 构建时，才需要使用 preview 渠道：
+coseung2 分支从 `next` 渠道发布 `2.8.0-cs.*` 版本。在明确提升为稳定版本之前，请保持使用
+该渠道。上游的 `preview` 渠道不是此包的发布渠道：
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
-ocx update --tag preview
+npm install -g @coseung2/opencodex@next
+ocx update --tag next
 ```
 
 ## 从源码运行
@@ -58,7 +62,7 @@ ocx update --tag preview
 若要对 opencodex 本身进行开发:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # 以开发模式启动代理 API (src/cli/index.ts start)

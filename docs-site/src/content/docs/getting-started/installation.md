@@ -3,9 +3,10 @@ title: Installation
 description: Install the opencodex (ocx) proxy, its prerequisites, and verify it runs.
 ---
 
-opencodex installs two equivalent command names, `ocx` and `opencodex`. Both launch the same small
-local HTTP server (built on Bun). Model requests go to the provider selected by routing; optional
-vision and web-search sidecars can also use your ChatGPT login when a routed model needs them.
+`@coseung2/opencodex` installs two equivalent proxy command names, `ocx` and `opencodex`, plus the
+Windows x64 companion command `ocx-notch`. The proxy commands launch the same small local HTTP
+server (built on Bun). Model requests go to the provider selected by routing; optional vision and
+web-search sidecars can also use your ChatGPT login when a routed model needs them.
 
 ## Prerequisites
 
@@ -18,7 +19,7 @@ vision and web-search sidecars can also use your ChatGPT login when a routed mod
 ## Install
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @coseung2/opencodex@next
 ```
 
 :::note[npm blocked the bun postinstall?]
@@ -29,30 +30,33 @@ script — and always include the package name (npm's abbreviated suggestion
 omits it, which would reinstall the current directory instead):
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @coseung2/opencodex@next
 
 # if the original install used sudo, keep using sudo:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @coseung2/opencodex@next
 ```
 :::
 
-Verify both command aliases are on your `PATH`:
+Verify the proxy command aliases are on your `PATH`:
 
 ```bash
 ocx --version
 opencodex --version
 ```
 
+On Windows x64, `ocx-notch` launches the native Notch companion bundled in the same npm package.
+On Linux, macOS, and non-x64 Windows systems, that command exits with an explicit unsupported-platform
+message; `ocx` and `opencodex` remain fully supported.
+
 ### Release channels
 
-The stable `latest` channel already includes GPT-5.6 Sol/Terra/Luna catalog support for ChatGPT,
-OpenAI API-key, OpenRouter, and experimental Cursor routes. Upstream access is still account-gated;
-the catalog entries do not grant access by themselves. Use the preview channel only to test
-unreleased opencodex builds:
+The coseung2 fork starts on the `next` channel with `2.8.0-cs.*` versions. Keep fork installations
+on that channel until a stable fork release is explicitly promoted. The upstream `preview` channel
+is not the release channel for this package:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
-ocx update --tag preview
+npm install -g @coseung2/opencodex@next
+ocx update --tag next
 ```
 
 ## Run from source
@@ -60,7 +64,7 @@ ocx update --tag preview
 To hack on opencodex itself:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/coseung2/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # starts the proxy API in dev mode (src/cli/index.ts start)
