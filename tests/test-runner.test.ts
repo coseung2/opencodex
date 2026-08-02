@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { createIsolatedTestEnvironment } from "../scripts/test";
+import {
+  createIsolatedTestEnvironment,
+  deterministicTestBatches,
+  discoverTestFiles,
+  shouldBatchFullSuite,
+  WINDOWS_BUN_1_3_14_BATCH_SIZE,
+  WINDOWS_BUN_1_3_14_PARALLELISM,
+} from "../scripts/test";
 
 describe("test runner isolation", () => {
   test("redirects user homes to a disposable root", () => {
@@ -20,5 +27,39 @@ describe("test runner isolation", () => {
       isolated.cleanup();
     }
     expect(existsSync(isolated.root)).toBe(false);
+  });
+});
+
+describe("Windows Bun 1.3.14 full-suite batching", () => {
+  test("activates only for the exact pinned Windows full suite", () => {
+    expect(shouldBatchFullSuite("win32", "1.3.14", [])).toBe(true);
+    expect(shouldBatchFullSuite("win32", "1.3.14+canary.1", [])).toBe(true);
+    expect(shouldBatchFullSuite("win32", "1.4.0", [])).toBe(false);
+    expect(shouldBatchFullSuite("linux", "1.3.14", [])).toBe(false);
+    expect(shouldBatchFullSuite("win32", "1.3.14", ["tests/test-runner.test.ts"])).toBe(false);
+  });
+
+  test("sorts every file exactly once into bounded deterministic batches", () => {
+    const batches = deterministicTestBatches(["tests/c.test.ts", "tests/a.test.ts", "tests/b.test.ts"], 2);
+    expect(batches).toEqual([
+      ["tests/a.test.ts", "tests/b.test.ts"],
+      ["tests/c.test.ts"],
+    ]);
+    expect(() => deterministicTestBatches(["tests/a.test.ts", "tests/a.test.ts"], 2))
+      .toThrow("duplicate files");
+    expect(() => deterministicTestBatches(["tests/a.test.ts"], 0))
+      .toThrow("positive integer");
+  });
+
+  test("discovers the repository suite without omissions or duplicates", () => {
+    const files = discoverTestFiles(process.cwd());
+    expect(files).toContain("tests/test-runner.test.ts");
+    expect(files).toContain("tests/e2e-style/phase100-native-parity.test.ts");
+    expect(files).toEqual([...files].sort((a, b) => a.localeCompare(b, "en")));
+    expect(new Set(files).size).toBe(files.length);
+    const batches = deterministicTestBatches(files);
+    expect(batches.flat()).toEqual(files);
+    expect(batches.every(batch => batch.length <= WINDOWS_BUN_1_3_14_BATCH_SIZE)).toBe(true);
+    expect(WINDOWS_BUN_1_3_14_PARALLELISM).toBe(2);
   });
 });

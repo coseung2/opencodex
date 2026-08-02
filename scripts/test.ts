@@ -1,6 +1,52 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+
+export const WINDOWS_BUN_1_3_14_BATCH_SIZE = 48;
+export const WINDOWS_BUN_1_3_14_PARALLELISM = 2;
+
+export function shouldBatchFullSuite(
+  platform: NodeJS.Platform,
+  bunVersion: string,
+  requestedTests: readonly string[],
+): boolean {
+  return platform === "win32"
+    && /^1\.3\.14(?:$|[-+])/.test(bunVersion)
+    && requestedTests.length === 0;
+}
+
+export function deterministicTestBatches(
+  files: readonly string[],
+  batchSize = WINDOWS_BUN_1_3_14_BATCH_SIZE,
+): string[][] {
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    throw new Error(`test batch size must be a positive integer (got ${batchSize})`);
+  }
+  const sorted = [...files].sort((a, b) => a.localeCompare(b, "en"));
+  if (new Set(sorted).size !== sorted.length) {
+    throw new Error("test discovery produced duplicate files");
+  }
+  const batches: string[][] = [];
+  for (let offset = 0; offset < sorted.length; offset += batchSize) {
+    batches.push(sorted.slice(offset, offset + batchSize));
+  }
+  return batches;
+}
+
+export function discoverTestFiles(root: string): string[] {
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && entry.name.endsWith(".test.ts")) {
+        files.push(relative(root, path).replaceAll("\\", "/"));
+      }
+    }
+  };
+  walk(join(root, "tests"));
+  return deterministicTestBatches(files, Math.max(1, files.length)).flat();
+}
 
 export interface IsolatedTestEnvironment {
   root: string;
@@ -118,15 +164,55 @@ if (import.meta.main) {
     const requestedTests = process.argv.slice(2);
     await waitForExclusiveRun(process.pid);
     const startedAt = Date.now();
-    const child = Bun.spawnSync(
-      [process.execPath, "test", "--isolate", ...(requestedTests.length > 0 ? requestedTests : ["./tests/"])],
-      {
-        env: isolated.env,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      },
-    );
+    let exitCode = 1;
+    if (shouldBatchFullSuite(process.platform, Bun.version, requestedTests)) {
+      const files = discoverTestFiles(process.cwd());
+      const batches = deterministicTestBatches(files);
+      if (batches.length === 0) throw new Error("no test files discovered under tests/");
+      console.warn(
+        `[test] Windows Bun ${Bun.version}: running ${files.length} files in ${batches.length} `
+        + `fresh batches (max ${WINDOWS_BUN_1_3_14_BATCH_SIZE} files, `
+        + `parallel=${WINDOWS_BUN_1_3_14_PARALLELISM}) to bound native runner memory.`,
+      );
+      exitCode = 0;
+      for (const [index, batch] of batches.entries()) {
+        console.warn(
+          `[test] batch ${index + 1}/${batches.length}: ${batch.length} files `
+          + `(${batch[0]} .. ${batch.at(-1)})`,
+        );
+        const child = Bun.spawnSync(
+          [
+            process.execPath,
+            "test",
+            "--isolate",
+            `--parallel=${WINDOWS_BUN_1_3_14_PARALLELISM}`,
+            ...batch,
+          ],
+          {
+            env: isolated.env,
+            stdin: "inherit",
+            stdout: "inherit",
+            stderr: "inherit",
+          },
+        );
+        if ((child.exitCode ?? 1) !== 0) {
+          exitCode = child.exitCode ?? 1;
+          console.error(`[test] batch ${index + 1}/${batches.length} failed; stopping.`);
+          break;
+        }
+      }
+    } else {
+      const child = Bun.spawnSync(
+        [process.execPath, "test", "--isolate", ...(requestedTests.length > 0 ? requestedTests : ["./tests/"])],
+        {
+          env: isolated.env,
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        },
+      );
+      exitCode = child.exitCode ?? 1;
+    }
     const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
     if (requestedTests.length === 0 && elapsedSeconds > 600) {
       console.warn(
@@ -134,7 +220,7 @@ if (import.meta.main) {
         + "Check for another test runner, a busy CPU, or a test that started polling something real.",
       );
     }
-    process.exitCode = child.exitCode ?? 1;
+    process.exitCode = exitCode;
   } finally {
     isolated.cleanup();
   }
