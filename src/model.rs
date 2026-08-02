@@ -108,6 +108,24 @@ pub struct RequestLogEntry {
     pub response_service_tier: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RequestLogsResponse {
+    Wrapped {
+        #[serde(default)]
+        logs: Vec<RequestLogEntry>,
+    },
+    Legacy(Vec<RequestLogEntry>),
+}
+
+impl RequestLogsResponse {
+    pub fn into_logs(self) -> Vec<RequestLogEntry> {
+        match self {
+            Self::Wrapped { logs } | Self::Legacy(logs) => logs,
+        }
+    }
+}
+
 impl RequestLogEntry {
     pub fn display_model(&self) -> &str {
         self.resolved_model.as_deref().unwrap_or(&self.model)
@@ -403,6 +421,19 @@ mod tests {
         assert_eq!(fast.requested_effort.as_deref(), Some("xhigh"));
         assert_eq!(fast.fast_state(), Some(true));
         assert_eq!(RequestLogEntry::default().fast_state(), None);
+    }
+
+    #[test]
+    fn request_logs_accept_current_wrapper_and_legacy_array() {
+        let wrapped: RequestLogsResponse = serde_json::from_str(
+            r#"{"timeZone":"Asia/Seoul","total":1,"logs":[{"timestamp":2,"model":"new"}]}"#,
+        )
+        .expect("wrapped logs parse");
+        let legacy: RequestLogsResponse =
+            serde_json::from_str(r#"[{"timestamp":1,"model":"old"}]"#).expect("legacy logs parse");
+
+        assert_eq!(wrapped.into_logs()[0].model, "new");
+        assert_eq!(legacy.into_logs()[0].model, "old");
     }
 
     #[test]

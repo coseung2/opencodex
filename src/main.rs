@@ -116,7 +116,7 @@ enum Update {
     Health(Result<Health, String>),
     MemoryDetails(Result<MemoryDetails, String>),
     Usage(Result<UsageResponse, String>),
-    Logs(Result<Vec<RequestLogEntry>, String>),
+    Logs(Result<RequestLogsResponse, String>),
     Providers(Result<Vec<ProviderConfig>, String>),
     Quotas(Result<QuotaResponse, String>),
     AutoSwitch(Result<AutoSwitchState, String>),
@@ -220,7 +220,7 @@ impl App {
                 },
                 Update::Logs(result) => match result {
                     Ok(value) => {
-                        self.state.logs = latest_request_logs(value);
+                        self.state.logs = latest_request_logs(value.into_logs());
                         self.state.logs_error = None;
                     }
                     Err(error) => self.state.logs_error = Some(error),
