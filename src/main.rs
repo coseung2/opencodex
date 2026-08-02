@@ -45,6 +45,8 @@ const CONTENT_TOP: i32 = 101;
 const USAGE_TOGGLE_HEIGHT: i32 = 42;
 const LOG_ROW_HEIGHT: i32 = 44;
 const EMPTY_LOG_HEIGHT: i32 = 84;
+const POWER_PROBE_INTERVAL: Duration = Duration::from_millis(75);
+const POWER_HEALTH_TIMEOUT_MS: i32 = 175;
 const HEADER_TEXT_RIGHT: i32 = 132;
 const HEADER_CHART_LEFT: i32 = 140;
 const HEADER_LABEL_WIDTH: i32 = 82;
@@ -653,12 +655,15 @@ fn send_update(hwnd: isize, tx: &Sender<Update>, update: Update) {
 fn launch_power_action(hwnd: HWND, action: &'static str) {
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
-        let result = api::run_ocx_command(action);
+        let result = if action == "stop" {
+            api::stop_ocx()
+        } else {
+            api::run_ocx_command(action)
+        };
         if result.is_ok() {
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
-                thread::sleep(Duration::from_millis(250));
-                let health = api::get_json::<Health>("/healthz", 750);
+                let health = api::get_json::<Health>("/healthz", POWER_HEALTH_TIMEOUT_MS);
                 let reached_target = if action == "start" {
                     health.is_ok()
                 } else {
@@ -690,6 +695,7 @@ fn launch_power_action(hwnd: HWND, action: &'static str) {
                 if Instant::now() >= deadline {
                     break;
                 }
+                thread::sleep(POWER_PROBE_INTERVAL);
             }
         }
         with_app(|app| {

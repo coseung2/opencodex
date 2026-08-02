@@ -39,6 +39,7 @@ All HTTP calls use WinHTTP against `127.0.0.1:10100`. There is no WebView, datab
 ## Interaction
 
 - Click the power control to run `ocx stop` while OCX is online or `ocx start` while it is offline. The control stays busy until the command finishes; health polling determines the resulting online/offline state.
+- Online shutdown uses OCX's authenticated `POST /api/stop` graceful-stop endpoint directly, with CLI fallback for older OCX versions. Power transitions probe health immediately and then every ~75ms with a short timeout so the control reflects the real listener state quickly.
 - The header keeps Private and WS on separate rows, with fixed 0-to-Max segmented gauges beside them. The unboxed power and minus controls retain generous invisible hit areas and show hover/pressed feedback.
 - Click the notch to expand provider details.
 - Use the inline Providers and Logs tabs below the memory header to switch content. Logs show only the latest 10 requests with status, duration, relative time, reasoning effort, Fast state, and token usage.

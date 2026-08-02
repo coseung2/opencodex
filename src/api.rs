@@ -71,6 +71,16 @@ pub fn run_ocx_command(action: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn stop_ocx() -> Result<(), String> {
+    match request("POST", "/api/stop", None, 2_000) {
+        Ok(_) => Ok(()),
+        Err(error) if error.contains("HTTP 404") || error.contains("HTTP 405") => {
+            run_ocx_command("stop")
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn request(
     method: &str,
     path: &str,
