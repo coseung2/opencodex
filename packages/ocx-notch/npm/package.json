@@ -1,0 +1,29 @@
+{
+  "name": "@coseung2/ocx-notch",
+  "version": "0.1.1",
+  "description": "Windows x64 native status widget for OpenCodex.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coseung2/ocx-widget.git"
+  },
+  "bin": {
+    "ocx-notch": "bin/ocx-notch.js"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/ocx-notch.js",
+    "THIRD_PARTY_NOTICES.md",
+    "vendor/win32-x64/ocx-notch.exe"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

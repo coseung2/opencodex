@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js for npm trusted publishing
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          check-latest: true
+          package-manager-cache: false
+
+      - name: Verify tag and package versions
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(.+)$') {
+            throw "Release tag '$tag' must start with v."
+          }
+
+          $tagVersion = $Matches[1]
+          $package = Get-Content -Raw -LiteralPath 'npm/package.json' | ConvertFrom-Json
+          if ($package.name -ne '@coseung2/ocx-notch') {
+            throw "Unexpected npm package name '$($package.name)'."
+          }
+          if ($package.version -ne $tagVersion) {
+            throw "Release tag '$tag' does not match npm package version '$($package.version)'."
+          }
+
+          $cargo = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $cargoVersion = $cargo.packages[0].version
+          if ($cargoVersion -ne $package.version) {
+            throw "Cargo version '$cargoVersion' does not match npm package version '$($package.version)'."
+          }
+
+          $nodeVersion = [version]((node --version).TrimStart('v'))
+          $npmVersion = [version](npm --version)
+          if ($nodeVersion -lt [version]'22.14.0') {
+            throw "Node.js $nodeVersion is too old for npm trusted publishing; Node.js 22.14.0 or newer is required."
+          }
+          if ($npmVersion -lt [version]'11.5.1') {
+            throw "npm $npmVersion is too old for npm trusted publishing; npm 11.5.1 or newer is required."
+          }
+
+          Write-Host "Releasing $($package.name) $($package.version) with Node.js $nodeVersion and npm $npmVersion."
+
+      - name: Build Windows x64 release binary
+        run: cargo build --release --locked
+
+      - name: Stage native binary in npm package
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'target\release\ocx-notch.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "Release binary was not produced at '$binary'."
+          }
+
+          $vendor = Join-Path $env:GITHUB_WORKSPACE 'npm\vendor\win32-x64'
+          New-Item -ItemType Directory -Path $vendor -Force | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $vendor 'ocx-notch.exe') -Force
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $env:GITHUB_WORKSPACE 'npm\THIRD_PARTY_NOTICES.md') -Force
+
+      - name: Create npm tarball
+        shell: pwsh
+        run: |
+          $packageOutput = Join-Path $env:RUNNER_TEMP 'ocx-notch-npm'
+          New-Item -ItemType Directory -Path $packageOutput -Force | Out-Null
+          npm pack .\npm --pack-destination $packageOutput
+
+          $tarballs = @(Get-ChildItem -LiteralPath $packageOutput -Filter '*.tgz' -File)
+          if ($tarballs.Count -ne 1) {
+            throw "Expected exactly one npm tarball in '$packageOutput', found $($tarballs.Count)."
+          }
+          "NPM_TARBALL=$($tarballs[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create GitHub Release and upload assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'npm\vendor\win32-x64\ocx-notch.exe'
+          $notices = Join-Path $env:GITHUB_WORKSPACE 'THIRD_PARTY_NOTICES.md'
+          gh release create $env:GITHUB_REF_NAME --verify-tag --title "OCX Notch $env:GITHUB_REF_NAME" --generate-notes $env:NPM_TARBALL $binary $notices
+
+      - name: Publish package to npm with OIDC
+        shell: pwsh
+        run: npm publish $env:NPM_TARBALL --access public
