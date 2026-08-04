@@ -31,10 +31,12 @@ For OCX 2.8+, the notch automatically reads the existing `%USERPROFILE%\.opencod
 - The same native sample collects `GetPerformanceInfo` physical total/available and commit total/limit values. The header labels the smaller available headroom as `안정`, `주의`, or `위험`; caution and danger use 10%/2 GiB and 5%/1 GiB minimum-headroom thresholds respectively. No memory history is persisted.
 - `/api/usage?range=7d` refreshes around every 30 seconds; only the newest calendar day's model rows are aggregated into the displayed per-provider usage.
 - `/api/logs?tail=10` refreshes every ~2 seconds only while the Logs tab is visible. The response replaces the in-memory list, newest first, and OCX Notch never persists logs itself.
-- OpenAI account state and per-account quotas refresh around every 5 seconds. Other provider configuration, account pools, and cached `/api/provider-quotas` refresh around every 5 minutes.
+- OpenAI account state and per-account quotas refresh around every 5 seconds. Other provider configuration, account pools, and cached `/api/provider-quotas` refresh around every 5 minutes. For xAI OAuth, OCX reports the authoritative weekly Grok credit-pool usage and reset; the separate monthly spending cap is not presented as quota.
 - `/api/system/memory` is requested only while expanded, at most every ~45 seconds, for optional heap detail.
 
-All HTTP calls use WinHTTP against `127.0.0.1:10100`. There is no WebView, database, log file, runtime download, or automatic startup behavior. The last window position and width are stored in `%LOCALAPPDATA%\OCX Notch\window.json`.
+All HTTP calls use WinHTTP against `127.0.0.1:10100`. There is no WebView, database, persistent usage history, runtime download, or automatic startup behavior. The last window position and width are stored in `%LOCALAPPDATA%\OCX Notch\window.json`.
+
+Startup failures and Rust panics are written to the bounded diagnostic log `%LOCALAPPDATA%\OCX Notch\ocx-notch.log`. Running `ocx-notch` while the widget is already open restores its opacity, repaints it, and moves it to the top of the monitor containing the cursor. Display-topology changes also clamp the window back into a visible work area.
 
 ## Interaction
 

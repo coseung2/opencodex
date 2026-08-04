@@ -33,6 +33,14 @@ ocx start        # 프록시 + 대시보드: localhost:10100
 Windows x64용 `ocx-notch` launcher와 네이티브 EXE를 포함합니다. 기존 독립 패키지
 `@coseung2/ocx-notch@0.1.1`도 호환성을 위해 그대로 유지됩니다.
 
+### 포크 유지 정책
+
+이 포크는 `@coseung2/opencodex` npm 배포본과 통합 OCX Notch의 소스 오브 트루스입니다.
+upstream 변경은 필요한 경우 검토 후 선별적으로 가져오며, upstream 브랜치로 포크 전체를
+덮어쓰지 않습니다. 업데이트 시 포크 고유 동작, 패키지 정체성, 릴리스 자동화, 설정 호환성,
+Notch 소스와 바이너리를 보존해야 합니다. 범위가 좁은 cherry-pick 또는 수동 이식을 우선하고,
+겹치는 upstream 변경은 기존 포크 계약에 맞춰 해결하며 로컬 개발 내용을 대체하지 않습니다.
+
 <p align="center">
   <img src="../assets/architecture.png" alt="opencodex 아키텍처 — Codex CLI가 opencodex 프록시를 통해 모든 LLM 프로바이더로 라우팅" width="820">
 </p>

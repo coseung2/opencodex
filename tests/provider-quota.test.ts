@@ -93,11 +93,25 @@ describe("fetchProviderQuotaReports", () => {
     await saveCredential("google-antigravity", { access: "agy-access-secret", refresh: "agy-refresh-secret", expires: Date.now() + 3600_000, projectId: "agy-project-secret" });
     await saveCredential("kimi", { access: "kimi-access-secret", refresh: "kimi-refresh-secret", expires: Date.now() + 3600_000 });
 
-    const seen: { url: string; authorization?: string; body?: string }[] = [];
+    const seen: {
+      url: string;
+      accept?: string;
+      authorization?: string;
+      xaiTokenAuth?: string;
+      xaiClientMode?: string;
+      body?: string;
+    }[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const headers = init?.headers as Record<string, string> | undefined;
-      seen.push({ url, authorization: headers?.Authorization, body: typeof init?.body === "string" ? init.body : undefined });
+      seen.push({
+        url,
+        accept: headers?.Accept,
+        authorization: headers?.Authorization,
+        xaiTokenAuth: headers?.["X-XAI-Token-Auth"],
+        xaiClientMode: headers?.["x-grok-client-mode"],
+        body: typeof init?.body === "string" ? init.body : undefined,
+      });
       if (url === "https://chatgpt.com/backend-api/wham/usage") {
         return new Response(JSON.stringify({
           email: "person@example.com",
@@ -108,12 +122,18 @@ describe("fetchProviderQuotaReports", () => {
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url === "https://cli-chat-proxy.grok.com/v1/billing") {
+      if (url === "https://cli-chat-proxy.grok.com/v1/billing?format=credits") {
         return new Response(JSON.stringify({
           config: {
-            monthlyLimit: { val: 10_000 },
-            used: { val: 2_500 },
-            billingPeriodEnd: "2026-07-31T00:00:00Z",
+            currentPeriod: {
+              type: "USAGE_PERIOD_TYPE_WEEKLY",
+              start: "2026-07-05T00:00:00Z",
+              end: "2026-07-12T00:00:00Z",
+            },
+            creditUsagePercent: 100,
+            productUsage: [{ product: "GrokBuild", usagePercent: 100 }],
+            onDemandCap: 0,
+            prepaidBalance: 0,
             raw_secret_should_not_escape: "xai-access-secret",
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
@@ -182,7 +202,10 @@ describe("fetchProviderQuotaReports", () => {
 
     expect(Object.keys(byProvider).sort()).toEqual(["anthropic", "cursor", "google-antigravity", "kimi", "openai", "xai"]);
     expect(byProvider.openai?.quota.weeklyPercent).toBe(34);
-    expect(byProvider.xai?.quota.monthlyPercent).toBe(25);
+    expect(byProvider.xai?.source).toBe("xai:grok-credits");
+    expect(byProvider.xai?.quota.weeklyPercent).toBe(100);
+    expect(byProvider.xai?.quota.weeklyResetAt).toBe(Date.parse("2026-07-12T00:00:00Z"));
+    expect(byProvider.xai?.quota.monthlyPercent).toBeUndefined();
     expect(byProvider.anthropic?.quota.weeklyPercent).toBe(72);
     // Claude's 5-hour window is reported in the canonical fields (like the Codex login rows),
     // so only the model-specific windows remain as custom entries.
@@ -224,10 +247,60 @@ describe("fetchProviderQuotaReports", () => {
     expect(serialized).not.toContain("kimi-business-secret");
     expect(serialized).not.toContain("TYPE_PURCHASE");
     expect(seen.find(row => row.url.includes("grok.com"))?.authorization).toBe("Bearer xai-access-secret");
+    expect(seen.find(row => row.url.includes("grok.com"))?.accept).toBe("application/json");
+    expect(seen.find(row => row.url.includes("grok.com"))?.xaiTokenAuth).toBe("xai-grok-cli");
+    expect(seen.find(row => row.url.includes("grok.com"))?.xaiClientMode).toBe("cli");
     expect(seen.find(row => row.url.includes("anthropic.com"))?.authorization).toBe("Bearer claude-access-secret");
     expect(seen.find(row => row.url.includes("cloudcode-pa.googleapis.com"))?.authorization).toBe("Bearer agy-access-secret");
     expect(seen.find(row => row.url.includes("cloudcode-pa.googleapis.com"))?.body).toBe(JSON.stringify({ project: "agy-project-secret" }));
     expect(seen.find(row => row.url === "https://api.kimi.com/coding/v1/usages")?.authorization).toBe("Bearer kimi-access-secret");
+  });
+
+  function xaiOnlyConfig(): OcxConfig {
+    return {
+      defaultProvider: "xai",
+      providers: { xai: { adapter: "openai-chat", authMode: "oauth", baseUrl: "https://api.x.ai/v1" } },
+    } as OcxConfig;
+  }
+
+  test("xAI spend-cap billing payloads fail closed without a quota row", async () => {
+    await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
+    let requestedUrl = "";
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({
+        config: {
+          monthlyLimit: { val: 15_000 },
+          used: { val: 4_649 },
+          onDemandCap: 0,
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(xaiOnlyConfig(), true);
+
+    expect(requestedUrl).toBe("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    expect(result.reports).toEqual([]);
+  });
+
+  test("xAI weekly credits expose credit usage and the current period end", async () => {
+    await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      config: {
+        currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-08-09T00:00:00Z" },
+        creditUsagePercent: 37.5,
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(xaiOnlyConfig(), true);
+
+    expect(result.reports).toHaveLength(1);
+    expect(result.reports[0]?.source).toBe("xai:grok-credits");
+    expect(result.reports[0]?.quota).toEqual({
+      weeklyPercent: 37.5,
+      weeklyResetAt: Date.parse("2026-08-09T00:00:00Z"),
+      updatedAt: expect.any(Number),
+    });
   });
 
   function kimiOnlyConfig(baseUrl = "https://api.kimi.com/coding/v1"): OcxConfig {

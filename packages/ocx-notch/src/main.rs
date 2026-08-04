@@ -6,8 +6,10 @@ mod model;
 use crate::model::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::mem::size_of;
+use std::panic;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -56,6 +58,7 @@ const ACCOUNT_ACTION_WIDTH: i32 = 26;
 const ACCOUNT_ACTION_HEIGHT: i32 = 30;
 const ACCOUNT_ACTION_GAP: i32 = 4;
 const GIB: u64 = 1024 * 1024 * 1024;
+const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 512 * 1024;
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
 static LUCIDE_FONT_BYTES: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
@@ -416,20 +419,19 @@ fn account_height(account: &AccountView) -> i32 {
     }
 }
 
-fn main() -> windows::core::Result<()> {
+fn main() {
+    install_panic_logger();
+    if let Err(error) = run() {
+        append_diagnostic_log("startup-error", &format!("{error:?}"));
+        std::process::exit(1);
+    }
+}
+
+fn run() -> windows::core::Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         if let Ok(existing) = FindWindowW(CLASS_NAME, PCWSTR::null()) {
-            let _ = ShowWindow(existing, SW_SHOWNOACTIVATE);
-            let _ = SetWindowPos(
-                existing,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            revive_existing_window(existing);
             return Ok(());
         }
         let mut lucide_font_count = 0u32;
@@ -1303,7 +1305,7 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_DISPLAYCHANGE => {
-            resize_for_state(hwnd);
+            recover_window_after_display_change(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -1330,19 +1332,40 @@ unsafe fn paint(hwnd: HWND) {
     let width = client.right;
     let height = client.bottom;
     let memory_dc = CreateCompatibleDC(dc);
+    if memory_dc.is_invalid() {
+        draw_frame(dc, width, height);
+        let _ = EndPaint(hwnd, &paint);
+        return;
+    }
     let bitmap = CreateCompatibleBitmap(dc, width, height);
+    if bitmap.is_invalid() {
+        let _ = DeleteDC(memory_dc);
+        draw_frame(dc, width, height);
+        let _ = EndPaint(hwnd, &paint);
+        return;
+    }
     let old_bitmap = SelectObject(memory_dc, bitmap);
-    let background = CreateSolidBrush(COLORREF(0x00211b18));
-    let _ = FillRect(memory_dc, &client, background);
-    let _ = DeleteObject(background);
-    let _ = SetBkMode(memory_dc, TRANSPARENT);
-
-    with_app(|app| draw_app(memory_dc, width, height, app));
+    draw_frame(memory_dc, width, height);
     let _ = BitBlt(dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
     let _ = SelectObject(memory_dc, old_bitmap);
     let _ = DeleteObject(bitmap);
     let _ = DeleteDC(memory_dc);
     let _ = EndPaint(hwnd, &paint);
+}
+
+unsafe fn draw_frame(dc: HDC, width: i32, height: i32) {
+    let client = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    let background = CreateSolidBrush(COLORREF(0x00211b18));
+    let _ = FillRect(dc, &client, background);
+    let _ = DeleteObject(background);
+    let _ = SetBkMode(dc, TRANSPARENT);
+
+    with_app(|app| draw_app(dc, width, height, app));
 }
 
 unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
@@ -2328,6 +2351,46 @@ fn window_placement_path() -> Option<PathBuf> {
         .map(|root| PathBuf::from(root).join("OCX Notch").join("window.json"))
 }
 
+fn diagnostic_log_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|root| PathBuf::from(root).join("OCX Notch").join("ocx-notch.log"))
+}
+
+fn append_diagnostic_log(kind: &str, detail: &str) {
+    let Some(path) = diagnostic_log_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    if fs::metadata(&path)
+        .ok()
+        .is_some_and(|metadata| metadata.len() >= DIAGNOSTIC_LOG_MAX_BYTES)
+    {
+        let _ = fs::write(&path, []);
+    }
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let detail = detail.replace(['\r', '\n'], " ");
+    let _ = writeln!(file, "{timestamp} {kind}: {detail}");
+}
+
+fn install_panic_logger() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        append_diagnostic_log("panic", &info.to_string());
+        previous(info);
+    }));
+}
+
 fn load_window_placement() -> Option<WindowPlacement> {
     let bytes = fs::read(window_placement_path()?).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -2376,17 +2439,26 @@ unsafe fn restore_window_placement(hwnd: HWND, placement: WindowPlacement, heigh
         ..Default::default()
     };
     let _ = GetMonitorInfoW(monitor, &mut info);
-    let work_width = (info.rcWork.right - info.rcWork.left).max(MIN_WIDTH);
-    let width = saved_width.min(work_width);
-    let x = placement
-        .x
-        .clamp(info.rcWork.left, info.rcWork.right - width);
-    let y = placement.y.clamp(
-        info.rcWork.top,
-        (info.rcWork.bottom - height).max(info.rcWork.top),
-    );
+    let (x, y, width, _) =
+        clamp_window_to_work_area(placement.x, placement.y, saved_width, height, info.rcWork);
     let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
     width
+}
+
+fn clamp_window_to_work_area(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    work: RECT,
+) -> (i32, i32, i32, i32) {
+    let work_width = (work.right - work.left).max(1);
+    let work_height = (work.bottom - work.top).max(1);
+    let width = width.clamp(1, work_width);
+    let height = height.clamp(1, work_height);
+    let x = x.clamp(work.left, work.right - width);
+    let y = y.clamp(work.top, work.bottom - height);
+    (x, y, width, height)
 }
 
 fn power_control_rect(width: i32) -> RECT {
@@ -2451,6 +2523,65 @@ mod account_control_tests {
         assert_eq!(format_log_age_at(now - 180_000, now), "3분 전");
         assert_eq!(format_log_age_at(now - 7_200_000, now), "2시간 전");
     }
+
+    #[test]
+    fn weekly_provider_quota_renders_without_a_monthly_spend_row() {
+        let reset_at = 1_785_945_600_000.0;
+        let quota = Quota {
+            weekly_percent: Some(100.0),
+            weekly_reset_at: Some(reset_at),
+            ..Default::default()
+        };
+
+        let rows = quota_rows(Some(&quota));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Weekly limit");
+        assert_eq!(rows[0].percent, 100.0);
+        assert_eq!(rows[0].reset_at, Some(reset_at));
+    }
+
+    #[test]
+    fn clamps_an_offscreen_window_into_the_work_area() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        assert_eq!(
+            clamp_window_to_work_area(2200, -700, 525, 58, work),
+            (1395, 0, 525, 58)
+        );
+    }
+
+    #[test]
+    fn preserves_negative_coordinates_on_an_upper_monitor() {
+        let work = RECT {
+            left: 0,
+            top: -1080,
+            right: 1920,
+            bottom: 0,
+        };
+        assert_eq!(
+            clamp_window_to_work_area(1366, -649, 525, 58, work),
+            (1366, -649, 525, 58)
+        );
+    }
+
+    #[test]
+    fn shrinks_an_oversized_window_to_the_available_work_area() {
+        let work = RECT {
+            left: -1280,
+            top: 0,
+            right: 0,
+            bottom: 720,
+        };
+        assert_eq!(
+            clamp_window_to_work_area(-2000, 900, 1600, 900, work),
+            (-1280, 0, 1280, 720)
+        );
+    }
 }
 
 unsafe fn resize_for_state(hwnd: HWND) {
@@ -2480,6 +2611,72 @@ unsafe fn resize_for_state(hwnd: HWND) {
         position_window(hwnd, width, height);
     }
     apply_round_region(hwnd, width, height);
+}
+
+unsafe fn revive_existing_window(hwnd: HWND) {
+    let mut rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut rect);
+    let width = (rect.right - rect.left).clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = (rect.bottom - rect.top).max(COLLAPSED_HEIGHT);
+    let mut point = POINT::default();
+    let _ = GetCursorPos(&mut point);
+    let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = GetMonitorInfoW(monitor, &mut info);
+    let desired_x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
+    let desired_y = info.rcWork.top + 6;
+    let (x, y, width, height) =
+        clamp_window_to_work_area(desired_x, desired_y, width, height, info.rcWork);
+    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 238, LWA_ALPHA);
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        width,
+        height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    let _ = InvalidateRect(hwnd, None, true);
+    let _ = UpdateWindow(hwnd);
+    save_window_placement(hwnd);
+}
+
+unsafe fn recover_window_after_display_change(hwnd: HWND) {
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        return;
+    }
+    let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = GetMonitorInfoW(monitor, &mut info);
+    let (x, y, width, height) = clamp_window_to_work_area(
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        info.rcWork,
+    );
+    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 238, LWA_ALPHA);
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        width,
+        height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    apply_round_region(hwnd, width, height);
+    let _ = InvalidateRect(hwnd, None, true);
+    save_window_placement(hwnd);
 }
 
 unsafe fn position_window(hwnd: HWND, width: i32, height: i32) {

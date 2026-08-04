@@ -157,11 +157,6 @@ async function fetchChatGptForwardQuota(
   return quota ? report(provider, "chatgpt:wham", quota) : null;
 }
 
-function centsValue(value: unknown): number | undefined {
-  const rec = asRecord(value);
-  return rec ? toFiniteNumber(rec.val) : undefined;
-}
-
 async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | null> {
   let accessToken: string;
   try {
@@ -169,25 +164,31 @@ async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | nu
   } catch {
     return null;
   }
-  const response = await fetch("https://cli-chat-proxy.grok.com/v1/billing", {
-    headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
+  const response = await fetch("https://cli-chat-proxy.grok.com/v1/billing?format=credits", {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "X-XAI-Token-Auth": "xai-grok-cli",
+      "x-grok-client-mode": "cli",
+    },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
   const body = asRecord(await response.json().catch(() => null));
   const config = asRecord(body?.config);
-  if (!config) return null;
-  const limitCents = centsValue(config.monthlyLimit);
-  const usedCents = centsValue(config.used);
-  if (limitCents === undefined || usedCents === undefined || limitCents <= 0) return null;
-  const percent = normalizePercent((usedCents / limitCents) * 100);
-  if (percent === undefined) return null;
+  const currentPeriod = asRecord(config?.currentPeriod);
+  if (currentPeriod?.type !== "USAGE_PERIOD_TYPE_WEEKLY") return null;
+  const creditUsagePercent = config?.creditUsagePercent;
+  if (typeof creditUsagePercent !== "number" || !Number.isFinite(creditUsagePercent) || creditUsagePercent < 0 || creditUsagePercent > 100) return null;
+  if (typeof currentPeriod.end !== "string" || !currentPeriod.end.trim()) return null;
+  const resetAt = normalizeResetAt(currentPeriod.end);
+  if (resetAt === undefined) return null;
   const quota: ProviderQuota = {
-    monthlyPercent: percent,
-    monthlyResetAt: normalizeResetAt(config.billingPeriodEnd),
+    weeklyPercent: creditUsagePercent,
+    weeklyResetAt: resetAt,
     updatedAt: Date.now(),
   };
-  return report(provider, "xai:grok-billing", quota);
+  return report(provider, "xai:grok-credits", quota);
 }
 
 function parseClaudeBucket(value: unknown): { percent?: number; resetAt?: number } | null {

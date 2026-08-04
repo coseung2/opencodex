@@ -70,9 +70,31 @@ const child = spawn(nativeBinary, process.argv.slice(2), {
   windowsHide: true,
 });
 
+let settled = false;
+
 child.once("error", error => {
+  settled = true;
   console.error(`ocx-notch: failed to launch the native executable: ${error.message}`);
   process.exitCode = 1;
 });
 
-child.unref();
+child.once("exit", (code, signal) => {
+  if (settled) return;
+  settled = true;
+  if (!signal && code === 0) return;
+  const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+  console.error(
+    `ocx-notch: the native executable exited during startup (${reason}). `
+    + "See \"%LOCALAPPDATA%\\OCX Notch\\ocx-notch.log\" for details.",
+  );
+  process.exitCode = code && code !== 0 ? code : 1;
+});
+
+child.once("spawn", () => {
+  setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    child.removeAllListeners("exit");
+    child.unref();
+  }, 1500);
+});

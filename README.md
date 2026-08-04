@@ -47,6 +47,15 @@ license and attribution while shipping fork-specific integration work. The same 
 includes the Windows x64 `ocx-notch` launcher and native executable; the standalone
 `@coseung2/ocx-notch@0.1.1` package remains available for compatibility.
 
+### Fork maintenance policy
+
+This fork is the product source of truth for the `@coseung2/opencodex` npm distribution and its
+integrated OCX Notch. Upstream changes are reviewed and selectively integrated when they are useful;
+the fork is not replaced wholesale by an upstream branch. Updates must preserve fork-owned behavior,
+package identity, release automation, configuration compatibility, and the Notch source and binary.
+Prefer narrowly scoped cherry-picks or manual ports with focused tests, and resolve overlapping
+upstream changes against the fork's existing contracts instead of overwriting local development.
+
 opencodex is a lightweight local proxy that translates Codex's Responses API into whatever your
 provider speaks — streaming, tool calls, reasoning tokens, images, in both directions. Use Claude,
 Gemini, Grok, GLM, DeepSeek, Kimi, Qwen, Ollama, or any other LLM with Codex, Claude Code, Claude
