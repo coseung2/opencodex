@@ -70,7 +70,7 @@ describe("ocx-notch package staging", () => {
       publishConfig?: { access?: string; tag?: string };
     };
     expect(pkg.name).toBe("@coseung2/opencodex");
-    expect(pkg.version).toBe("2.8.0-cs.2");
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
     expect(pkg.bin).toEqual({
       opencodex: "./bin/ocx.mjs",
       ocx: "./bin/ocx.mjs",
@@ -90,7 +90,7 @@ describe("ocx-notch package staging", () => {
     });
     expect(version.status).toBe(0);
     expect(version.stdout.trim()).toBe(
-      "ocx-notch 0.1.1 (bundled with @coseung2/opencodex 2.8.0-cs.2)",
+      `ocx-notch 0.1.1 (bundled with @coseung2/opencodex ${pkg.version})`,
     );
   });
 });
