@@ -218,6 +218,10 @@ deadline for the next client replay. Retries are bounded to three attempts; hard
 ordinary 5xx errors are not replayed. Completion fallback rebuilds only replayable text, preserves
 the original user/tool-result turn for reasoning-only attempts, supplies neutral non-empty carriers
 for empty tool output, and validates role alternation plus tool-use/result pairing before transport.
+Responses assistant prose marked `phase: "commentary"` remains client-visible but is omitted from
+normal Kiro continuation history; paired tool uses and results remain intact. This keeps transient
+progress from conditioning repeated updates or inflating every later tool round, while the
+adapter-owned one-shot completion retry still replays its own validation text.
 
 [Decision Log]
 - 목적과 의도: Prevent Kiro progress from becoming a false final answer, reject invalid empty completion retries, and stop concurrent transient 429s from consuming independent retry budgets.

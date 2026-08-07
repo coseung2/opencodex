@@ -17,6 +17,7 @@ import { resetKiroThrottleStateForTests } from "../src/adapters/kiro-retry";
 import { encodeMessage } from "../src/lib/eventstream-decoder";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
+import { parseRequest } from "../src/responses/parser";
 import type { OcxParsedRequest, OcxProviderConfig, OcxUsage } from "../src/types";
 import { withTestTranslatorBudget } from "./helpers/translator-budget";
 
@@ -1646,6 +1647,55 @@ describe("kiro adapter — parseStream", () => {
     expect(cs.currentMessage.userInputMessage.userInputMessageContext.toolResults).toEqual([
       { content: [{ text: "/tmp" }], status: "success", toolUseId: "call-1" },
     ]);
+  });
+
+  test("does not replay Responses commentary prose across Kiro tool-result rounds", async () => {
+    const repeatedProgress = "I am checking the same state again.";
+    const parsed = parseRequest({
+      model: "claude-sonnet-4.5",
+      stream: true,
+      tools: [{ type: "function", ...bashTool }],
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "inspect the repository" }] },
+        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: repeatedProgress }] },
+        { type: "function_call", call_id: "call-1", name: "bash", arguments: '{"command":"git status"}' },
+        { type: "function_call_output", call_id: "call-1", output: "clean" },
+        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: repeatedProgress }] },
+        { type: "function_call", call_id: "call-2", name: "bash", arguments: '{"command":"git log -1"}' },
+        { type: "function_call_output", call_id: "call-2", output: "abc123" },
+      ],
+    });
+
+    const { body } = await createKiroAdapter(provider).buildRequest(parsed);
+    const state = JSON.parse(body).conversationState;
+
+    expect(body).not.toContain(repeatedProgress);
+    expect(state.history).toHaveLength(4);
+    expect(state.history[1].assistantResponseMessage).toEqual({
+      content: "",
+      toolUses: [{ name: "bash", input: { command: "git status" }, toolUseId: "call-1" }],
+    });
+    expect(state.history[3].assistantResponseMessage).toEqual({
+      content: "",
+      toolUses: [{ name: "bash", input: { command: "git log -1" }, toolUseId: "call-2" }],
+    });
+    expect(state.currentMessage.userInputMessage.userInputMessageContext.toolResults).toEqual([
+      { content: [{ text: "abc123" }], status: "success", toolUseId: "call-2" },
+    ]);
+  });
+
+  test("drops commentary-only assistant turns instead of creating invalid empty Kiro history", async () => {
+    const { body } = await createKiroAdapter(provider).buildRequest(parsedWith([
+      { role: "user", content: "first instruction" },
+      { role: "assistant", phase: "commentary", content: [{ type: "text", text: "Still checking." }] },
+      { role: "user", content: "second instruction" },
+    ], [bashTool]));
+    const state = JSON.parse(body).conversationState;
+
+    expect(body).not.toContain("Still checking.");
+    expect(state.history).toBeUndefined();
+    expect(state.currentMessage.userInputMessage.content).toContain("first instruction");
+    expect(state.currentMessage.userInputMessage.content).toContain("second instruction");
   });
 
   test("resumed tool-result usage remains current-turn only after payload repair", async () => {
