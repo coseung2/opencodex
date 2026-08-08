@@ -2326,8 +2326,8 @@ export function diagnoseService(): ServiceDiagnostic {
   return { supported: false, installed: false, enabled: false, running: false, viable: false, startable: false, stale: false, conflict: false, backend: null, summary: `unsupported on ${process.platform}` };
 }
 
-export function serviceStatusSummary(): string {
-  return diagnoseService().summary;
+export function serviceStatusSummary(service: ServiceDiagnostic = diagnoseService()): string {
+  return `${service.summary}; log: ${serviceLogPath()}`;
 }
 
 /**
@@ -2394,6 +2394,16 @@ export interface ParsedServiceArgs {
   invalid: string[];
 }
 
+const SERVICE_SUBCOMMANDS = new Set(["install", "repair", "start", "stop", "status", "uninstall", "remove"]);
+
+function exitServiceUsage(): never {
+  console.error("Usage: ocx service [install|repair|start|stop|status|uninstall|remove] [--native|--scheduler]");
+  console.error("       With no subcommand, installs/updates and starts the background service.");
+  console.error("       repair: refresh assets and restart an already-installed service (no admin re-prompt).");
+  console.error("       --native (Windows only): register a real SCM service via WinSW instead of Task Scheduler.");
+  process.exit(1);
+}
+
 /**
  * `ocx service [sub] [--native|--scheduler]`. The first non-flag token is the
  * subcommand; backend flags are only meaningful for `install` (validated by the caller).
@@ -2421,6 +2431,7 @@ export function parseServiceArgs(args: string[]): ParsedServiceArgs {
 export async function serviceCommand(...args: (string | undefined)[]): Promise<void> {
   const parsed = parseServiceArgs(args.filter((a): a is string => Boolean(a)));
   const command = parsed.sub;
+  if (!SERVICE_SUBCOMMANDS.has(command)) exitServiceUsage();
   if (parsed.invalid.length > 0) {
     console.error(`Unknown service option: ${parsed.invalid.join(" ")}`);
     process.exit(1);
@@ -2545,10 +2556,6 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       console.log("✅ service uninstalled.");
       break;
     default:
-      console.error("Usage: ocx service [install|repair|start|stop|status|uninstall|remove] [--native|--scheduler]");
-      console.error("       With no subcommand, installs/updates and starts the background service.");
-      console.error("       repair: refresh assets and restart an already-installed service (no admin re-prompt).");
-      console.error("       --native (Windows only): register a real SCM service via WinSW instead of Task Scheduler.");
-      process.exit(1);
+      exitServiceUsage();
   }
 }
