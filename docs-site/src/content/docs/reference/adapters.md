@@ -97,6 +97,10 @@ streams the response back **untranslated**.
 
 - Builds Kiro `conversationState`, maps Codex tools and tool results, and sends image blocks supported
   by the Kiro wire.
+- On locally expanded `previous_response_id` turns, replayed text and tool structure remain in
+  history, but image bytes from completed earlier turns are omitted. Images attached to the current
+  user/tool-result suffix, including its bounded completion retry, are preserved. Attach an image
+  again when a later turn must inspect its pixels again.
 - Decodes `application/vnd.amazon.eventstream`, reconstructs text/thinking/tool events, detects
   truncated tool JSON, and estimates usage because the upstream does not return token counts.
 - Uses the configured `baseUrl` verbatim when it is custom. A canonical

@@ -468,10 +468,24 @@ export function buildKiroPayload(
     }
   };
 
-  for (const msg of kiroPayloadMessages(parsed)) {
+  const payloadMessages = kiroPayloadMessages(parsed);
+  const replayMessagePrefixLength = Math.min(
+    Math.max(0, parsed._replayMessagePrefixLen ?? 0),
+    payloadMessages.length,
+  );
+  for (let messageIndex = 0; messageIndex < payloadMessages.length; messageIndex++) {
+    const msg = payloadMessages[messageIndex];
+    const isReplayedMessage = messageIndex < replayMessagePrefixLength;
     if (msg.role === "user" || msg.role === "developer") {
       const text = userContentText((msg as { content: string | OcxContentPart[] }).content);
-      const images = extractKiroImages((msg as { content: string | OcxContentPart[] }).content);
+      // Historical text/tool structure remains replayable, but image bytes are scoped to the turn
+      // that introduced them. Re-sending completed-turn images makes Kiro inspect the same visual on
+      // every unrelated follow-up and repeatedly pays the multimodal context cost. The parser-owned
+      // prefix boundary keeps current user/tool-result images intact, including the bounded internal
+      // completion retry built from this same parsed request.
+      const images = isReplayedMessage
+        ? []
+        : extractKiroImages((msg as { content: string | OcxContentPart[] }).content);
       pushUser(text, images);
     } else if (msg.role === "assistant") {
       const aMsg = msg as OcxAssistantMessage;
@@ -509,7 +523,7 @@ export function buildKiroPayload(
       }
       const text = userContentText(tr.content);
       const resultText = text.trim() ? text : KIRO_EMPTY_TOOL_RESULT_MESSAGE;
-      const images = extractKiroImages(tr.content);
+      const images = isReplayedMessage ? [] : extractKiroImages(tr.content);
       const toolUseId = normalizeToolId(tr.toolCallId);
       if (!priorCalls.has(toolUseId)) {
         throw new Error(`Kiro history contains an orphaned tool result for call ${JSON.stringify(tr.toolCallId)}`);

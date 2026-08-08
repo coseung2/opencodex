@@ -267,6 +267,7 @@ const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "
 
 export function parseRequest(body: unknown): OcxParsedRequest {
   const replayedInputPrefixLength = previousResponseReplayPrefixLength(body);
+  let replayedMessagePrefixLength = 0;
   const parsed = responsesRequestSchema.safeParse(body);
   if (!parsed.success) {
     throw new Error(`responses parse error: ${parsed.error.message}`);
@@ -305,6 +306,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
     messages.push({ role: "user", content: data.input, timestamp: now });
   } else if (data.input) {
     for (let inputIndex = 0; inputIndex < data.input.length; inputIndex++) {
+      if (inputIndex === replayedInputPrefixLength) replayedMessagePrefixLength = messages.length;
       const item = data.input[inputIndex];
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
 
@@ -571,6 +573,9 @@ export function parseRequest(body: unknown): OcxParsedRequest {
         });
       }
     }
+    if (replayedInputPrefixLength > 0 && replayedInputPrefixLength >= data.input.length) {
+      replayedMessagePrefixLength = messages.length;
+    }
   }
 
   const declaredTools = buildTools(data.tools as unknown[] | undefined) ?? [];
@@ -637,7 +642,10 @@ export function parseRequest(body: unknown): OcxParsedRequest {
     stream: data.stream === true,
     options,
     _rawBody: body,
-    ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
+    ...(replayedInputPrefixLength > 0 ? {
+      _replayPrefixLen: replayedInputPrefixLength,
+      _replayMessagePrefixLen: replayedMessagePrefixLength,
+    } : {}),
     ...(webSearch ? { _webSearch: webSearch } : {}),
     ...(imageGen ? { _imageGeneration: imageGen } : {}),
     ...(structuredOutput ? { _structuredOutput: true } : {}),

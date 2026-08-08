@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createKiroAdapter } from "../src/adapters/kiro";
+import { buildKiroPayload, createKiroAdapter } from "../src/adapters/kiro";
 import { normalizeKiroImages, KIRO_IMAGE_BASE64_BUDGET, KIRO_MAX_IMAGES_PER_MESSAGE, type KiroImage } from "../src/adapters/kiro-images";
 import { resetNormalizeStateForTests, TIER_SPECS, type EncodeFn } from "../src/adapters/anthropic-image-normalize";
 import { sniffImageDimensions } from "../src/adapters/anthropic-image-guard";
@@ -27,6 +27,8 @@ afterEach(() => {
 });
 
 const provider = { adapter: "kiro", baseUrl: "https://runtime.us-east-1.kiro.dev", authMode: "oauth", apiKey: "tok-123" } as unknown as OcxProviderConfig;
+const ONE_PX_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 function parsedWith(messages: unknown[]): OcxParsedRequest {
   return { modelId: "claude-sonnet-4.5", stream: true, options: {}, context: { messages } } as unknown as OcxParsedRequest;
@@ -34,6 +36,15 @@ function parsedWith(messages: unknown[]): OcxParsedRequest {
 
 function currentUim(body: string): Record<string, unknown> {
   return JSON.parse(body).conversationState.currentMessage.userInputMessage as Record<string, unknown>;
+}
+
+function resumedParsedWith(messages: unknown[], replayMessagePrefixLength: number): OcxParsedRequest {
+  return {
+    ...parsedWith(messages),
+    previousResponseId: "resp-image-history",
+    _previousResponseInputExpanded: true,
+    _replayMessagePrefixLen: replayMessagePrefixLength,
+  };
 }
 
 describe("kiro adapter — native images", () => {
@@ -93,12 +104,116 @@ describe("kiro adapter — native images", () => {
       { format: "webp", source: { bytes: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" } },
     ]);
   });
+
+  test("completed replay images are not resent on an unrelated text follow-up", async () => {
+    const request = resumedParsedWith([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "update this image" },
+          { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "image update complete" }] },
+      { role: "user", content: "now inspect package.json" },
+    ], 2);
+
+    const { body } = await createKiroAdapter(provider).buildRequest(request);
+    const state = JSON.parse(body).conversationState;
+    expect(state.history[0].userInputMessage.content).toContain("update this image");
+    expect(state.history[0].userInputMessage.images).toBeUndefined();
+    expect(state.history[1].assistantResponseMessage.content).toBe("image update complete");
+    expect(state.currentMessage.userInputMessage.content).toContain("now inspect package.json");
+    expect(body).not.toContain(ONE_PX_PNG);
+  });
+
+  test("a new image in the current user suffix is still sent", async () => {
+    const request = resumedParsedWith([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "old image task" },
+          { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "old task complete" }] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "inspect this new image" },
+          { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` },
+        ],
+      },
+    ], 2);
+
+    const { body } = await createKiroAdapter(provider).buildRequest(request);
+    const state = JSON.parse(body).conversationState;
+    expect(state.history[0].userInputMessage.images).toBeUndefined();
+    expect(state.currentMessage.userInputMessage.images).toEqual([
+      { format: "png", source: { bytes: ONE_PX_PNG } },
+    ]);
+    expect(body.split(ONE_PX_PNG).length - 1).toBe(1);
+  });
+
+  test("a current tool-result image survives replay-prefix retirement", async () => {
+    const request = resumedParsedWith([
+      { role: "user", content: "capture the screen" },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "shot-1", name: "shot", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "shot-1",
+        toolName: "shot",
+        isError: false,
+        content: [
+          { type: "text", text: "captured" },
+          { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` },
+        ],
+      },
+    ], 2);
+    request.context.tools = [{ name: "shot", description: "take a screenshot", parameters: { type: "object" } }];
+
+    const { body } = await createKiroAdapter(provider).buildRequest(request);
+    const state = JSON.parse(body).conversationState;
+    expect(state.currentMessage.userInputMessage.images).toEqual([
+      { format: "png", source: { bytes: ONE_PX_PNG } },
+    ]);
+    expect(state.currentMessage.userInputMessage.userInputMessageContext.toolResults[0].toolUseId).toBe("shot-1");
+  });
+
+  test("bounded completion retry keeps the current image while retiring replayed images", () => {
+    const request = resumedParsedWith([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "old image" },
+          { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "old task complete" }] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "current image" },
+          { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "adapter-owned progress" }] },
+    ], 2);
+
+    const { payload } = buildKiroPayload(request, undefined, "text_fallback");
+    const state = payload.conversationState as Record<string, any>;
+    expect(state.history[0].userInputMessage.images).toBeUndefined();
+    expect(state.history[2].userInputMessage.images).toEqual([
+      { format: "png", source: { bytes: ONE_PX_PNG } },
+    ]);
+    expect(JSON.stringify(payload).split(ONE_PX_PNG).length - 1).toBe(1);
+  });
 });
 
 // --- Generous image pipeline on the kiro wire (devlog 260714 .../050, K1-K4) ---
-
-const ONE_PX_PNG =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 async function realPngB64(width: number, height: number): Promise<string> {
   const buf = await new Bun.Image(Buffer.from(ONE_PX_PNG, "base64")).resize(width, height).png().toBuffer();

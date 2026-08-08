@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { atomicWriteFileAsync, getConfigDir } from "../config";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import type { OcxProviderContinuationState } from "../types";
@@ -584,6 +585,14 @@ function inputItems(input: unknown): unknown[] {
   return [input];
 }
 
+function startsWithReplayPrefix(input: unknown[], prefix: unknown[]): boolean {
+  if (prefix.length === 0 || input.length < prefix.length) return false;
+  for (let index = 0; index < prefix.length; index++) {
+    if (!isDeepStrictEqual(input[index], prefix[index])) return false;
+  }
+  return true;
+}
+
 function pruneResponses(at = now()): void {
   for (const [id, state] of states) {
     if (at - state.createdAt > RESPONSE_TTL_MS) deleteEntry(id);
@@ -710,11 +719,19 @@ export function expandPreviousResponseInput(body: unknown): unknown {
     replayFailures.set(request, materialized.failure);
     return body;
   }
+  const previousItems = materialized.state.items;
+  const currentItems = inputItems(request.input);
+  // Some Responses clients send the complete prior input while still supplying
+  // previous_response_id. Treat an exact stored prefix as already expanded instead of prepending
+  // it a second time; keep the provenance marker so downstream adapters can distinguish replayed
+  // history from this turn's new input.
   const expanded = {
     ...request,
-    input: [...materialized.state.items, ...inputItems(request.input)],
+    input: startsWithReplayPrefix(currentItems, previousItems)
+      ? [...currentItems]
+      : [...previousItems, ...currentItems],
   };
-  replayedInputPrefixLengths.set(expanded, materialized.state.items.length);
+  replayedInputPrefixLengths.set(expanded, previousItems.length);
   return expanded;
 }
 

@@ -71,6 +71,9 @@ interface ProviderAdapter {
 
 - Kiro の `conversationState` を作り、Codex ツールとツール結果をマッピングし、Kiro wire が対応する画像
   block を送ります。
+- ローカル展開された `previous_response_id` ターンでは、過去のテキストとツール構造は履歴に残しますが、
+  完了済みの以前のターンの画像バイトは再送しません。現在の user/tool-result suffix と、そのターンの
+  有界な完了リトライに付いた画像は保持します。後のターンで画素を再確認する場合は画像を再添付してください。
 - `application/vnd.amazon.eventstream` をデコードして text/thinking/tool イベントを復元し、途切れたツール JSON を検出します。上流がトークン数を返さないため使用量は推定します。
 - `fetchResponse` で限られた回数だけリトライし、エラーを分類/マスクします。非ストリーミングパーサーはウェブ検索ループのために同じイベントストリームを最後まで消費します。
 ### 完了とネイティブ stop reason

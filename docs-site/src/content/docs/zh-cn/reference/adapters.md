@@ -80,6 +80,9 @@ interface ProviderAdapter {
 token。
 
 - 构建 Kiro `conversationState`，映射 Codex 工具和工具结果，并发送 Kiro wire 支持的 image block。
+- 对本地展开的 `previous_response_id` 回合，历史文本和工具结构仍会保留，但不会再次发送已完成旧回合的
+  图像字节。当前 user/tool-result suffix 及该回合的有界完成重试所附图像会保留。若后续回合需要再次检查
+  像素，请重新附加图像。
 - 解码 `application/vnd.amazon.eventstream`，重建 text/thinking/tool event，检测被截断的工具
   JSON。上游不返回 token 数量，因此 usage 采用估算值。
 - 经 `fetchResponse` 负责有界重试和分类/脱敏后的错误；非流式 parser 会排空同一 event stream，

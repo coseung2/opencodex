@@ -223,13 +223,22 @@ normal Kiro continuation history; paired tool uses and results remain intact. Th
 progress from conditioning repeated updates or inflating every later tool round, while the
 adapter-owned one-shot completion retry still replays its own validation text.
 
+Responses continuation replay records both its raw-item prefix and the parsed-message count produced
+by that prefix. If a client already supplied the exact stored prefix together with
+`previous_response_id`, the state layer keeps that input instead of prepending the same history again.
+Kiro still sends replayed text and tool structure because its wire requires explicit history, but it
+omits image bytes from the completed replay prefix. Images in the current user/tool-result suffix —
+including an adapter-owned completion retry built from that same request — remain attached. Pixel
+inspection is therefore scoped to the turn that introduced an image; a later turn must attach it
+again when the pixels themselves are needed.
+
 [Decision Log]
-- 목적과 의도: Prevent Kiro progress from becoming a false final answer, reject invalid empty completion retries, and stop concurrent transient 429s from consuming independent retry budgets.
-- 기존 구현 및 제약 조건: Kiro text has no trustworthy phase; stop metadata arrives only at stream end; the private completion tool is adapter-owned; normal parallel tool traffic must remain parallel; client cancellation must interrupt all waits.
-- 검토한 주요 대안: Trust native `END_TURN`; infer completion from wording; serialize every Kiro request; leave throttling entirely to the client; manufacture empty assistant turns to preserve alternation.
-- 선택한 방식: Require the private completion tool on tool-enabled turns, rebuild only valid replayable wire turns, validate the final conversation, and activate a shared cooldown plus single probe only after a transient throttle.
-- 다른 대안 대신 이 방식을 선택한 이유: Native stop metadata has mislabeled progress, wording is language-dependent, global serialization harms healthy concurrency, client-only retries amplify bursts, and empty structural turns are rejected upstream.
-- 장점, 단점 및 영향: Completion phase is deterministic and throttled concurrency recovers without a request storm; some clean Kiro stops pay one bounded validation call and an exactly repeated completion answer may be shown twice to preserve `final_answer` semantics.
+- 목적과 의도: Prevent Kiro progress from becoming a false final answer, reject invalid empty completion retries, stop duplicate Responses replay, retire completed-turn image bytes, and keep concurrent transient 429s from consuming independent retry budgets.
+- 기존 구현 및 제약 조건: Kiro text has no trustworthy phase; stop metadata arrives only at stream end; Kiro requires explicit history even with a stable conversation id; the private completion tool is adapter-owned; current user/tool-result images must survive; normal parallel tool traffic must remain parallel; client cancellation must interrupt all waits.
+- 검토한 주요 대안: Trust native `END_TURN`; infer completion from wording; send only a Kiro conversation id or current delta; keep every historical image forever; guess image relevance from prompt wording; serialize every Kiro request; leave throttling entirely to the client; manufacture empty assistant turns to preserve alternation.
+- 선택한 방식: Require the private completion tool on tool-enabled turns, rebuild only valid replayable wire turns, de-duplicate an exact already-supplied Responses prefix, mark its parsed-message boundary, omit image bytes only inside that completed prefix, validate the final conversation, and activate a shared cooldown plus single probe only after a transient throttle.
+- 다른 대안 대신 이 방식을 선택한 이유: Native stop metadata has mislabeled progress, wording and image-relevance heuristics are language-dependent, Kiro's wire still needs explicit text/tool history, global serialization harms healthy concurrency, client-only retries amplify bursts, and empty structural turns are rejected upstream.
+- 장점, 단점 및 영향: Completion phase is deterministic, duplicate history and stale visual context no longer accumulate, current-turn images and tool pairing remain valid, and throttled concurrency recovers without a request storm; some clean Kiro stops pay one bounded validation call, an exactly repeated completion answer may be shown twice to preserve `final_answer` semantics, and later pixel-level image follow-ups must reattach the image.
 
 Historical `web_search_call` output items from previous Responses turns are not converted into
 assistant text. They are UI/search-cell evidence, not a replayable search result payload; turning

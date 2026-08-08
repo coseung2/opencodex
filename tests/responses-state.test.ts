@@ -146,6 +146,45 @@ describe("Responses previous_response_id state", () => {
     ]);
   });
 
+  test("does not prepend stored history when the client already supplied that exact replay prefix", () => {
+    const imageUrl = "data:image/png;base64,aW1hZ2Utc2VudGluZWw=";
+    const priorInput = [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "update this image" },
+        { type: "input_image", image_url: imageUrl },
+      ],
+    }];
+    const priorOutput = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "image update complete" }],
+    };
+    rememberResponseState(
+      { model: "kiro/claude-sonnet-4.5", input: priorInput },
+      fixedResponse("resp_full_history", [priorOutput]),
+      { kiro: { conversationId: "kiro-conversation" } },
+      { force: true },
+    );
+
+    const suppliedInput = [
+      ...priorInput,
+      priorOutput,
+      { type: "message", role: "user", content: [{ type: "input_text", text: "now inspect package.json" }] },
+    ];
+    const expanded = expandPreviousResponseInput({
+      model: "kiro/claude-sonnet-4.5",
+      previous_response_id: "resp_full_history",
+      input: suppliedInput,
+    }) as { input: unknown[] };
+
+    expect(expanded.input).toEqual(suppliedInput);
+    expect(previousResponseReplayPrefixLength(expanded)).toBe(2);
+    expect(parseRequest(expanded)._replayMessagePrefixLen).toBe(2);
+    expect(JSON.stringify(expanded.input).split(imageUrl).length - 1).toBe(1);
+  });
+
   test("stores incomplete partial output for previous_response_id replay", () => {
     const partial = {
       type: "message",

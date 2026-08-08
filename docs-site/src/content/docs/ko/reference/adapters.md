@@ -84,6 +84,9 @@ interface ProviderAdapter {
 
 - Kiro `conversationState`를 만들고 Codex 툴과 툴 결과를 매핑하며, Kiro wire가 지원하는 이미지
   block을 보냅니다.
+- 로컬에서 확장한 `previous_response_id` 턴은 과거 텍스트와 툴 구조를 이력에 유지하지만, 완료된
+  이전 턴의 이미지 바이트는 다시 보내지 않습니다. 현재 user/tool-result suffix와 그 턴의 제한된
+  완료 재시도에 붙은 이미지는 유지합니다. 이후 턴에서 픽셀을 다시 확인해야 하면 이미지를 다시 첨부하세요.
 - `application/vnd.amazon.eventstream`을 디코딩해 text/thinking/tool 이벤트를 복원하고, 잘린 툴
   JSON을 감지합니다. 업스트림이 토큰 수를 반환하지 않아 사용량은 추정합니다.
 - `fetchResponse`에서 제한된 횟수만 재시도하고 오류를 분류/마스킹합니다. 비스트리밍 파서는 웹 검색
