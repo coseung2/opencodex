@@ -37,7 +37,9 @@ const MENU_REFRESH: usize = 1;
 const MENU_EXIT: usize = 2;
 const MENU_THRESHOLD_DOWN: usize = 3;
 const MENU_THRESHOLD_UP: usize = 4;
+const MENU_PROVIDER_ADD: usize = 5;
 const MENU_THRESHOLD_BASE: usize = 1_000;
+const API_KEY_EDIT_ID: i32 = 30_001;
 const DEFAULT_WIDTH: i32 = 640;
 const MIN_WIDTH: i32 = 320;
 const MAX_WIDTH: i32 = 1_200;
@@ -57,6 +59,7 @@ const ACCOUNT_IDENTITY_LEFT: i32 = 42;
 const ACCOUNT_ACTION_WIDTH: i32 = 26;
 const ACCOUNT_ACTION_HEIGHT: i32 = 30;
 const ACCOUNT_ACTION_GAP: i32 = 4;
+const REAUTH_ACTION_WIDTH: i32 = 142;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 512 * 1024;
 
@@ -79,6 +82,77 @@ enum ContentTab {
 struct AccountControl {
     id: String,
     paused: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ReauthControl {
+    provider: String,
+    id: String,
+}
+
+#[derive(Default)]
+struct AuthCancellation {
+    requested: AtomicBool,
+    flow_id: Mutex<Option<String>>,
+}
+
+impl AuthCancellation {
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn publish_flow_id(&self, flow_id: String) -> bool {
+        *self
+            .flow_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(flow_id);
+        self.is_requested()
+    }
+
+    fn flow_id(&self) -> Option<String> {
+        self.flow_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ModalHit {
+    Preset(usize),
+    Tab(ProviderCatalogTab),
+    AddKey,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderCatalogTab {
+    Accounts,
+    Free,
+    Paid,
+}
+
+enum ProviderModal {
+    Picker {
+        presets: Vec<ProviderPreset>,
+        loading: bool,
+        error: Option<String>,
+        waiting_provider: Option<String>,
+        waiting_codex: bool,
+        auth_details: Option<AuthFlowResponse>,
+        cancel: Option<Arc<AuthCancellation>>,
+        scroll: i32,
+        selected_tab: ProviderCatalogTab,
+    },
+    ApiKey {
+        preset: ProviderPreset,
+        submitting: bool,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -158,9 +232,18 @@ struct App {
     expanded_providers: HashSet<String>,
     provider_hits: Vec<(RECT, String)>,
     account_pause_hits: Vec<(RECT, AccountControl)>,
+    account_reauth_hits: Vec<(RECT, ReauthControl)>,
+    modal_hits: Vec<(RECT, ModalHit)>,
     hot_account_control: Option<AccountControl>,
+    hot_reauth_control: Option<ReauthControl>,
     pressed_account_control: Option<AccountControl>,
-    account_mutation: Option<String>,
+    pressed_reauth_control: Option<ReauthControl>,
+    pressed_modal_hit: Option<ModalHit>,
+    account_mutations: HashSet<String>,
+    reauth_mutations: HashMap<String, Arc<AuthCancellation>>,
+    provider_modal: Option<ProviderModal>,
+    modal_generation: u64,
+    api_key_edit: Option<isize>,
     pause_overrides: HashMap<String, bool>,
     show_usage_only: bool,
     usage_toggle_hit: Option<RECT>,
@@ -254,6 +337,10 @@ impl App {
             &mut self.state.pools,
             self.state.active_codex_account_id.as_deref(),
         );
+        self.rebuild_provider_views();
+    }
+
+    fn rebuild_provider_views(&mut self) {
         self.state.providers = merge_providers(
             &self.state.configs,
             &self.state.quotas,
@@ -303,6 +390,9 @@ impl App {
     }
 
     fn desired_height(&self) -> i32 {
+        if self.provider_modal.is_some() {
+            return 560;
+        }
         if !self.expanded {
             return COLLAPSED_HEIGHT;
         }
@@ -495,9 +585,18 @@ fn run() -> windows::core::Result<()> {
             expanded_providers: HashSet::new(),
             provider_hits: Vec::new(),
             account_pause_hits: Vec::new(),
+            account_reauth_hits: Vec::new(),
+            modal_hits: Vec::new(),
             hot_account_control: None,
+            hot_reauth_control: None,
             pressed_account_control: None,
-            account_mutation: None,
+            pressed_reauth_control: None,
+            pressed_modal_hit: None,
+            account_mutations: HashSet::new(),
+            reauth_mutations: HashMap::new(),
+            provider_modal: None,
+            modal_generation: 0,
+            api_key_edit: None,
             pause_overrides: HashMap::new(),
             show_usage_only: false,
             usage_toggle_hit: None,
@@ -548,13 +647,14 @@ fn start_workers(
     let api_pid = pid.clone();
     let api_tx = tx.clone();
     thread::spawn(move || {
-        let mut last_health = Instant::now() - Duration::from_secs(60);
-        let mut last_usage = Instant::now() - Duration::from_secs(60);
-        let mut last_openai_pool = Instant::now() - Duration::from_secs(60);
-        let mut last_active = Instant::now() - Duration::from_secs(60);
-        let mut last_slow = Instant::now() - Duration::from_secs(600);
-        let mut last_details = Instant::now() - Duration::from_secs(60);
-        let mut last_logs = Instant::now() - Duration::from_secs(60);
+        let now = Instant::now();
+        let mut last_health = refresh_seed(now, Duration::from_secs(60));
+        let mut last_usage = refresh_seed(now, Duration::from_secs(60));
+        let mut last_openai_pool = refresh_seed(now, Duration::from_secs(60));
+        let mut last_active = refresh_seed(now, Duration::from_secs(60));
+        let mut last_slow = refresh_seed(now, Duration::from_secs(600));
+        let mut last_details = refresh_seed(now, Duration::from_secs(60));
+        let mut last_logs = refresh_seed(now, Duration::from_secs(60));
         loop {
             let forced = force_refresh.swap(false, Ordering::Relaxed);
             if forced || last_health.elapsed() >= Duration::from_secs(30) {
@@ -646,6 +746,10 @@ fn start_workers(
     });
 }
 
+fn refresh_seed(now: Instant, age: Duration) -> Instant {
+    now.checked_sub(age).unwrap_or(now)
+}
+
 fn send_update(hwnd: isize, tx: &Sender<Update>, update: Update) {
     if tx.send(update).is_ok() {
         unsafe {
@@ -733,6 +837,20 @@ fn account_action_rect(width: i32, top: i32, identity_width: i32) -> RECT {
     }
 }
 
+fn reauth_action_rect(width: i32, top: i32) -> RECT {
+    let right = (width - 18).max(ACCOUNT_IDENTITY_LEFT + 84 + REAUTH_ACTION_WIDTH);
+    RECT {
+        left: right - REAUTH_ACTION_WIDTH,
+        top,
+        right,
+        bottom: top + 30,
+    }
+}
+
+fn reauth_eligible(provider: &str, account: &AccountView) -> bool {
+    account.needs_reauth && !(provider == "openai" && (account.is_main || account.id == "__main__"))
+}
+
 fn set_openai_account_paused(pools: &mut [AccountPool], id: &str, paused: bool) -> bool {
     let Some(account) = pools
         .iter_mut()
@@ -748,12 +866,13 @@ fn set_openai_account_paused(pools: &mut [AccountPool], id: &str, paused: bool) 
 fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
     let mut started = false;
     with_app(|app| {
-        if app.account_mutation.is_some() {
+        if app.account_mutations.contains(&id) {
             return;
         }
-        app.account_mutation = Some(id.clone());
+        app.account_mutations.insert(id.clone());
         app.pause_overrides.insert(id.clone(), paused);
         set_openai_account_paused(&mut app.state.pools, &id, paused);
+        app.rebuild_provider_views();
         app.state.status = if paused {
             "Pausing account…".into()
         } else {
@@ -772,7 +891,7 @@ fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
     thread::spawn(move || {
         let result = api::set_codex_account_paused(&id, paused);
         with_app(|app| {
-            app.account_mutation = None;
+            app.account_mutations.remove(&id);
             match result {
                 Ok(()) => {
                     app.state.status = if paused {
@@ -785,7 +904,767 @@ fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
                 Err(error) => {
                     app.pause_overrides.remove(&id);
                     set_openai_account_paused(&mut app.state.pools, &id, !paused);
+                    app.rebuild_provider_views();
                     app.state.status = error;
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn codex_auth_finished(status: &AuthStatusResponse) -> bool {
+    status.done
+        || matches!(
+            status.status.as_deref(),
+            Some("done" | "success" | "complete")
+        )
+}
+
+fn oauth_auth_finished(status: &AuthStatusResponse) -> bool {
+    status.done
+}
+
+fn codex_cancel_body(flow_id: &str) -> serde_json::Value {
+    serde_json::json!({"flowId": flow_id})
+}
+
+fn cancel_codex_flow(flow_id: &str) -> Result<(), String> {
+    api::post_empty("/api/codex-auth/login/cancel", &codex_cancel_body(flow_id))
+}
+
+fn cancel_codex_if_requested(cancel: &AuthCancellation) -> Result<(), String> {
+    if !cancel.is_requested() {
+        return Ok(());
+    }
+    let flow_id = cancel
+        .flow_id()
+        .ok_or_else(|| "인증 흐름이 시작되기 전에 취소가 요청되었습니다".to_string())?;
+    cancel_codex_flow(&flow_id)?;
+    Err("재인증이 취소되었습니다".into())
+}
+
+fn cancel_oauth_if_requested(cancel: &AuthCancellation, provider: &str) -> Result<(), String> {
+    if !cancel.is_requested() {
+        return Ok(());
+    }
+    api::post_empty(
+        "/api/oauth/login/cancel",
+        &serde_json::json!({"provider": provider}),
+    )?;
+    Err("재인증이 취소되었습니다".into())
+}
+
+fn reauth_mutation_key(control: &ReauthControl) -> String {
+    if control.provider == "openai" {
+        format!("{}:{}", control.provider, control.id)
+    } else {
+        control.provider.clone()
+    }
+}
+
+fn request_existing_reauth_cancel(
+    mutations: &HashMap<String, Arc<AuthCancellation>>,
+    key: &str,
+) -> bool {
+    let Some(existing) = mutations.get(key) else {
+        return false;
+    };
+    existing.request();
+    true
+}
+
+fn codex_login_status_path(flow_id: &str, account_id: Option<&str>, reauth: bool) -> String {
+    let mut path = format!(
+        "/api/codex-auth/login-status?flowId={}",
+        api::encode_component(flow_id)
+    );
+    if let Some(account_id) = account_id {
+        path.push_str("&accountId=");
+        path.push_str(&api::encode_component(account_id));
+    }
+    if reauth {
+        path.push_str("&reauth=1");
+    }
+    path
+}
+
+fn auth_poll_timeout(deadline: Instant) -> Option<i32> {
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    Some((remaining.as_millis() / 4).clamp(100, 10_000) as i32)
+}
+
+fn auth_failed(status: &AuthStatusResponse) -> Option<String> {
+    let failed = status.status.as_deref().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "error"
+                | "failed"
+                | "failure"
+                | "expired"
+                | "cancelled"
+                | "canceled"
+                | "denied"
+                | "rejected"
+                | "timeout"
+                | "timed_out"
+        )
+    });
+    if failed {
+        Some(
+            status
+                .error
+                .clone()
+                .or(status.message.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "인증 실패: {}",
+                        status.status.as_deref().unwrap_or("failed")
+                    )
+                }),
+        )
+    } else {
+        status.error.clone()
+    }
+}
+
+fn launch_reauth(hwnd: HWND, control: ReauthControl) {
+    if !api::valid_provider_name(&control.provider) {
+        with_app(|app| app.state.status = "올바르지 않은 프로바이더 이름입니다".into());
+        return;
+    }
+    let key = reauth_mutation_key(&control);
+    let cancel = Arc::new(AuthCancellation::default());
+    let mut started = false;
+    let mut cancelled_existing = false;
+    with_app(|app| {
+        if request_existing_reauth_cancel(&app.reauth_mutations, &key) {
+            app.state.status = "재인증을 취소하는 중...".into();
+            cancelled_existing = true;
+        } else {
+            app.reauth_mutations.insert(key.clone(), cancel.clone());
+            app.state.status = format!("{} 로그인 인증을 기다리는 중...", control.provider);
+            started = true;
+        }
+    });
+    if cancelled_existing {
+        unsafe {
+            let _ = InvalidateRect(hwnd, None, false);
+        }
+        return;
+    }
+    if !started {
+        return;
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let result = if control.provider == "openai" {
+            let flow: Result<AuthFlowResponse, String> = api::post_json(
+                "/api/codex-auth/login",
+                &serde_json::json!({"id": control.id, "reauth": true}),
+            );
+            flow.and_then(|flow| {
+                let flow_id = flow
+                    .flow_id
+                    .ok_or_else(|| "OCX가 인증 흐름을 시작하지 못했습니다".to_string())?;
+                cancel.publish_flow_id(flow_id.clone());
+                cancel_codex_if_requested(&cancel)?;
+                loop {
+                    cancel_codex_if_requested(&cancel)?;
+                    let remaining = deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
+                    thread::sleep(remaining.min(Duration::from_secs(2)));
+                    cancel_codex_if_requested(&cancel)?;
+                    let timeout = auth_poll_timeout(deadline)
+                        .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
+                    let path = codex_login_status_path(&flow_id, Some(&control.id), true);
+                    let status: AuthStatusResponse = api::get_json(&path, timeout)?;
+                    cancel_codex_if_requested(&cancel)?;
+                    if let Some(error) = auth_failed(&status) {
+                        return Err(error);
+                    }
+                    if codex_auth_finished(&status) {
+                        return Ok(());
+                    }
+                }
+            })
+        } else {
+            let started: Result<AuthFlowResponse, String> = api::post_json(
+                "/api/oauth/login",
+                &serde_json::json!({"provider": control.provider, "accountId": control.id, "reauth": true}),
+            );
+            started.and_then(|_| loop {
+                cancel_oauth_if_requested(&cancel, &control.provider)?;
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
+                thread::sleep(remaining.min(Duration::from_secs(2)));
+                cancel_oauth_if_requested(&cancel, &control.provider)?;
+                let timeout = auth_poll_timeout(deadline)
+                    .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
+                let path = format!(
+                    "/api/oauth/status?provider={}",
+                    api::encode_component(&control.provider)
+                );
+                let status: AuthStatusResponse = api::get_json(&path, timeout)?;
+                cancel_oauth_if_requested(&cancel, &control.provider)?;
+                if let Some(error) = auth_failed(&status) {
+                    return Err(error);
+                }
+                if oauth_auth_finished(&status) {
+                    let config = ProviderConfig {
+                        name: control.provider.clone(),
+                        auth_mode: Some("oauth".into()),
+                        disabled: false,
+                    };
+                    let pool = api::fetch_account_pool(&config);
+                    let account = pool
+                        .accounts
+                        .iter()
+                        .find(|account| account.id == control.id)
+                        .ok_or_else(|| {
+                            "로그인은 완료됐지만 OCX에서 대상 계정을 찾지 못했습니다".to_string()
+                        })?;
+                    return if account.needs_reauth {
+                        Err("로그인은 완료됐지만 이 계정은 여전히 재인증이 필요합니다".into())
+                    } else {
+                        Ok(())
+                    };
+                }
+            })
+        };
+        with_app(|app| {
+            let owns_slot = app
+                .reauth_mutations
+                .get(&key)
+                .is_some_and(|active| Arc::ptr_eq(active, &cancel));
+            if owns_slot {
+                app.reauth_mutations.remove(&key);
+                match result {
+                    Ok(()) => {
+                        app.state.status = "재인증이 완료되었습니다".into();
+                        app.force_refresh.store(true, Ordering::Release);
+                    }
+                    Err(error) => app.state.status = error,
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn configured_preset(preset: &ProviderPreset, configs: &[ProviderConfig]) -> bool {
+    provider_preset_action(preset) == ProviderPresetAction::ApiKey
+        && configs.iter().any(|config| config.name == preset.id)
+}
+
+fn provider_catalog_tab(preset: &ProviderPreset) -> ProviderCatalogTab {
+    match provider_preset_action(preset) {
+        ProviderPresetAction::CodexAccount | ProviderPresetAction::OAuth(_) => {
+            ProviderCatalogTab::Accounts
+        }
+        ProviderPresetAction::ApiKey if preset.free_tier => ProviderCatalogTab::Free,
+        ProviderPresetAction::ApiKey | ProviderPresetAction::Unsupported => {
+            ProviderCatalogTab::Paid
+        }
+    }
+}
+
+fn auth_detail_lines(details: &AuthFlowResponse) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(instructions) = details
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(instructions.to_string());
+    }
+    if let Some(device_code) = details
+        .device_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Code: {device_code}"));
+    }
+    if let Some(url) = details
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("URL: {url}"));
+    }
+    lines
+}
+
+unsafe fn destroy_api_key_edit(app: &mut App) {
+    if let Some(edit) = app.api_key_edit.take() {
+        let edit = HWND(edit as *mut _);
+        let _ = SetWindowTextW(edit, w!(""));
+        let _ = DestroyWindow(edit);
+    }
+}
+
+fn api_key_edit_needs_cleanup(modal_open: bool, edit_present: bool) -> bool {
+    !modal_open && edit_present
+}
+
+unsafe fn close_provider_modal(app: &mut App, cancel_oauth: bool) {
+    if cancel_oauth {
+        if let Some(ProviderModal::Picker {
+            waiting_provider: Some(_),
+            cancel: Some(cancel),
+            error,
+            ..
+        }) = &mut app.provider_modal
+        {
+            cancel.request();
+            *error = Some("인증을 취소하는 중...".into());
+            return;
+        }
+    }
+    destroy_api_key_edit(app);
+    app.modal_generation = app.modal_generation.wrapping_add(1);
+    app.provider_modal = None;
+}
+
+fn open_provider_modal(hwnd: HWND) {
+    let mut generation = 0;
+    with_app(|app| {
+        app.expanded = true;
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        generation = app.modal_generation;
+        app.provider_modal = Some(ProviderModal::Picker {
+            presets: Vec::new(),
+            loading: true,
+            error: None,
+            waiting_provider: None,
+            waiting_codex: false,
+            auth_details: None,
+            cancel: None,
+            scroll: 0,
+            selected_tab: ProviderCatalogTab::Free,
+        });
+    });
+    unsafe {
+        resize_for_state(hwnd);
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::get_json::<ProviderPresetsResponse>("/api/provider-presets", 20_000);
+        let configs = api::get_json::<Vec<ProviderConfig>>("/api/providers", 20_000);
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            if let Ok(configs) = configs {
+                app.state.configs = configs;
+            }
+            if let Some(ProviderModal::Picker {
+                presets,
+                loading,
+                error,
+                ..
+            }) = &mut app.provider_modal
+            {
+                *loading = false;
+                match result {
+                    Ok(mut value) => {
+                        value.providers.retain(|preset| {
+                            preset.id != "custom"
+                                && provider_preset_action(preset)
+                                    != ProviderPresetAction::Unsupported
+                        });
+                        *presets = value.providers;
+                    }
+                    Err(value) => *error = Some(value),
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn begin_oauth_preset(hwnd: HWND, provider: String) {
+    if !api::valid_provider_name(&provider) {
+        with_app(|app| {
+            if let Some(ProviderModal::Picker { error, .. }) = &mut app.provider_modal {
+                *error = Some("Invalid provider name".into());
+            }
+        });
+        return;
+    }
+    let cancel = Arc::new(AuthCancellation::default());
+    let mut generation = 0;
+    let mut started = false;
+    with_app(|app| {
+        if let Some(ProviderModal::Picker {
+            waiting_provider,
+            waiting_codex,
+            auth_details,
+            cancel: slot,
+            error,
+            ..
+        }) = &mut app.provider_modal
+        {
+            if waiting_provider.is_none() {
+                *waiting_provider = Some(provider.clone());
+                *waiting_codex = false;
+                *auth_details = None;
+                *slot = Some(cancel.clone());
+                *error = None;
+                generation = app.modal_generation;
+                started = true;
+            }
+        }
+    });
+    if !started {
+        return;
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let flow: Result<AuthFlowResponse, String> = api::post_json(
+            "/api/oauth/login",
+            &serde_json::json!({"provider": provider}),
+        );
+        let result = flow.and_then(|flow| {
+            with_app(|app| {
+                if app.modal_generation == generation {
+                    if let Some(ProviderModal::Picker { auth_details, .. }) =
+                        &mut app.provider_modal
+                    {
+                        *auth_details = Some(flow.clone());
+                    }
+                }
+            });
+            unsafe {
+                let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+            }
+            cancel_oauth_if_requested(&cancel, &provider)?;
+            loop {
+                cancel_oauth_if_requested(&cancel, &provider)?;
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| "Provider sign-in timed out".to_string())?;
+                thread::sleep(remaining.min(Duration::from_secs(2)));
+                cancel_oauth_if_requested(&cancel, &provider)?;
+                let timeout = auth_poll_timeout(deadline)
+                    .ok_or_else(|| "Provider sign-in timed out".to_string())?;
+                let status: AuthStatusResponse = api::get_json(
+                    &format!(
+                        "/api/oauth/status?provider={}",
+                        api::encode_component(&provider)
+                    ),
+                    timeout,
+                )?;
+                cancel_oauth_if_requested(&cancel, &provider)?;
+                if let Some(error) = auth_failed(&status) {
+                    return Err(error);
+                }
+                if oauth_auth_finished(&status) {
+                    return if status.logged_in {
+                        Ok(())
+                    } else {
+                        Err("Provider sign-in finished without a credential".into())
+                    };
+                }
+            }
+        });
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    app.provider_modal = None;
+                    app.modal_generation = app.modal_generation.wrapping_add(1);
+                    app.state.status = format!("Added {provider}");
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => {
+                    if let Some(ProviderModal::Picker {
+                        waiting_provider,
+                        waiting_codex,
+                        auth_details,
+                        cancel,
+                        error: modal_error,
+                        ..
+                    }) = &mut app.provider_modal
+                    {
+                        *waiting_provider = None;
+                        *waiting_codex = false;
+                        *auth_details = None;
+                        *cancel = None;
+                        *modal_error = Some(error);
+                    }
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn begin_codex_account(hwnd: HWND) {
+    let cancel = Arc::new(AuthCancellation::default());
+    let mut generation = 0;
+    let mut started = false;
+    with_app(|app| {
+        if let Some(ProviderModal::Picker {
+            waiting_provider,
+            waiting_codex,
+            auth_details,
+            cancel: slot,
+            error,
+            ..
+        }) = &mut app.provider_modal
+        {
+            if waiting_provider.is_none() {
+                *waiting_provider = Some("OpenAI".into());
+                *waiting_codex = true;
+                *auth_details = None;
+                *slot = Some(cancel.clone());
+                *error = None;
+                generation = app.modal_generation;
+                started = true;
+            }
+        }
+    });
+    if !started {
+        return;
+    }
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let flow: Result<AuthFlowResponse, String> =
+            api::post_json("/api/codex-auth/login", &serde_json::json!({}));
+        let result = flow.and_then(|flow| {
+            let flow_id = flow
+                .flow_id
+                .clone()
+                .ok_or_else(|| "OCX did not return a Codex login flow id".to_string())?;
+            cancel.publish_flow_id(flow_id.clone());
+            with_app(|app| {
+                if app.modal_generation == generation {
+                    if let Some(ProviderModal::Picker { auth_details, .. }) =
+                        &mut app.provider_modal
+                    {
+                        *auth_details = Some(flow.clone());
+                    }
+                }
+            });
+            unsafe {
+                let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+            }
+            cancel_codex_if_requested(&cancel)?;
+            loop {
+                cancel_codex_if_requested(&cancel)?;
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| "OpenAI account login timed out".to_string())?;
+                thread::sleep(remaining.min(Duration::from_secs(2)));
+                cancel_codex_if_requested(&cancel)?;
+                let timeout = auth_poll_timeout(deadline)
+                    .ok_or_else(|| "OpenAI account login timed out".to_string())?;
+                let status: AuthStatusResponse =
+                    api::get_json(&codex_login_status_path(&flow_id, None, false), timeout)?;
+                cancel_codex_if_requested(&cancel)?;
+                if let Some(error) = auth_failed(&status) {
+                    return Err(error);
+                }
+                if codex_auth_finished(&status) {
+                    return Ok(());
+                }
+            }
+        });
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    app.provider_modal = None;
+                    app.modal_generation = app.modal_generation.wrapping_add(1);
+                    app.state.status = "Added OpenAI account".into();
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => {
+                    if let Some(ProviderModal::Picker {
+                        waiting_provider,
+                        waiting_codex,
+                        auth_details,
+                        cancel,
+                        error: modal_error,
+                        ..
+                    }) = &mut app.provider_modal
+                    {
+                        *waiting_provider = None;
+                        *waiting_codex = false;
+                        *auth_details = None;
+                        *cancel = None;
+                        *modal_error = Some(error);
+                    }
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset) {
+    with_app(|app| {
+        destroy_api_key_edit(app);
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        app.provider_modal = Some(ProviderModal::ApiKey {
+            preset,
+            submitting: false,
+            error: None,
+        });
+        if let Ok(instance) = GetModuleHandleW(None) {
+            if let Ok(edit) = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                w!("EDIT"),
+                w!(""),
+                WINDOW_STYLE(
+                    WS_CHILD.0
+                        | WS_VISIBLE.0
+                        | WS_TABSTOP.0
+                        | ES_AUTOHSCROLL as u32
+                        | ES_PASSWORD as u32,
+                ),
+                60,
+                238,
+                (app.width - 120).max(180),
+                30,
+                hwnd,
+                HMENU(API_KEY_EDIT_ID as *mut _),
+                instance,
+                None,
+            ) {
+                let _ = SendMessageW(edit, 0x00CC, WPARAM('•' as usize), LPARAM(0));
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(edit);
+                app.api_key_edit = Some(edit.0 as isize);
+            }
+        }
+    });
+    resize_for_state(hwnd);
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
+unsafe fn submit_api_key(hwnd: HWND) {
+    let mut submission = None;
+    with_app(|app| {
+        let Some(edit) = app.api_key_edit else {
+            return;
+        };
+        let edit = HWND(edit as *mut _);
+        let length = GetWindowTextLengthW(edit).max(0) as usize;
+        let mut buffer = vec![0u16; length + 1];
+        let read = GetWindowTextW(edit, &mut buffer) as usize;
+        let key = String::from_utf16_lossy(&buffer[..read]);
+        buffer.fill(0);
+        let _ = SetWindowTextW(edit, w!(""));
+        if key.trim().is_empty() {
+            if let Some(ProviderModal::ApiKey { error, .. }) = &mut app.provider_modal {
+                *error = Some("Enter an API key".into());
+            }
+            return;
+        }
+        if let Some(ProviderModal::ApiKey {
+            preset,
+            submitting,
+            error,
+        }) = &mut app.provider_modal
+        {
+            if !*submitting {
+                *submitting = true;
+                *error = None;
+                submission = Some((preset.clone(), key, app.modal_generation));
+            }
+        }
+    });
+    let Some((preset, mut key, generation)) = submission else {
+        return;
+    };
+    let payload = match provider_create_body(&preset, &key) {
+        Ok(payload) => payload,
+        Err(error) => {
+            key.as_bytes_mut().fill(0);
+            with_app(|app| {
+                if let Some(ProviderModal::ApiKey {
+                    submitting,
+                    error: modal_error,
+                    ..
+                }) = &mut app.provider_modal
+                {
+                    *submitting = false;
+                    *modal_error = Some(error.into());
+                }
+            });
+            return;
+        }
+    };
+    let body = match serde_json::to_vec(&payload) {
+        Ok(body) => body,
+        Err(error) => {
+            key.as_bytes_mut().fill(0);
+            with_app(|app| {
+                if let Some(ProviderModal::ApiKey {
+                    submitting,
+                    error: modal_error,
+                    ..
+                }) = &mut app.provider_modal
+                {
+                    *submitting = false;
+                    *modal_error = Some(format!("Invalid provider request: {error}"));
+                }
+            });
+            return;
+        }
+    };
+    key.as_bytes_mut().fill(0);
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let mut body = body;
+        let result = api::post_raw("/api/providers", &body);
+        body.fill(0);
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    app.provider_modal = None;
+                    app.modal_generation = app.modal_generation.wrapping_add(1);
+                    app.state.status = format!("Added {}", preset.label);
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(value) => {
+                    if let Some(ProviderModal::ApiKey {
+                        submitting, error, ..
+                    }) = &mut app.provider_modal
+                    {
+                        *submitting = false;
+                        *error = Some(value);
+                    }
                 }
             }
         });
@@ -921,7 +1800,15 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_DATA => {
-            with_app(|app| app.drain_updates());
+            with_app(|app| {
+                app.drain_updates();
+                if api_key_edit_needs_cleanup(
+                    app.provider_modal.is_some(),
+                    app.api_key_edit.is_some(),
+                ) {
+                    unsafe { destroy_api_key_edit(app) };
+                }
+            });
             resize_for_state(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
@@ -937,7 +1824,14 @@ unsafe extern "system" fn window_proc(
             let _ = ScreenToClient(hwnd, &mut point);
             let _ = GetClientRect(hwnd, &mut rect);
             if point.x >= 0 && point.x < rect.right && point.y >= 0 && point.y < rect.bottom {
-                let cursor_id = if point.x < RESIZE_EDGE || point.x >= rect.right - RESIZE_EDGE {
+                let cursor_id = if APP.get().is_some_and(|app| {
+                    let app = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    app.account_reauth_hits
+                        .iter()
+                        .any(|(hit, _)| point_in(hit, point.x, point.y))
+                }) {
+                    IDC_HAND
+                } else if point.x < RESIZE_EDGE || point.x >= rect.right - RESIZE_EDGE {
                     IDC_SIZEWE
                 } else {
                     IDC_ARROW
@@ -958,10 +1852,26 @@ unsafe extern "system" fn window_proc(
             let _ = GetWindowRect(hwnd, &mut window);
             let mut button_down = false;
             with_app(|app| {
+                if app.provider_modal.is_some() {
+                    app.pressed_modal_hit = app
+                        .modal_hits
+                        .iter()
+                        .find(|(rect, _)| point_in(rect, x, y))
+                        .map(|(_, hit)| hit.clone());
+                    app.drag_origin = None;
+                    app.resize_origin = None;
+                    button_down = app.pressed_modal_hit.is_some();
+                    return;
+                }
                 app.power_hot = point_in(&power_hit_rect(app.width), x, y);
                 app.minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
                 let account_control = app
                     .account_pause_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
+                let reauth_control = app
+                    .account_reauth_hits
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
@@ -983,6 +1893,15 @@ unsafe extern "system" fn window_proc(
                     app.resize_origin = None;
                     app.pressed_button = None;
                     app.pressed_account_control = Some(control);
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
+                } else if let Some(control) = reauth_control {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_account_control = None;
+                    app.pressed_reauth_control = Some(control);
                     app.button_inside = false;
                     app.drag_origin = None;
                     app.drag_moved = false;
@@ -1025,10 +1944,18 @@ unsafe extern "system" fn window_proc(
             let mut resize_target = None;
             let mut changed = false;
             with_app(|app| {
+                if app.provider_modal.is_some() {
+                    return;
+                }
                 let power_hot = point_in(&power_hit_rect(app.width), x, y);
                 let minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
                 let hot_account_control = app
                     .account_pause_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
+                let hot_reauth_control = app
+                    .account_reauth_hits
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
@@ -1039,6 +1966,7 @@ unsafe extern "system" fn window_proc(
                 if app.power_hot != power_hot
                     || app.minimize_hot != minimize_hot
                     || app.hot_account_control != hot_account_control
+                    || app.hot_reauth_control != hot_reauth_control
                     || app.hot_tab != hot_tab
                 {
                     changed = true;
@@ -1046,6 +1974,7 @@ unsafe extern "system" fn window_proc(
                 app.power_hot = power_hot;
                 app.minimize_hot = minimize_hot;
                 app.hot_account_control = hot_account_control;
+                app.hot_reauth_control = hot_reauth_control;
                 app.hot_tab = hot_tab;
                 if let Some(button) = app.pressed_button {
                     let inside = match button {
@@ -1056,7 +1985,9 @@ unsafe extern "system" fn window_proc(
                         changed = true;
                     }
                     app.button_inside = inside;
-                } else if app.pressed_account_control.is_some() {
+                } else if app.pressed_account_control.is_some()
+                    || app.pressed_reauth_control.is_some()
+                {
                     // Account controls never initiate a window drag.
                 } else if let Some((origin, window, edge)) = app.resize_origin {
                     let dx = cursor.x - origin.x;
@@ -1104,15 +2035,43 @@ unsafe extern "system" fn window_proc(
             let mut handled_button = false;
             let mut power_action = None;
             let mut pause_action = None;
+            let mut reauth_action = None;
+            let mut modal_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
                 let pressed_button = app.pressed_button.take();
                 let pressed_account_control = app.pressed_account_control.take();
+                let pressed_reauth_control = app.pressed_reauth_control.take();
+                let pressed_modal_hit = app.pressed_modal_hit.take();
                 let button_inside = app.button_inside;
                 app.button_inside = false;
                 app.drag_origin = None;
                 app.resize_origin = None;
                 app.drag_moved = false;
+                if app.provider_modal.is_some() {
+                    if let Some(pressed) = pressed_modal_hit {
+                        let released_inside = app
+                            .modal_hits
+                            .iter()
+                            .any(|(rect, hit)| *hit == pressed && point_in(rect, x, y));
+                        if released_inside {
+                            modal_action = Some(pressed);
+                        }
+                    }
+                    handled_button = true;
+                    return;
+                }
+                if let Some(control) = pressed_reauth_control {
+                    if app
+                        .account_reauth_hits
+                        .iter()
+                        .any(|(rect, hit)| *hit == control && point_in(rect, x, y))
+                    {
+                        reauth_action = Some(control);
+                    }
+                    handled_button = true;
+                    return;
+                }
                 if let Some(control) = pressed_account_control {
                     handled_button = true;
                     changed = true;
@@ -1120,7 +2079,7 @@ unsafe extern "system" fn window_proc(
                         .account_pause_hits
                         .iter()
                         .any(|(rect, hit)| hit.id == control.id && point_in(rect, x, y));
-                    if released_inside && app.account_mutation.is_none() {
+                    if released_inside && !app.account_mutations.contains(&control.id) {
                         pause_action = Some((control.id, !control.paused));
                     }
                     return;
@@ -1200,6 +2159,56 @@ unsafe extern "system" fn window_proc(
             if let Some((id, paused)) = pause_action {
                 launch_pause_action(hwnd, id, paused);
             }
+            if let Some(control) = reauth_action {
+                launch_reauth(hwnd, control);
+            }
+            if let Some(action) = modal_action {
+                match action {
+                    ModalHit::Cancel => with_app(|app| unsafe { close_provider_modal(app, true) }),
+                    ModalHit::AddKey => unsafe { submit_api_key(hwnd) },
+                    ModalHit::Tab(tab) => with_app(|app| {
+                        if let Some(ProviderModal::Picker {
+                            selected_tab,
+                            scroll,
+                            error,
+                            waiting_provider,
+                            ..
+                        }) = &mut app.provider_modal
+                        {
+                            if waiting_provider.is_none() {
+                                *selected_tab = tab;
+                                *scroll = 0;
+                                *error = None;
+                            }
+                        }
+                    }),
+                    ModalHit::Preset(index) => {
+                        let preset = APP.get().and_then(|app| {
+                            let app = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            match &app.provider_modal {
+                                Some(ProviderModal::Picker { presets, .. }) => {
+                                    presets.get(index).cloned()
+                                }
+                                _ => None,
+                            }
+                        });
+                        if let Some(preset) = preset {
+                            match provider_preset_action(&preset) {
+                                ProviderPresetAction::CodexAccount => begin_codex_account(hwnd),
+                                ProviderPresetAction::OAuth(provider) => {
+                                    begin_oauth_preset(hwnd, provider)
+                                }
+                                ProviderPresetAction::ApiKey => unsafe {
+                                    show_api_key_preset(hwnd, preset)
+                                },
+                                ProviderPresetAction::Unsupported => {}
+                            }
+                        }
+                    }
+                }
+                resize_for_state(hwnd);
+                let _ = InvalidateRect(hwnd, None, false);
+            }
             if handled_button {
                 if changed {
                     resize_for_state(hwnd);
@@ -1223,6 +2232,8 @@ unsafe extern "system" fn window_proc(
                 app.drag_moved = false;
                 app.pressed_button = None;
                 app.pressed_account_control = None;
+                app.pressed_reauth_control = None;
+                app.pressed_modal_hit = None;
                 app.button_inside = false;
             });
             LRESULT(0)
@@ -1230,7 +2241,19 @@ unsafe extern "system" fn window_proc(
         WM_MOUSEWHEEL => {
             let delta = ((wparam.0 >> 16) as i16) as i32;
             with_app(|app| {
-                if app.expanded {
+                if let Some(ProviderModal::Picker {
+                    scroll,
+                    presets,
+                    selected_tab,
+                    ..
+                }) = &mut app.provider_modal
+                {
+                    let count = presets
+                        .iter()
+                        .filter(|preset| provider_catalog_tab(preset) == *selected_tab)
+                        .count() as i32;
+                    *scroll = (*scroll - delta.signum() * 64).clamp(0, (count * 54 - 300).max(0));
+                } else if app.expanded {
                     app.scroll_offset -= delta.signum() * 76;
                     app.clamp_scroll(app.desired_height());
                 }
@@ -1247,6 +2270,8 @@ unsafe extern "system" fn window_proc(
             let mut requested_threshold = None;
             if (MENU_THRESHOLD_BASE..=MENU_THRESHOLD_BASE + 100).contains(&command) {
                 requested_threshold = Some((command - MENU_THRESHOLD_BASE) as u32);
+            } else if command == MENU_PROVIDER_ADD {
+                open_provider_modal(hwnd);
             } else if command == MENU_THRESHOLD_DOWN || command == MENU_THRESHOLD_UP {
                 with_app(|app| {
                     requested_threshold = Some(if command == MENU_THRESHOLD_DOWN {
@@ -1295,10 +2320,14 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN if wparam.0 as u32 == 0x1b => {
             with_app(|app| {
-                app.expanded = false;
-                app.scroll_offset = 0;
-                app.want_details.store(false, Ordering::Relaxed);
-                app.want_logs.store(false, Ordering::Relaxed);
+                if app.provider_modal.is_some() {
+                    unsafe { close_provider_modal(app, true) };
+                } else {
+                    app.expanded = false;
+                    app.scroll_offset = 0;
+                    app.want_details.store(false, Ordering::Relaxed);
+                    app.want_logs.store(false, Ordering::Relaxed);
+                }
             });
             resize_for_state(hwnd);
             let _ = InvalidateRect(hwnd, None, false);
@@ -1371,10 +2400,19 @@ unsafe fn draw_frame(dc: HDC, width: i32, height: i32) {
 unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.provider_hits.clear();
     app.account_pause_hits.clear();
+    app.account_reauth_hits.clear();
+    app.modal_hits.clear();
     app.usage_toggle_hit = None;
     let body_font = make_font(14, 500);
     let small_font = make_font(12, 400);
     let old_font = SelectObject(dc, body_font);
+    if app.provider_modal.is_some() {
+        draw_provider_modal(dc, width, height, app, body_font, small_font);
+        let _ = SelectObject(dc, old_font);
+        let _ = DeleteObject(body_font);
+        let _ = DeleteObject(small_font);
+        return;
+    }
     fill_solid(
         dc,
         RECT {
@@ -1582,7 +2620,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             };
             draw_text(
                 dc,
-                &format!("{marker} {}", provider.label),
+                &format!("{marker} {}", provider_header_label(&provider)),
                 RECT {
                     left: 18,
                     top: y,
@@ -1638,9 +2676,11 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                 let show_pause_control = provider.name == "openai";
                 for account in provider.accounts {
                     let account_height = account_height(&account);
+                    let reauth = reauth_eligible(&provider.name, &account);
+                    let reauth_rect = reauth_action_rect(width, y);
                     let identity_width = measure_text_width(dc, &account.identity);
                     let action_rect = account_action_rect(width, y, identity_width);
-                    let busy = app.account_mutation.as_deref() == Some(account.id.as_str());
+                    let busy = app.account_mutations.contains(&account.id);
                     set_text_color(dc, 0x00c7cbd2);
                     draw_text(
                         dc,
@@ -1650,6 +2690,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                             top: y,
                             right: if show_pause_control {
                                 action_rect.left - ACCOUNT_ACTION_GAP
+                            } else if reauth {
+                                reauth_rect.left - ACCOUNT_ACTION_GAP
                             } else {
                                 width - 250
                             },
@@ -1675,6 +2717,27 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                         if !busy && action_rect.bottom > 101 && action_rect.top < height {
                             app.account_pause_hits.push((action_rect, control));
                         }
+                        if reauth {
+                            let control = ReauthControl {
+                                provider: provider.name.clone(),
+                                id: account.id.clone(),
+                            };
+                            let waiting = app
+                                .reauth_mutations
+                                .contains_key(&reauth_mutation_key(&control));
+                            set_text_color(dc, if waiting { 0x0024bffb } else { 0x008edbc0 });
+                            draw_text(
+                                dc,
+                                if waiting {
+                                    "인증 대기 중 · 취소"
+                                } else {
+                                    "재인증"
+                                },
+                                reauth_rect,
+                                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                            );
+                            app.account_reauth_hits.push((reauth_rect, control));
+                        }
                     }
                     set_text_color(
                         dc,
@@ -1693,9 +2756,14 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     } else {
                         ""
                     };
+                    let health = if reauth {
+                        suffix.to_string()
+                    } else {
+                        format!("{}{}", account.health, suffix)
+                    };
                     draw_text(
                         dc,
-                        &format!("{}{}", account.health, suffix),
+                        &health,
                         RECT {
                             left: width - 244,
                             top: y,
@@ -2113,6 +3181,333 @@ unsafe fn draw_account_pause_control(
     }
 }
 
+unsafe fn draw_native_button(dc: HDC, rect: RECT, label: &str, disabled: bool) {
+    fill_solid(dc, rect, if disabled { 0x00342f2c } else { 0x00483f39 });
+    set_text_color(dc, if disabled { 0x007d817f } else { 0x00e9f4ef });
+    draw_text(
+        dc,
+        label,
+        rect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+}
+
+unsafe fn draw_provider_modal(
+    dc: HDC,
+    width: i32,
+    height: i32,
+    app: &mut App,
+    body_font: HFONT,
+    small_font: HFONT,
+) {
+    fill_solid(
+        dc,
+        RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        },
+        0x00211d1a,
+    );
+    let _ = SelectObject(dc, body_font);
+    set_text_color(dc, 0x00f0ece8);
+    draw_text(
+        dc,
+        "프로바이더 추가",
+        RECT {
+            left: 24,
+            top: 14,
+            right: width - 140,
+            bottom: 50,
+        },
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+    );
+    let cancel = RECT {
+        left: width - 112,
+        top: 14,
+        right: width - 24,
+        bottom: 46,
+    };
+    draw_native_button(dc, cancel, "닫기", false);
+    app.modal_hits.push((cancel, ModalHit::Cancel));
+    let configs = app.state.configs.clone();
+    match app.provider_modal.as_ref() {
+        Some(ProviderModal::Picker {
+            presets,
+            loading,
+            error,
+            waiting_provider,
+            waiting_codex,
+            auth_details,
+            scroll,
+            selected_tab,
+            ..
+        }) => {
+            let _ = SelectObject(dc, small_font);
+            for (index, (tab, label)) in [
+                (ProviderCatalogTab::Accounts, "계정"),
+                (ProviderCatalogTab::Free, "무료"),
+                (ProviderCatalogTab::Paid, "유료"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let tab_width = ((width - 48) / 3).max(72);
+                let left = 24 + index as i32 * tab_width;
+                let rect = RECT {
+                    left,
+                    top: 58,
+                    right: if index == 2 {
+                        width - 24
+                    } else {
+                        left + tab_width
+                    },
+                    bottom: 94,
+                };
+                if *selected_tab == tab {
+                    fill_solid(dc, rect, 0x00342e2a);
+                    fill_solid(
+                        dc,
+                        RECT {
+                            top: rect.bottom - 3,
+                            ..rect
+                        },
+                        0x009dcb4e,
+                    );
+                    set_text_color(dc, 0x00f0ece8);
+                } else {
+                    set_text_color(dc, 0x009da3ad);
+                }
+                draw_text(dc, label, rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+                if waiting_provider.is_none() {
+                    app.modal_hits.push((rect, ModalHit::Tab(tab)));
+                }
+            }
+            if *loading {
+                set_text_color(dc, 0x009da3ad);
+                draw_text(
+                    dc,
+                    "Loading provider presets...",
+                    RECT {
+                        left: 40,
+                        top: 108,
+                        right: width - 40,
+                        bottom: 150,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+            } else if let Some(provider) = waiting_provider {
+                set_text_color(dc, 0x008edbc0);
+                let waiting_label = if *waiting_codex {
+                    "OpenAI account"
+                } else {
+                    provider.as_str()
+                };
+                draw_text(
+                    dc,
+                    &format!("Waiting for {waiting_label} authorization..."),
+                    RECT {
+                        left: 40,
+                        top: 108,
+                        right: width - 40,
+                        bottom: 138,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+                let _ = SelectObject(dc, small_font);
+                set_text_color(dc, 0x00d4d0cc);
+                if let Some(details) = auth_details {
+                    for (index, line) in auth_detail_lines(details).iter().take(5).enumerate() {
+                        let top = 144 + index as i32 * 44;
+                        draw_text(
+                            dc,
+                            line,
+                            RECT {
+                                left: 40,
+                                top,
+                                right: width - 40,
+                                bottom: top + 42,
+                            },
+                            DT_LEFT | DT_WORDBREAK,
+                        );
+                    }
+                } else {
+                    draw_text(
+                        dc,
+                        "Starting authorization...",
+                        RECT {
+                            left: 40,
+                            top: 144,
+                            right: width - 40,
+                            bottom: 176,
+                        },
+                        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                    );
+                }
+            } else {
+                let _ = IntersectClipRect(dc, 28, 104, width - 28, height - 58);
+                let mut y = 108 - *scroll;
+                let mut visible_count = 0;
+                for (index, preset) in presets.iter().enumerate() {
+                    if provider_catalog_tab(preset) != *selected_tab {
+                        continue;
+                    }
+                    visible_count += 1;
+                    let row = RECT {
+                        left: 34,
+                        top: y,
+                        right: width - 34,
+                        bottom: y + 48,
+                    };
+                    if row.bottom > 104 && row.top < height - 58 {
+                        fill_solid(dc, row, 0x00342e2a);
+                        set_text_color(dc, 0x00e9e4df);
+                        draw_text(
+                            dc,
+                            &preset.label,
+                            RECT {
+                                left: row.left + 12,
+                                top: y + 3,
+                                right: row.right - 130,
+                                bottom: y + 25,
+                            },
+                            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                        );
+                        set_text_color(dc, 0x009da3ad);
+                        let detail = preset.note.as_deref().unwrap_or(
+                            match provider_preset_action(preset) {
+                                ProviderPresetAction::CodexAccount => "ChatGPT account",
+                                ProviderPresetAction::OAuth(_) => "OAuth",
+                                ProviderPresetAction::ApiKey => "API key",
+                                ProviderPresetAction::Unsupported => "Unsupported",
+                            },
+                        );
+                        draw_text(
+                            dc,
+                            detail,
+                            RECT {
+                                left: row.left + 12,
+                                top: y + 24,
+                                right: row.right - 12,
+                                bottom: y + 45,
+                            },
+                            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                        );
+                        if configured_preset(preset, &configs) {
+                            set_text_color(dc, 0x006ee7a8);
+                            draw_text(
+                                dc,
+                                "Configured",
+                                RECT {
+                                    left: row.right - 118,
+                                    top: y,
+                                    right: row.right - 12,
+                                    bottom: y + 48,
+                                },
+                                DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+                            );
+                        } else {
+                            app.modal_hits.push((row, ModalHit::Preset(index)));
+                        }
+                    }
+                    y += 54;
+                }
+                let _ = SelectClipRgn(dc, None);
+                if visible_count == 0 {
+                    set_text_color(dc, 0x009da3ad);
+                    draw_text(
+                        dc,
+                        "이 분류에 표시할 프로바이더가 없습니다.",
+                        RECT {
+                            left: 40,
+                            top: 120,
+                            right: width - 40,
+                            bottom: 160,
+                        },
+                        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                    );
+                }
+            }
+            if let Some(error) = error {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    error,
+                    RECT {
+                        left: 40,
+                        top: height - 56,
+                        right: width - 40,
+                        bottom: height - 24,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+            }
+        }
+        Some(ProviderModal::ApiKey {
+            preset,
+            submitting,
+            error,
+        }) => {
+            set_text_color(dc, 0x00e9e4df);
+            draw_text(
+                dc,
+                &format!("{} API key", preset.label),
+                RECT {
+                    left: 60,
+                    top: 150,
+                    right: width - 60,
+                    bottom: 190,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x009da3ad);
+            draw_text(
+                dc,
+                "키는 OCX로 직접 전송되며 사용 후 입력란에서 지워집니다.",
+                RECT {
+                    left: 60,
+                    top: 188,
+                    right: width - 60,
+                    bottom: 230,
+                },
+                DT_LEFT | DT_WORDBREAK,
+            );
+            let add = RECT {
+                left: width - 154,
+                top: 286,
+                right: width - 60,
+                bottom: 320,
+            };
+            draw_native_button(
+                dc,
+                add,
+                if *submitting { "Adding..." } else { "Add" },
+                *submitting,
+            );
+            if !*submitting {
+                app.modal_hits.push((add, ModalHit::AddKey));
+            }
+            if let Some(error) = error {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    error,
+                    RECT {
+                        left: 60,
+                        top: 332,
+                        right: width - 60,
+                        bottom: 380,
+                    },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            }
+        }
+        None => {}
+    }
+}
+
 unsafe fn draw_lucide_icon(dc: HDC, glyph: &str, rect: RECT, color: u32) {
     let font = CreateFontW(
         -22,
@@ -2502,6 +3897,181 @@ mod account_control_tests {
     use super::*;
 
     #[test]
+    fn oversized_refresh_age_cannot_underflow_the_monotonic_clock() {
+        let now = Instant::now();
+        assert_eq!(refresh_seed(now, Duration::MAX), now);
+    }
+
+    #[test]
+    fn reauth_excludes_main_but_allows_pool_and_generic_accounts() {
+        let main = AccountView {
+            id: "__main__".into(),
+            needs_reauth: true,
+            is_main: true,
+            ..Default::default()
+        };
+        let pool = AccountView {
+            id: "pool-2".into(),
+            needs_reauth: true,
+            ..Default::default()
+        };
+        assert!(!reauth_eligible("openai", &main));
+        assert!(reauth_eligible("openai", &pool));
+        assert!(reauth_eligible("kiro", &main));
+    }
+
+    #[test]
+    fn reauth_text_shares_the_account_name_row_without_extra_height() {
+        let top = 120;
+        let rect = reauth_action_rect(DEFAULT_WIDTH, top);
+        assert_eq!(rect.top, top);
+        assert_eq!(rect.bottom, top + 30);
+        assert_eq!(
+            account_height(&AccountView::default()),
+            account_height(&AccountView {
+                needs_reauth: true,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn provider_catalog_matches_account_free_paid_tabs() {
+        let oauth = ProviderPreset {
+            auth: "oauth".into(),
+            ..Default::default()
+        };
+        let free = ProviderPreset {
+            auth: "key".into(),
+            free_tier: true,
+            ..Default::default()
+        };
+        let paid = ProviderPreset {
+            auth: "key".into(),
+            ..Default::default()
+        };
+        assert_eq!(provider_catalog_tab(&oauth), ProviderCatalogTab::Accounts);
+        assert_eq!(provider_catalog_tab(&free), ProviderCatalogTab::Free);
+        assert_eq!(provider_catalog_tab(&paid), ProviderCatalogTab::Paid);
+    }
+
+    #[test]
+    fn configured_account_presets_remain_clickable_for_add_account() {
+        let preset = ProviderPreset {
+            id: "openai".into(),
+            auth: "forward".into(),
+            codex_account_mode: Some("pool".into()),
+            ..Default::default()
+        };
+        let configs = vec![ProviderConfig {
+            name: "openai".into(),
+            ..Default::default()
+        }];
+
+        assert!(!configured_preset(&preset, &configs));
+    }
+
+    #[test]
+    fn cancel_requested_before_codex_flow_id_is_retained_for_remote_cancel() {
+        let cancel = AuthCancellation::default();
+        cancel.request();
+
+        assert!(cancel.publish_flow_id("flow-late".into()));
+        assert_eq!(cancel.flow_id().as_deref(), Some("flow-late"));
+    }
+
+    #[test]
+    fn reauth_cancel_keeps_mutation_slot_until_worker_finishes_remote_cancel() {
+        let key = "openai:pool-a".to_string();
+        let cancel = Arc::new(AuthCancellation::default());
+        let mutations = HashMap::from([(key.clone(), cancel.clone())]);
+
+        assert!(request_existing_reauth_cancel(&mutations, &key));
+        assert!(mutations.contains_key(&key));
+        assert!(cancel.is_requested());
+    }
+
+    #[test]
+    fn codex_add_and_reauth_use_current_status_and_cancel_contracts() {
+        assert_eq!(
+            codex_login_status_path("flow/a", None, false),
+            "/api/codex-auth/login-status?flowId=flow%2Fa"
+        );
+        assert_eq!(
+            codex_login_status_path("flow/a", Some("pool b"), true),
+            "/api/codex-auth/login-status?flowId=flow%2Fa&accountId=pool%20b&reauth=1"
+        );
+        assert_eq!(
+            codex_cancel_body("flow/a"),
+            serde_json::json!({"flowId": "flow/a"})
+        );
+    }
+
+    #[test]
+    fn device_authorization_details_remain_visible_in_the_modal() {
+        let details = AuthFlowResponse {
+            url: Some("https://github.com/login/device".into()),
+            instructions: Some("Enter the code shown below".into()),
+            device_code: Some("ABCD-EFGH".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            auth_detail_lines(&details),
+            [
+                "Enter the code shown below",
+                "Code: ABCD-EFGH",
+                "URL: https://github.com/login/device",
+            ]
+        );
+    }
+
+    #[test]
+    fn closing_api_key_modal_requires_native_password_control_cleanup() {
+        assert!(!api_key_edit_needs_cleanup(true, true));
+        assert!(api_key_edit_needs_cleanup(false, true));
+        assert!(!api_key_edit_needs_cleanup(false, false));
+    }
+
+    #[test]
+    fn generic_oauth_is_serialized_per_provider_while_codex_is_per_account() {
+        let first = ReauthControl {
+            provider: "kiro".into(),
+            id: "a".into(),
+        };
+        let second = ReauthControl {
+            provider: "kiro".into(),
+            id: "b".into(),
+        };
+        let codex = ReauthControl {
+            provider: "openai".into(),
+            id: "a".into(),
+        };
+        assert_eq!(reauth_mutation_key(&first), reauth_mutation_key(&second));
+        assert_ne!(reauth_mutation_key(&first), reauth_mutation_key(&codex));
+    }
+
+    #[test]
+    fn oauth_reauth_waits_for_current_flow_completion_and_surfaces_failures() {
+        assert!(!oauth_auth_finished(&AuthStatusResponse {
+            logged_in: true,
+            done: false,
+            ..Default::default()
+        }));
+        assert!(oauth_auth_finished(&AuthStatusResponse {
+            logged_in: true,
+            done: true,
+            ..Default::default()
+        }));
+        assert!(auth_failed(&AuthStatusResponse {
+            status: Some("FAILED".into()),
+            message: Some("denied".into()),
+            ..Default::default()
+        })
+        .is_some());
+    }
+
+    #[test]
     fn action_follows_short_identity_and_stays_before_health_column() {
         let rect = account_action_rect(DEFAULT_WIDTH, 120, 96);
         assert_eq!(rect.left, ACCOUNT_IDENTITY_LEFT + 96 + ACCOUNT_ACTION_GAP);
@@ -2749,6 +4319,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_DOWN, w!("Threshold -1%"));
     let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_UP, w!("Threshold +1%"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    let _ = AppendMenuW(menu, MF_STRING, MENU_PROVIDER_ADD, w!("Add provider..."));
     let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("Refresh"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit"));

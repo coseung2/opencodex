@@ -32,6 +32,7 @@ For OCX 2.8+, the notch automatically reads the existing `%USERPROFILE%\.opencod
 - `/api/usage?range=7d` refreshes around every 30 seconds; only the newest calendar day's model rows are aggregated into the displayed per-provider usage.
 - `/api/logs?tail=10` refreshes every ~2 seconds only while the Logs tab is visible. The response replaces the in-memory list, newest first, and OCX Notch never persists logs itself.
 - OpenAI account state and per-account quotas refresh around every 5 seconds. Other provider configuration, account pools, and cached `/api/provider-quotas` refresh around every 5 minutes. For xAI OAuth, OCX reports the authoritative weekly Grok credit-pool usage and reset; the separate monthly spending cap is not presented as quota.
+- Provider setup reads OCX's `/api/provider-presets` catalog on demand. OAuth status is polled only while a browser/device sign-in or account reauthentication is active; device authorization URLs, instructions, and user codes remain visible in the modal.
 - `/api/system/memory` is requested only while expanded, at most every ~45 seconds, for optional heap detail.
 
 All HTTP calls use WinHTTP against `127.0.0.1:10100`. There is no WebView, database, persistent usage history, runtime download, or automatic startup behavior. The last window position and width are stored in `%LOCALAPPDATA%\OCX Notch\window.json`.
@@ -50,8 +51,9 @@ Startup failures and Rust panics are written to the bounded diagnostic log `%LOC
 - Drag anywhere on the notch to move it; its chosen position is preserved while it expands, collapses, or refreshes.
 - Click a provider with multiple accounts to expand or collapse its account rows.
 - Click the pause icon beside an OpenAI account to exclude it from the rotation pool. A paused account shows a play icon that includes it again. The icon updates immediately and rolls back if OCX rejects the request.
+- Accounts that require renewed credentials expose an inline **재인증** action on the same row. OpenAI's main account is intentionally excluded; eligible OpenAI pool and generic OAuth accounts can start, cancel, and retry browser authentication.
 - Providers with quota data are shown first. Providers with usage but no quota stay behind the inline usage-only toggle.
 - Press **Esc** to collapse.
-- Right-click to set the real OCX account rotation threshold, fine-tune it by 1%, **Refresh**, or **Exit**. `Off` writes threshold `0`.
+- Right-click to add a provider, set the real OCX account rotation threshold, fine-tune it by 1%, **Refresh**, or **Exit**. The opaque provider modal groups supported presets into Account, Free, and Paid tabs. Canonical OpenAI adds another Codex account, OAuth presets use browser/device authorization, and required-key presets use masked API-key entry. Local, key-optional, endpoint-choice, and placeholder-URL presets are omitted because this compact modal cannot preserve those setup contracts safely. `Off` writes threshold `0`.
 
 Quota percentages are shown as used percentages with the same 5-hour/weekly/monthly/custom-window rows, reset countdowns, 5px progress bars, green fill, and green-to-amber threshold warning used by the OCX dashboard. Provider usage is merged by exact provider name, limited to the newest day, and formatted with Korean `만/억/조` units. OpenAI account rows show their own weekly/monthly quotas; OAuth and key-pool rows show their masked identity and active/health state, while provider-level quota remains associated with the active account. The native window uses a subtle 238/255 global alpha.

@@ -64,7 +64,7 @@ if (command !== undefined && command !== "help" && hasHelpFlag(args.slice(1))) {
   process.exit(0);
 }
 
-maybeAutoRestoreCodexShim(command, args);
+if (command !== "start") maybeAutoRestoreCodexShim(command, args);
 
 function parsePortOption(): number | undefined {
   if (args.length === 1) return undefined;
@@ -119,16 +119,22 @@ function startArgv(port?: number): string[] {
   return args;
 }
 
+function rejectAlreadyRunning(live: LiveProxy, fallbackPid: number | null = null): never {
+  console.error(`⚠️  Proxy already running (PID ${live.pid ?? fallbackPid ?? "unknown"}, port ${live.port}). Use 'ocx stop' first.`);
+  process.exit(1);
+}
+
 async function chooseListenPort(requestedPort?: number): Promise<number> {
   const config = loadConfig();
   const preferred = requestedPort ?? config.port ?? 10100;
   const hardPin = requestedPort !== undefined && requestedPort > 0;
+  const hostname = config.hostname ?? "127.0.0.1";
   // Soft start: brief prefer-retry then ephemeral hop.
   // Explicit `--port` (service wrappers / update restart): wait for the pinned port
   // to free without killing any listener (healthy ocx / foreign). Never hop.
   if (hardPin && preferred > 0) {
     const { reclaimListenPort } = await import("../server/port-reclaim");
-    await reclaimListenPort(preferred, config.hostname ?? "127.0.0.1", {
+    await reclaimListenPort(preferred, hostname, {
       // Ghost LISTEN rows with a dead PID can outlive the process for a while.
       // SetTcpEntry(DELETE_TCB) needs elevation (often returns 317), so the only
       // reliable non-admin recovery is to wait for the OS to release the TCB.
@@ -139,49 +145,55 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
       dropTcpRows: true,
     });
   }
+  let selected: number;
   try {
-    const selected = await findAvailablePort(preferred, config.hostname ?? "127.0.0.1", {
+    selected = await findAvailablePort(preferred, hostname, {
       // After reclaim, keep probing briefly — ghost rows sometimes clear between
       // the reclaim deadline and the final listen. Still never hop off `--port`.
       preferRetryMs: hardPin ? 5_000 : 750,
       preferRetryIntervalMs: 50,
-      allowEphemeralFallback: !hardPin,
+      allowEphemeralFallback: false,
     });
-    if (preferred > 0 && selected !== preferred) {
-      console.log(`⚠️  Port ${preferred} is busy; starting opencodex on ${selected}.`);
-    }
-    if (shouldPersistSelectedPort(config.port, selected, preferred)) {
-      config.port = selected;
-      saveConfig(config);
-    }
-    return selected;
   } catch (err) {
-    if (err instanceof PortUnavailableError) {
-      console.error(`❌ ${err.message}`);
-      console.error("   Stop whatever holds that port, or change config.port, then retry.");
-      process.exit(1);
+    if (err instanceof PortUnavailableError && !hardPin) {
+      const live = await findLiveProxy();
+      if (live) rejectAlreadyRunning(live);
+      selected = await findAvailablePort(0, hostname);
+      if (preferred > 0) {
+        console.log(`⚠️  Port ${preferred} is busy; starting opencodex on ${selected}.`);
+      }
+    } else {
+      if (err instanceof PortUnavailableError) {
+        console.error(`❌ ${err.message}`);
+        console.error("   Stop whatever holds that port, or change config.port, then retry.");
+        process.exit(1);
+      }
+      throw err;
     }
-    throw err;
   }
+  if (shouldPersistSelectedPort(config.port, selected, preferred)) {
+    config.port = selected;
+    saveConfig(config);
+  }
+  return selected;
 }
 
 async function handleStart(options: { block?: boolean } = {}) {
+  const requestedPort = parsePortOption();
+  const existingPid = readPid();
+  const live = await findLiveProxy();
+  if (live) rejectAlreadyRunning(live, existingPid);
+  maybeAutoRestoreCodexShim(command, args);
+  if (existingPid) {
+    removePid(existingPid);
+  }
+
   // Native (WinSW) service mode has no batch wrapper to read the service token file
   // into the environment, so the app loads it here before the server binds. The server
   // auth path reads OPENCODEX_API_AUTH_TOKEN from the environment.
   const serviceToken = loadServiceTokenFromFile(process.env);
   if (serviceToken) process.env.OPENCODEX_API_AUTH_TOKEN = serviceToken;
-  const requestedPort = parsePortOption();
   if (!currentExternalCodexModelProvider()) reconcileJournal();
-  const existingPid = readPid();
-  if (existingPid) {
-    const live = await findLiveProxy();
-    if (live) {
-      console.error(`⚠️  Proxy already running (PID ${live.pid ?? existingPid}, port ${live.port}). Use 'ocx stop' first.`);
-      process.exit(1);
-    }
-    removePid(existingPid);
-  }
 
   // Interactive-only update prompt. Must run BEFORE we bind a port / write a
   // PID: choosing "Update now" installs globally and exits, so we never want a
@@ -213,6 +225,8 @@ async function handleStart(options: { block?: boolean } = {}) {
         }
         continue;
       }
+      const live = await findLiveProxy();
+      if (live) rejectAlreadyRunning(live);
       console.log(`⚠️  Port ${port} was taken while starting; picking another...`);
       port = await chooseListenPort(requestedPort);
     }

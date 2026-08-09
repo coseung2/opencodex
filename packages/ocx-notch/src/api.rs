@@ -32,6 +32,31 @@ pub fn get_json<T: DeserializeOwned>(path: &str, timeout_ms: i32) -> Result<T, S
     serde_json::from_slice(&body).map_err(|error| format!("Invalid OCX response: {error}"))
 }
 
+pub fn post_json<T: DeserializeOwned>(
+    path: &str,
+    value: &impl serde::Serialize,
+) -> Result<T, String> {
+    let body = serde_json::to_vec(value).map_err(|error| format!("Invalid request: {error}"))?;
+    let response = request("POST", path, Some(&body), 20_000)?;
+    serde_json::from_slice(&response).map_err(|error| format!("Invalid OCX response: {error}"))
+}
+
+pub fn post_empty(path: &str, value: &impl serde::Serialize) -> Result<(), String> {
+    let body = serde_json::to_vec(value).map_err(|error| format!("Invalid request: {error}"))?;
+    request("POST", path, Some(&body), 20_000).map(|_| ())
+}
+
+pub fn post_raw(path: &str, body: &[u8]) -> Result<(), String> {
+    request("POST", path, Some(body), 20_000).map(|_| ())
+}
+
+pub fn valid_provider_name(provider: &str) -> bool {
+    !provider.is_empty()
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 pub fn set_auto_switch_threshold(threshold: u32) -> Result<(), String> {
     let body = format!("{{\"threshold\":{threshold}}}");
     request(
@@ -158,11 +183,8 @@ fn request(
             std::ptr::null_mut(),
         )
         .map_err(win_error)?;
-        if !(200..300).contains(&status) {
-            return Err(format!("OCX returned HTTP {status}"));
-        }
-
         let mut body = Vec::new();
+        const MAX_BODY: usize = 1024 * 1024;
         loop {
             let mut available = 0u32;
             WinHttpQueryDataAvailable(request.0, &mut available).map_err(win_error)?;
@@ -170,6 +192,9 @@ fn request(
                 break;
             }
             let start = body.len();
+            if start.saturating_add(available as usize) > MAX_BODY {
+                return Err("OCX response was too large".into());
+            }
             body.resize(start + available as usize, 0);
             let mut read = 0u32;
             WinHttpReadData(
@@ -181,7 +206,30 @@ fn request(
             .map_err(win_error)?;
             body.truncate(start + read as usize);
         }
+        if !(200..300).contains(&status) {
+            return Err(http_error(status, &body));
+        }
         Ok(body)
+    }
+}
+
+fn http_error(status: u32, body: &[u8]) -> String {
+    let detail = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.replace(['\r', '\n'], " "))
+        .map(|value| value.chars().take(512).collect::<String>());
+    match detail {
+        Some(detail) => format!("OCX returned HTTP {status}: {detail}"),
+        None => format!("OCX returned HTTP {status}"),
     }
 }
 
@@ -254,6 +302,10 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
             }
         }
     };
+    parse_account_pool_value(config.name.clone(), &value)
+}
+
+fn parse_account_pool_value(provider: String, value: &Value) -> AccountPool {
     let active_id = value
         .get("activeAccountId")
         .or_else(|| value.get("activeId"))
@@ -292,13 +344,15 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
                 health,
                 quota: None,
                 paused: false,
+                needs_reauth: account
+                    .get("needsReauth")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                is_main: false,
             })
         })
         .collect();
-    AccountPool {
-        provider: config.name.clone(),
-        accounts,
-    }
+    AccountPool { provider, accounts }
 }
 
 pub fn fetch_codex_account_pool() -> Result<AccountPool, String> {
@@ -310,7 +364,7 @@ pub fn fetch_codex_account_pool() -> Result<AccountPool, String> {
     })
 }
 
-fn encode_component(value: &str) -> String {
+pub fn encode_component(value: &str) -> String {
     value
         .bytes()
         .map(|byte| match byte {
@@ -320,4 +374,64 @@ fn encode_component(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_names_allow_only_single_safe_path_components() {
+        assert!(valid_provider_name("openai-compatible_1.2"));
+        assert!(!valid_provider_name(""));
+        assert!(!valid_provider_name("../openai"));
+        assert!(!valid_provider_name("openai/other"));
+        assert!(!valid_provider_name("openai?admin=true"));
+    }
+
+    #[test]
+    fn provider_query_components_are_percent_encoded() {
+        assert_eq!(encode_component("x ai/한"), "x%20ai%2F%ED%95%9C");
+    }
+
+    #[test]
+    fn generic_pool_parsing_preserves_active_identity_and_reauth_state() {
+        let value = serde_json::json!({
+            "activeAccountId": "second",
+            "accounts": [
+                {"id": "first", "masked": "fir***@example.com"},
+                {
+                    "id": "second",
+                    "label": "work",
+                    "needsReauth": true,
+                    "healthLabel": "Reauth required"
+                }
+            ]
+        });
+
+        let pool = parse_account_pool_value("kiro".into(), &value);
+
+        assert_eq!(pool.provider, "kiro");
+        assert_eq!(pool.accounts[0].identity, "fir***@example.com");
+        assert!(!pool.accounts[0].active);
+        assert_eq!(pool.accounts[1].identity, "work");
+        assert!(pool.accounts[1].active);
+        assert!(pool.accounts[1].needs_reauth);
+        assert_eq!(pool.accounts[1].health, "Reauth required");
+    }
+
+    #[test]
+    fn http_errors_keep_status_and_safe_bounded_json_detail() {
+        assert_eq!(
+            http_error(409, br#"{"error":"login already in progress"}"#),
+            "OCX returned HTTP 409: login already in progress"
+        );
+        assert_eq!(
+            http_error(503, br#"{"message":"retry\r\nsoon"}"#),
+            "OCX returned HTTP 503: retry  soon"
+        );
+        assert_eq!(http_error(500, b"not json"), "OCX returned HTTP 500");
+        let long = format!(r#"{{"error":"{}"}}"#, "x".repeat(600));
+        assert_eq!(http_error(400, long.as_bytes()).len(), 23 + 512);
+    }
 }

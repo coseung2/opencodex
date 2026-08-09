@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -226,6 +226,138 @@ pub struct AccountView {
     pub health: String,
     pub quota: Option<Quota>,
     pub paused: bool,
+    pub needs_reauth: bool,
+    pub is_main: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderPreset {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub adapter: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub auth: String,
+    pub default_model: Option<String>,
+    pub responses_path: Option<String>,
+    pub oauth_provider: Option<String>,
+    pub note: Option<String>,
+    #[serde(default)]
+    pub free_tier: bool,
+    #[serde(default)]
+    pub key_optional: bool,
+    pub codex_account_mode: Option<String>,
+    #[serde(default)]
+    pub base_url_choices: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderPresetAction {
+    CodexAccount,
+    OAuth(String),
+    ApiKey,
+    Unsupported,
+}
+
+pub fn provider_preset_action(preset: &ProviderPreset) -> ProviderPresetAction {
+    if preset.id == "openai"
+        && preset.auth.eq_ignore_ascii_case("forward")
+        && preset.codex_account_mode.is_some()
+    {
+        return ProviderPresetAction::CodexAccount;
+    }
+    if preset.auth.eq_ignore_ascii_case("oauth") {
+        return ProviderPresetAction::OAuth(
+            preset
+                .oauth_provider
+                .clone()
+                .unwrap_or_else(|| preset.id.clone()),
+        );
+    }
+    if preset.auth.eq_ignore_ascii_case("key")
+        && !preset.key_optional
+        && preset.base_url_choices.is_empty()
+        && !preset.base_url.contains(['{', '}'])
+    {
+        return ProviderPresetAction::ApiKey;
+    }
+    ProviderPresetAction::Unsupported
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ProviderPresetsResponse {
+    #[serde(default)]
+    pub providers: Vec<ProviderPreset>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthFlowResponse {
+    pub flow_id: Option<String>,
+    pub url: Option<String>,
+    pub instructions: Option<String>,
+    pub device_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatusResponse {
+    pub status: Option<String>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub logged_in: bool,
+    pub error: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCreateBody<'a> {
+    pub name: &'a str,
+    pub provider: ProviderCreateConfig<'a>,
+    pub set_default: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCreateConfig<'a> {
+    pub adapter: &'a str,
+    pub base_url: &'a str,
+    pub auth_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub responses_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<&'a str>,
+    pub api_key: &'a str,
+}
+
+pub fn provider_create_body<'a>(
+    preset: &'a ProviderPreset,
+    api_key: &'a str,
+) -> Result<ProviderCreateBody<'a>, &'static str> {
+    if provider_preset_action(preset) != ProviderPresetAction::ApiKey {
+        return Err("This provider preset is not a supported API-key preset");
+    }
+    if preset.id.is_empty() || preset.adapter.is_empty() || preset.base_url.is_empty() {
+        return Err("This provider preset is incomplete");
+    }
+    Ok(ProviderCreateBody {
+        name: &preset.id,
+        provider: ProviderCreateConfig {
+            adapter: &preset.adapter,
+            base_url: &preset.base_url,
+            auth_mode: "key",
+            responses_path: preset.responses_path.as_deref(),
+            default_model: preset.default_model.as_deref(),
+            api_key,
+        },
+        set_default: false,
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -235,6 +367,18 @@ pub struct ProviderView {
     pub quota: Option<Quota>,
     pub tokens: u64,
     pub accounts: Vec<AccountView>,
+}
+
+pub fn provider_header_label(provider: &ProviderView) -> String {
+    let label = [" (Codex login)", " (AWS CodeWhisperer)"]
+        .iter()
+        .find_map(|suffix| provider.label.strip_suffix(suffix))
+        .unwrap_or(&provider.label);
+
+    match provider.accounts.iter().find(|account| account.active) {
+        Some(account) => format!("{label} ({})", account.identity),
+        None => label.to_string(),
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -281,6 +425,7 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
         .accounts
         .into_iter()
         .map(|account| {
+            let is_main = account.is_main || account.id == "__main__";
             let identity = account
                 .alias
                 .or(account.email)
@@ -307,6 +452,8 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
                 health,
                 quota,
                 paused: account.paused,
+                needs_reauth: account.needs_reauth,
+                is_main,
             }
         })
         .collect()
@@ -500,6 +647,68 @@ mod tests {
     }
 
     #[test]
+    fn provider_header_replaces_legacy_suffix_with_active_account() {
+        let provider = ProviderView {
+            label: "OpenAI (Codex login)".into(),
+            accounts: vec![
+                AccountView {
+                    identity: "first@example.com".into(),
+                    ..Default::default()
+                },
+                AccountView {
+                    identity: "active@example.com".into(),
+                    active: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            provider_header_label(&provider),
+            "OpenAI (active@example.com)"
+        );
+    }
+
+    #[test]
+    fn provider_header_removes_legacy_suffix_without_active_account() {
+        let provider = ProviderView {
+            label: "Kiro (AWS CodeWhisperer)".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(provider_header_label(&provider), "Kiro");
+    }
+
+    #[test]
+    fn provider_header_keeps_labels_without_legacy_suffix() {
+        let provider = ProviderView {
+            label: "xAI Grok".into(),
+            accounts: vec![AccountView {
+                identity: "masked@example.com".into(),
+                active: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            provider_header_label(&provider),
+            "xAI Grok (masked@example.com)"
+        );
+    }
+
+    #[test]
+    fn provider_header_preserves_meaningful_parenthesized_names() {
+        let provider = ProviderView {
+            label: "Acme (Enterprise)".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(provider_header_label(&provider), "Acme (Enterprise)");
+    }
+
+    #[test]
     fn codex_account_views_preserve_paused_state() {
         let response: CodexAccountsResponse = serde_json::from_str(
             r#"{"accounts":[
@@ -512,6 +721,92 @@ mod tests {
 
         assert!(accounts[0].paused);
         assert!(!accounts[1].paused);
+    }
+
+    #[test]
+    fn codex_account_views_preserve_reauth_and_main_state() {
+        let response: CodexAccountsResponse = serde_json::from_str(
+            r#"{"accounts":[
+                {"id":"__main__","needsReauth":true},
+                {"id":"pool-2","needsReauth":true}
+            ]}"#,
+        )
+        .expect("account response parses");
+        let accounts = codex_account_views(response);
+
+        assert!(accounts[0].needs_reauth);
+        assert!(accounts[0].is_main);
+        assert!(accounts[1].needs_reauth);
+        assert!(!accounts[1].is_main);
+    }
+
+    #[test]
+    fn provider_create_payload_matches_server_contract() {
+        let preset = ProviderPreset {
+            id: "anthropic".into(),
+            adapter: "anthropic".into(),
+            base_url: "https://api.example.test".into(),
+            auth: "key".into(),
+            default_model: Some("model-1".into()),
+            responses_path: Some("/v1/responses".into()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(provider_create_body(&preset, "secret").unwrap())
+            .expect("payload serializes");
+
+        assert_eq!(value["name"], "anthropic");
+        assert_eq!(value["provider"]["authMode"], "key");
+        assert_eq!(value["provider"]["apiKey"], "secret");
+        assert_eq!(value["provider"]["responsesPath"], "/v1/responses");
+        assert_eq!(value["setDefault"], false);
+    }
+
+    #[test]
+    fn canonical_openai_preset_is_an_account_flow_never_a_key_overwrite() {
+        let preset = ProviderPreset {
+            id: "openai".into(),
+            adapter: "openai-responses".into(),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            auth: "forward".into(),
+            codex_account_mode: Some("pool".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            provider_preset_action(&preset),
+            ProviderPresetAction::CodexAccount
+        );
+        assert!(provider_create_body(&preset, "must-not-be-used").is_err());
+    }
+
+    #[test]
+    fn presets_with_unrepresentable_auth_or_endpoint_contracts_are_unsupported() {
+        for preset in [
+            ProviderPreset {
+                auth: "local".into(),
+                ..Default::default()
+            },
+            ProviderPreset {
+                auth: "key".into(),
+                key_optional: true,
+                ..Default::default()
+            },
+            ProviderPreset {
+                auth: "key".into(),
+                base_url_choices: vec![serde_json::json!({"id": "custom"})],
+                ..Default::default()
+            },
+            ProviderPreset {
+                auth: "key".into(),
+                base_url: "https://example.test/{account}/v1".into(),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                provider_preset_action(&preset),
+                ProviderPresetAction::Unsupported
+            );
+        }
     }
 
     #[test]
