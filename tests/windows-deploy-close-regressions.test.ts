@@ -28,8 +28,11 @@ describe("update-job restart avoids the shell-less .cmd EINVAL (Windows, bun/sou
     // Service reinstall still runs (with bake) even when reclaim warns; direct start refuses to hop.
     expect(src).toContain("refusing to hop");
     expect(src).toContain("runtimeTrusted");
-    expect(read("src/cli/index.ts")).toContain("allowEphemeralFallback: !hardPin");
-    expect(read("src/cli/index.ts")).toContain("preferRetryMs: hardPin ? 5_000 : 750");
+    const cli = read("src/cli/index.ts");
+    expect(cli).toContain("allowEphemeralFallback: false");
+    expect(cli).toContain("err instanceof PortUnavailableError && !hardPin");
+    expect(cli).toContain("await findLiveProxy();");
+    expect(cli).toContain("preferRetryMs: hardPin ? 5_000 : 750");
     expect(read("src/cli/index.ts")).toContain("Not opening the GUI");
     expect(read("src/server/ports.ts")).toContain("allowEphemeralFallback");
   });
