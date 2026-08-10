@@ -47,6 +47,8 @@ const RESIZE_EDGE: i32 = 7;
 const COLLAPSED_HEIGHT: i32 = 58;
 const CONTENT_TOP: i32 = 101;
 const USAGE_TOGGLE_HEIGHT: i32 = 42;
+const USAGE_TOGGLE_VERSION_WIDTH: i32 = 140;
+const USAGE_TOGGLE_VERSION_GAP: i32 = 4;
 const LOG_ROW_HEIGHT: i32 = 44;
 const EMPTY_LOG_HEIGHT: i32 = 84;
 const POWER_PROBE_INTERVAL: Duration = Duration::from_millis(75);
@@ -62,6 +64,17 @@ const ACCOUNT_ACTION_GAP: i32 = 4;
 const REAUTH_ACTION_WIDTH: i32 = 142;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 512 * 1024;
+
+fn ocx_version_label() -> &'static str {
+    static LABEL: OnceLock<String> = OnceLock::new();
+    LABEL
+        .get_or_init(|| {
+            let version =
+                std::env::var("OCX_PACKAGE_VERSION").unwrap_or_else(|_| "unknown".to_string());
+            format!("OCX v{version}")
+        })
+        .as_str()
+}
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
 static LUCIDE_FONT_BYTES: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
@@ -244,6 +257,7 @@ struct App {
     provider_modal: Option<ProviderModal>,
     modal_generation: u64,
     api_key_edit: Option<isize>,
+    context_menu_open: bool,
     pause_overrides: HashMap<String, bool>,
     show_usage_only: bool,
     usage_toggle_hit: Option<RECT>,
@@ -597,6 +611,7 @@ fn run() -> windows::core::Result<()> {
             provider_modal: None,
             modal_generation: 0,
             api_key_edit: None,
+            context_menu_open: false,
             pause_overrides: HashMap::new(),
             show_usage_only: false,
             usage_toggle_hit: None,
@@ -1800,6 +1815,7 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_DATA => {
+            let mut context_menu_open = false;
             with_app(|app| {
                 app.drain_updates();
                 if api_key_edit_needs_cleanup(
@@ -1808,9 +1824,15 @@ unsafe extern "system" fn window_proc(
                 ) {
                     unsafe { destroy_api_key_edit(app) };
                 }
+                context_menu_open = app.context_menu_open;
             });
-            resize_for_state(hwnd);
-            let _ = InvalidateRect(hwnd, None, false);
+            // TrackPopupMenu runs a nested message loop. Raising the topmost owner while that
+            // loop is active can put the notch in front of its own popup on Windows. Keep data
+            // fresh, but defer owner-window movement and painting until the menu closes.
+            if !context_menu_open {
+                resize_for_state(hwnd);
+                let _ = InvalidateRect(hwnd, None, false);
+            }
             LRESULT(0)
         }
         WM_PAINT => {
@@ -2812,10 +2834,22 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                 RECT {
                     left: 18,
                     top: y,
-                    right: width - 18,
+                    right: width - 18 - USAGE_TOGGLE_VERSION_WIDTH - USAGE_TOGGLE_VERSION_GAP,
                     bottom: y + USAGE_TOGGLE_HEIGHT,
                 },
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            set_text_color(dc, 0x007a7a7a);
+            draw_text(
+                dc,
+                ocx_version_label(),
+                RECT {
+                    left: width - 18 - USAGE_TOGGLE_VERSION_WIDTH,
+                    top: y,
+                    right: width - 18,
+                    bottom: y + USAGE_TOGGLE_HEIGHT,
+                },
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
         }
         let _ = SelectClipRgn(dc, None);
@@ -4298,7 +4332,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
             MF_STRING
         };
         let label = if threshold == 0 {
-            "Off".to_string()
+            "사용 안 함".to_string()
         } else {
             format!("{threshold}%")
         };
@@ -4314,18 +4348,23 @@ unsafe fn show_context_menu(hwnd: HWND) {
         menu,
         MF_POPUP,
         threshold_menu.0 as usize,
-        w!("Rotation threshold"),
+        w!("자동 전환 기준"),
     );
-    let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_DOWN, w!("Threshold -1%"));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_UP, w!("Threshold +1%"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_DOWN, w!("기준값 -1%"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_UP, w!("기준값 +1%"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-    let _ = AppendMenuW(menu, MF_STRING, MENU_PROVIDER_ADD, w!("Add provider..."));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("Refresh"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_PROVIDER_ADD, w!("프로바이더 추가..."));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-    let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("새로고침"));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("종료"));
     let mut point = POINT::default();
     let _ = GetCursorPos(&mut point);
     let _ = SetForegroundWindow(hwnd);
+    with_app(|app| app.context_menu_open = true);
     let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, None);
+    with_app(|app| app.context_menu_open = false);
     let _ = DestroyMenu(menu);
+    resize_for_state(hwnd);
+    let _ = InvalidateRect(hwnd, None, false);
 }

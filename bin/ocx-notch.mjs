@@ -66,6 +66,10 @@ if (!existsSync(nativeBinary)) {
 
 const child = spawn(nativeBinary, process.argv.slice(2), {
   detached: true,
+  env: {
+    ...process.env,
+    OCX_PACKAGE_VERSION: packageVersion(),
+  },
   stdio: "ignore",
   windowsHide: true,
 });
