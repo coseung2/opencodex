@@ -25,11 +25,18 @@ function configWithProxy(proxy?: string): OcxConfig {
 }
 
 describe("applyProxyEnv", () => {
-  test("no-op when config.proxy is unset", () => {
+  test("leaves proxy variables unset but still excludes loopback when config.proxy is unset", () => {
     applyProxyEnv(configWithProxy(undefined));
     expect(process.env.HTTP_PROXY).toBeUndefined();
     expect(process.env.HTTPS_PROXY).toBeUndefined();
-    expect(process.env.NO_PROXY).toBeUndefined();
+    expect(process.env.NO_PROXY).toBe("localhost,127.0.0.1,::1,[::1]");
+  });
+
+  test("excludes loopback for a user-supplied proxy even without config.proxy", () => {
+    process.env.HTTP_PROXY = "http://user-proxy:3128";
+    applyProxyEnv(configWithProxy(undefined));
+    expect(process.env.HTTP_PROXY).toBe("http://user-proxy:3128");
+    expect(process.env.NO_PROXY).toBe("localhost,127.0.0.1,::1,[::1]");
   });
 
   test("mirrors config.proxy into HTTP(S)_PROXY and excludes loopback (IPv4 + IPv6)", () => {

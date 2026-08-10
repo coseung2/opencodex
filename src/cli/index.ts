@@ -5,6 +5,7 @@ import { stripGrokConfig } from "../grok/inject";
 import { restoreLegacyOpenaiHistory } from "../codex/history-provider";
 import { reconcileJournal } from "../codex/journal";
 import {
+  applyProxyEnv,
   codexAutoStartEnabled,
   getConfigDir,
   loadConfig,
@@ -25,7 +26,7 @@ import { runTrayProxyRestart, runTrayProxyStart } from "./tray-proxy";
 import { installCrashGuards } from "../lib/crash-guard";
 import { hasHelpFlag, printSubcommandUsage, printUsage, printVersion } from "./help";
 import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
-import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
+import { findLiveProxy, probeHostname, proxyIdentityAt, type LiveProxy } from "../server/proxy-liveness";
 import { stopProxy } from "../lib/process-control";
 import { loadServiceTokenFromFile } from "../lib/service-secrets";
 import { diagnoseService, isServiceOwnershipError, serviceCommand, serviceEnvironmentOwnedHere, serviceStartableFromTray, serviceStatusSummary, stopServiceIfInstalled, uninstallServiceIfInstalled } from "../service";
@@ -156,6 +157,15 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
     });
   } catch (err) {
     if (err instanceof PortUnavailableError && !hardPin) {
+      // Runtime files are advisory: a live proxy can still own the preferred listener when
+      // both records are absent or stale. Check that listener before allocating an ephemeral
+      // port, so a missed discovery pass cannot shadow it and overwrite fresh runtime state.
+      if (preferred > 0) {
+        const identity = await proxyIdentityAt(preferred, { hostname });
+        if (identity) {
+          rejectAlreadyRunning({ pid: null, port: preferred, hostname, source: "config" });
+        }
+      }
       const live = await findLiveProxy();
       if (live) rejectAlreadyRunning(live);
       selected = await findAvailablePort(0, hostname);
@@ -180,6 +190,9 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
 
 async function handleStart(options: { block?: boolean } = {}) {
   const requestedPort = parsePortOption();
+  // Identity probes must stay direct even when the shell supplied HTTP_PROXY
+  // without NO_PROXY. startServer applies the same idempotent normalization.
+  applyProxyEnv(loadConfig());
   const existingPid = readPid();
   const live = await findLiveProxy();
   if (live) rejectAlreadyRunning(live, existingPid);
@@ -231,12 +244,23 @@ async function handleStart(options: { block?: boolean } = {}) {
       port = await chooseListenPort(requestedPort);
     }
   }
+  const config = loadConfig();
+  const preferred = requestedPort ?? config.port ?? 10100;
+  if (port !== preferred && preferred > 0) {
+    // Recheck immediately before any runtime-state write: another proxy may have won the
+    // preferred listener after soft fallback selection completed.
+    const identity = await proxyIdentityAt(preferred, { hostname: config.hostname });
+    if (identity) {
+      server.stop(true);
+      rejectAlreadyRunning({ pid: null, port: preferred, hostname: config.hostname, source: "config" });
+    }
+  }
+
   // A single request's streaming error must never crash the daemon serving every
   // other Codex session — capture the full stack to crash.log and stay up.
   installCrashGuards();
   writePid(process.pid);
 
-  const config = loadConfig();
   writeRuntimePort({ pid: process.pid, port, hostname: config.hostname });
   // No pre-emptive snapshot here. `injectCodexConfig` journals the exact bytes it
   // is about to transform; snapshotting earlier only captured a baseline that could

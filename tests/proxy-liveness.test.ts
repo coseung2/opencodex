@@ -27,6 +27,8 @@ describe("isOpencodexHealthz", () => {
 describe("probeHostname", () => {
   test("wildcards and empty answer on IPv4 loopback; concrete hosts pass through", () => {
     expect(probeHostname(undefined)).toBe("127.0.0.1");
+    expect(probeHostname("localhost")).toBe("127.0.0.1");
+    expect(probeHostname("LOCALHOST")).toBe("127.0.0.1");
     expect(probeHostname("0.0.0.0")).toBe("127.0.0.1");
     expect(probeHostname("::")).toBe("127.0.0.1");
     expect(probeHostname("192.168.1.20")).toBe("192.168.1.20");

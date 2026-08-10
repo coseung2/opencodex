@@ -1,12 +1,72 @@
 import { describe, expect, test } from "bun:test";
 import {
   getActiveTurnCount,
+  onActiveTurnsIdle,
   trackActiveTurnLease,
   tryAdmitTurn,
 } from "../src/server/lifecycle";
+import { startMemoryWatchdog } from "../src/server/memory-watchdog";
 import { createSseInspector } from "../src/server/relay";
 
 describe("active turn lifecycle lease", () => {
+  test("notifies idle observers only after the final admitted turn releases", () => {
+    expect(getActiveTurnCount()).toBe(0);
+    const first = tryAdmitTurn();
+    const second = tryAdmitTurn();
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    const observedCounts: number[] = [];
+    const unsubscribe = onActiveTurnsIdle(() => observedCounts.push(getActiveTurnCount()));
+    try {
+      first!.release();
+      expect(observedCounts).toEqual([]);
+      second!.release();
+      expect(observedCounts).toEqual([0]);
+    } finally {
+      first!.release();
+      second!.release();
+      unsubscribe();
+    }
+  });
+
+  test("only reclaims after the actual final turn releases and stays latched for later turns", async () => {
+    let gcCalls = 0;
+    const watchdog = startMemoryWatchdog({
+      intervalMs: 1,
+      pressureThresholdBytes: 2 * 1024 ** 3,
+      platform: "win32",
+      sample: () => ({
+        at: Date.now(),
+        rss: 100 * 1024 ** 2,
+        heapUsed: 1,
+        heapTotal: 2,
+        external: 2 * 1024 ** 3,
+        arrayBuffers: 1,
+      }),
+      gc: () => {
+        expect(getActiveTurnCount()).toBe(0);
+        gcCalls += 1;
+      },
+      warn: () => {},
+    });
+    const admission = tryAdmitTurn();
+    expect(admission).not.toBeNull();
+    try {
+      await Bun.sleep(10);
+      expect(gcCalls).toBe(0);
+      admission!.release();
+      expect(gcCalls).toBe(1);
+
+      const later = tryAdmitTurn();
+      expect(later).not.toBeNull();
+      later!.release();
+      expect(gcCalls).toBe(1);
+    } finally {
+      admission!.release();
+      watchdog.stop();
+    }
+  });
+
   test("releases bookkeeping after a protocol terminal without aborting upstream", async () => {
     const baseline = getActiveTurnCount();
     const admission = tryAdmitTurn();

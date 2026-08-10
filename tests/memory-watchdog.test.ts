@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   getActiveMemoryWatchdog,
   observedMemoryCounter,
+  shouldAttemptMemoryReclamation,
   startMemoryWatchdog,
   type MemorySampleBase,
 } from "../src/server/memory-watchdog";
@@ -53,6 +54,91 @@ function sampleAt(at: number, rssMb: number, externalMb = 1, arrayBuffersMb = 1)
 }
 
 describe("startMemoryWatchdog", () => {
+  test("reclamation policy requires Windows pressure, idle turns, and a supported GC", () => {
+    const base = {
+      observedBytes: 2 * 1024 ** 3,
+      pressureThresholdBytes: 2 * 1024 ** 3,
+      platform: "win32" as const,
+      gcSupported: true,
+      pressureLatched: false,
+    };
+    expect(shouldAttemptMemoryReclamation({ ...base, activeTurns: 0 })).toBe(true);
+    expect(shouldAttemptMemoryReclamation({ ...base, activeTurns: 1 })).toBe(false);
+    expect(shouldAttemptMemoryReclamation({ ...base, platform: "darwin" })).toBe(false);
+    expect(shouldAttemptMemoryReclamation({ ...base, gcSupported: false })).toBe(false);
+    expect(shouldAttemptMemoryReclamation({ ...base, observedBytes: 2 * 1024 ** 3 - 1 })).toBe(false);
+    expect(shouldAttemptMemoryReclamation({ ...base, pressureLatched: true })).toBe(false);
+  });
+
+  test("reclaims once after pressure when idle and does not run GC on every tick", async () => {
+    let gcCalls = 0;
+    startMemoryWatchdog({
+      intervalMs: 1,
+      pressureThresholdBytes: 2 * 1024 ** 3,
+      platform: "win32",
+      activeTurnCount: () => 0,
+      sample: () => sampleAt(1, 100, 2_048, 1),
+      gc: () => { gcCalls += 1; },
+      warn: () => {},
+    });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(gcCalls).toBe(1);
+  });
+
+  test("holds reclamation while a turn is active, then reclaims on the idle transition", async () => {
+    let activeTurns = 1;
+    let gcCalls = 0;
+    startMemoryWatchdog({
+      intervalMs: 1,
+      pressureThresholdBytes: 2 * 1024 ** 3,
+      platform: "win32",
+      activeTurnCount: () => activeTurns,
+      sample: () => sampleAt(1, 100, 2_048, 1),
+      gc: () => { gcCalls += 1; },
+      warn: () => {},
+    });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(gcCalls).toBe(0);
+    activeTurns = 0;
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(gcCalls).toBe(1);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(gcCalls).toBe(1);
+  });
+
+  test("does not reclaim on non-Windows even when pressure is observed", async () => {
+    let gcCalls = 0;
+    startMemoryWatchdog({
+      intervalMs: 1,
+      pressureThresholdBytes: 2 * 1024 ** 3,
+      platform: "linux",
+      activeTurnCount: () => 0,
+      sample: () => sampleAt(1, 100, 2_048, 1),
+      gc: () => { gcCalls += 1; },
+      warn: () => {},
+    });
+    await new Promise(resolve => setTimeout(resolve, 15));
+    expect(gcCalls).toBe(0);
+  });
+
+  test("a collector failure stays contained and remains latched for the pressure episode", async () => {
+    let gcCalls = 0;
+    startMemoryWatchdog({
+      intervalMs: 1,
+      pressureThresholdBytes: 2 * 1024 ** 3,
+      platform: "win32",
+      activeTurnCount: () => 0,
+      sample: () => sampleAt(1, 100, 2_048, 1),
+      gc: () => {
+        gcCalls += 1;
+        throw new Error("synthetic collector failure");
+      },
+      warn: () => {},
+    });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(gcCalls).toBe(1);
+  });
+
   test("ring never exceeds ringSize and keeps the newest samples", async () => {
     let t = 0;
     const wd = startMemoryWatchdog({

@@ -68,7 +68,11 @@ export interface LiveProxy {
  */
 export function probeHostname(hostname: string | undefined): string {
   const trimmed = (hostname ?? "").trim();
-  if (!trimmed || trimmed === "0.0.0.0" || trimmed === "::" || trimmed === "[::]") return "127.0.0.1";
+  if (!trimmed || /^localhost$/i.test(trimmed) || trimmed === "0.0.0.0" || trimmed === "::" || trimmed === "[::]") {
+    // startServer canonicalizes localhost to IPv4 loopback because Codex's injected URL does
+    // the same. Keep liveness probes on that exact address (Windows otherwise prefers ::1).
+    return "127.0.0.1";
+  }
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) return trimmed;
   return trimmed.includes(":") ? `[${trimmed}]` : trimmed;
 }

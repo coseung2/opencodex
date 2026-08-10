@@ -34,6 +34,8 @@ export interface ActiveTurnLease extends AdmissionLease {
 const activeTurns = new Map<AbortController, ActiveTurnLease>();
 const admittedTurns = new Set<ActiveTurnLease>();
 const knownTurnControllers = new WeakSet<AbortController>();
+export type ActiveTurnsIdleListener = () => void;
+const activeTurnsIdleListeners = new Set<ActiveTurnsIdleListener>();
 let turnReleaseMisses = 0;
 let draining = false;
 let recyclingForExit = false;
@@ -41,6 +43,26 @@ let _serverRef: ReturnType<typeof Bun.serve> | undefined;
 
 export function setServerRef(server: ReturnType<typeof Bun.serve> | undefined): void { _serverRef = server; }
 export function setDraining(value: boolean): void { draining = value; }
+/**
+ * Subscribe to the synchronous transition where the final admitted turn is
+ * released. The callback runs after the lease and admission gate are settled,
+ * so an observer can perform an idle-only action without racing a request on
+ * the event loop. Returns an unsubscribe function for bounded observers.
+ */
+export function onActiveTurnsIdle(listener: ActiveTurnsIdleListener): () => void {
+  activeTurnsIdleListeners.add(listener);
+  return () => { activeTurnsIdleListeners.delete(listener); };
+}
+function notifyActiveTurnsIdle(): void {
+  if (admittedTurns.size !== 0) return;
+  for (const listener of [...activeTurnsIdleListeners]) {
+    try {
+      listener();
+    } catch {
+      // An idle observer must never break turn release or request teardown.
+    }
+  }
+}
 export function tryAdmitTurn(): ActiveTurnLease | null {
   const gateLease = turnGate.tryAcquire();
   if (!gateLease) return null;
@@ -68,6 +90,7 @@ export function tryAdmitTurn(): ActiveTurnLease | null {
       }
       controllers.clear();
       gateLease.release();
+      notifyActiveTurnsIdle();
     },
   };
   admittedTurns.add(lease);

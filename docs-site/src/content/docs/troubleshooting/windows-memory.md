@@ -34,7 +34,13 @@ runtime the leak itself remains an upstream problem:
   rate-limited warning when observed memory crosses 4 GiB. Observed memory is
   the largest of RSS, `external`, and `arrayBuffers` (not their sum), because
   Windows working-set/RSS counters can under-report committed external
-  retention.
+  retention. On Windows, when that same observed counter reaches 2 GiB, the
+  watchdog also makes one synchronous `Bun.gc(true)` attempt per pressure
+  episode, but only while the active-turn count is zero. If pressure is first
+  seen during a request, the attempt waits until the final active turn releases;
+  it is not run on every turn. The path is disabled when `Bun.gc` is unavailable
+  and is not used on macOS or Linux. This is a reclamation hint, not a promise
+  that Bun will return every native page to the OS.
 - **`ocx doctor`** — a "Memory / runtime" section shows the *service*
   process's Bun version, RSS, external/ArrayBuffers counters, JS-heap context,
   and stream-mode decision. On the bundled Bun 1.3.14 runtime, `heapUsed` /
@@ -63,8 +69,12 @@ runtime the leak itself remains an upstream problem:
   #32111 fix; today it is opt-in only (see below). On macOS it stays opt-in
   even after such a release — flipping macOS `auto` is a separate decision.
 
-Real-world RSS improvement from these changes is **awaiting verification by
-Windows users** — we do not claim the leak is fixed.
+One Windows Bun 1.3.14 reproduction reached roughly 2.0–2.22 GiB in
+`external`/`arrayBuffers`, with RSS near 1.92 GiB and about 68 MiB of retained
+app-owned state. After the turns became idle, the next GC cycle reduced RSS to
+about 334 MiB. That evidence supports the conditional idle GC as a mitigation,
+but it does not prove that Bun's upstream retention issue is fixed for every
+workload.
 
 Threshold-based auto-restart is deliberately **not** shipped. If the process
 crashes, the service managers (Task Scheduler/WinSW, launchd, systemd) already

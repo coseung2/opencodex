@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const cliPath = fileURLToPath(new URL("../src/cli/index.ts", import.meta.url));
 const bindRacePreloadPath = fileURLToPath(new URL("./fixtures/cli-start-bind-race-preload.ts", import.meta.url));
+const preferredProbePreloadPath = fileURLToPath(new URL("./fixtures/cli-start-preferred-probe-preload.ts", import.meta.url));
 const homes: string[] = [];
 
 function sha256(content: string): string {
@@ -132,6 +133,57 @@ describe("ocx start single-proxy invariant", () => {
       expect(directorySnapshot(codexHome)).toEqual(codexBefore);
       expect(readFileSync(shimPath, "utf8")).toBe(replacementShim);
       expect(readFileSync(shimBackupPath, "utf8")).toBe(priorShimBackup);
+    } finally {
+      proxy.stop(true);
+    }
+  }, { timeout: 30_000 });
+
+  test("probes the preferred listener before fallback when runtime state is stale", async () => {
+    const proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        if (new URL(req.url).pathname === "/healthz") {
+          return Response.json({ service: "opencodex", status: "ok", version: "test", uptime: 1 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const home = mkdtempSync(join(tmpdir(), "ocx-start-preferred-probe-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "ocx-start-preferred-probe-codex-"));
+    homes.push(home, codexHome);
+    writeFileSync(join(home, "config.json"), JSON.stringify({
+      port: proxy.port,
+      hostname: "127.0.0.1",
+      defaultProvider: "mock",
+      providers: {
+        mock: {
+          adapter: "openai-chat",
+          baseUrl: "http://127.0.0.1/v1",
+          allowPrivateNetwork: true,
+        },
+      },
+    }), "utf8");
+    writeFileSync(join(home, "ocx.pid"), "999999\n", "utf8");
+    writeFileSync(join(home, "runtime-port.json"), JSON.stringify({
+      pid: 999999,
+      port: 60875,
+      hostname: "127.0.0.1",
+    }), "utf8");
+    writeFileSync(join(codexHome, "config.toml"), 'model_provider = "openai"\n', "utf8");
+    const opencodexBefore = directorySnapshot(home);
+
+    try {
+      const { status, stdout, stderr } = await runStart(home, codexHome, { preload: preferredProbePreloadPath });
+
+      expect(status).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain(`Proxy already running (PID unknown, port ${proxy.port})`);
+      expect(stderr).not.toContain("unexpected duplicate startServer invocation");
+      expect(directorySnapshot(home)).toEqual(opencodexBefore);
+      expect(await (await fetch(`http://127.0.0.1:${proxy.port}/healthz`)).json()).toMatchObject({
+        service: "opencodex",
+      });
     } finally {
       proxy.stop(true);
     }

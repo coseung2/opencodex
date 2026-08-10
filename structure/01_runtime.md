@@ -34,7 +34,8 @@ there. Feature code is grouped by responsibility:
 `management-api.ts` owns `/api/*`;
 `lifecycle.ts`, `request-log.ts`, `relay.ts` (incl. the shared `createSseInspector` SSE inspection
 factory), `relay-eager.ts` (#314 gated eager bounded passthrough relay), `memory-watchdog.ts`
-(warn-only RSS sampler), `management/system-routes.ts` (`/api/system/*`), and `auth-cors.ts` own
+(memory sampler plus Windows pressure-triggered idle GC hint), `management/system-routes.ts`
+(`/api/system/*`), and `auth-cors.ts` own
 server infrastructure (`src/lib/bun-stream-caps.ts` owns the Bun stream-capability gate); and
 static GUI, WebSocket bridge, port/liveness, decompression, and adapter-resolution helpers live in
 their own files.
