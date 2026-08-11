@@ -305,7 +305,11 @@ await assertUnusedReleaseVersion(packageName, version);
 console.log("→ typecheck");
 await runLoud(["bun", "x", "tsc", "--noEmit"]);
 console.log("→ test suite");
-await runLoud(["bun", "test", "--isolate", "tests"]);
+// A release preflight runs the full suite in one process and can transiently
+// exceed Bun's 5 s per-test default on loaded Windows hosts. Keep this bounded;
+// the required Cross-platform CI run below still exercises the repository's
+// normal 5 s default before the release workflow can be dispatched.
+await runLoud(["bun", "test", "--isolate", "--timeout", "15000", "tests"]);
 console.log("→ privacy scan");
 await runLoud(["bun", "run", "privacy:scan"]);
 
