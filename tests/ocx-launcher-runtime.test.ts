@@ -190,7 +190,7 @@ async function effectiveRuntime(override: string): Promise<string> {
     launcher = spawn("node", [BIN_OCX, "start", "--port", String(port)], {
       stdio: "ignore",
       windowsHide: true,
-      env: isolatedLauncherEnv(root, override),
+      env: isolatedLauncherEnv(root, override, port),
     });
     if (!launcher.pid) throw new Error("Node launcher has no process id");
     launcherPid = launcher.pid;
@@ -282,13 +282,16 @@ async function effectiveRuntime(override: string): Promise<string> {
   return runtimePath;
 }
 
-function isolatedLauncherEnv(root: string, override: string): NodeJS.ProcessEnv {
+function isolatedLauncherEnv(root: string, override: string, configuredPort?: number): NodeJS.ProcessEnv {
   const opencodexHome = join(root, "opencodex");
   const codexHome = join(root, "codex");
   const grokHome = join(root, "grok");
   mkdirSync(opencodexHome, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(grokHome, { recursive: true });
+  if (configuredPort !== undefined) {
+    writeFileSync(join(opencodexHome, "config.json"), `${JSON.stringify({ port: configuredPort })}\n`, "utf8");
+  }
   return {
     ...process.env,
     HOME: root,
