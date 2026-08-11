@@ -866,6 +866,10 @@ fn reauth_eligible(provider: &str, account: &AccountView) -> bool {
     account.needs_reauth && !(provider == "openai" && (account.is_main || account.id == "__main__"))
 }
 
+fn reauth_text_color(_waiting: bool) -> u32 {
+    0x0024bffb
+}
+
 fn set_openai_account_paused(pools: &mut [AccountPool], id: &str, paused: bool) -> bool {
     let Some(account) = pools
         .iter_mut()
@@ -2747,7 +2751,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                             let waiting = app
                                 .reauth_mutations
                                 .contains_key(&reauth_mutation_key(&control));
-                            set_text_color(dc, if waiting { 0x0024bffb } else { 0x008edbc0 });
+                            set_text_color(dc, reauth_text_color(waiting));
                             draw_text(
                                 dc,
                                 if waiting {
@@ -3594,13 +3598,21 @@ unsafe fn set_text_color(dc: HDC, color: u32) {
     let _ = SetTextColor(dc, COLORREF(color));
 }
 
+fn gdi_text_units(text: &str) -> Option<Vec<u16>> {
+    (!text.is_empty()).then(|| text.encode_utf16().collect())
+}
+
 unsafe fn draw_text(dc: HDC, text: &str, mut rect: RECT, format: DRAW_TEXT_FORMAT) {
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let Some(mut wide) = gdi_text_units(text) else {
+        return;
+    };
     let _ = DrawTextW(dc, &mut wide, &mut rect, format);
 }
 
 unsafe fn measure_text_width(dc: HDC, text: &str) -> i32 {
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let Some(mut wide) = gdi_text_units(text) else {
+        return 0;
+    };
     let mut rect = RECT::default();
     let _ = DrawTextW(
         dc,
@@ -3970,9 +3982,30 @@ mod account_control_tests {
     }
 
     #[test]
+    fn reauth_and_waiting_states_share_the_attention_color() {
+        assert_eq!(reauth_text_color(false), 0x0024bffb);
+        assert_eq!(reauth_text_color(true), 0x0024bffb);
+    }
+
+    #[test]
+    fn empty_text_never_reaches_win32_gdi() {
+        assert_eq!(gdi_text_units(""), None);
+        assert_eq!(
+            gdi_text_units("재인증"),
+            Some("재인증".encode_utf16().collect())
+        );
+    }
+
+    #[test]
     fn provider_catalog_matches_account_free_paid_tabs() {
         let oauth = ProviderPreset {
             auth: "oauth".into(),
+            ..Default::default()
+        };
+        let kiro = ProviderPreset {
+            id: "kiro".into(),
+            auth: "oauth".into(),
+            oauth_provider: Some("kiro".into()),
             ..Default::default()
         };
         let free = ProviderPreset {
@@ -3985,6 +4018,11 @@ mod account_control_tests {
             ..Default::default()
         };
         assert_eq!(provider_catalog_tab(&oauth), ProviderCatalogTab::Accounts);
+        assert_eq!(
+            provider_preset_action(&kiro),
+            ProviderPresetAction::OAuth("kiro".into())
+        );
+        assert_eq!(provider_catalog_tab(&kiro), ProviderCatalogTab::Accounts);
         assert_eq!(provider_catalog_tab(&free), ProviderCatalogTab::Free);
         assert_eq!(provider_catalog_tab(&paid), ProviderCatalogTab::Paid);
     }

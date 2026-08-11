@@ -673,6 +673,15 @@ describe("provider registry parity", () => {
       auth: "oauth",
       defaultModel: "auto",
     });
+    const kiroPreset = presets.find(p => p.id === "kiro");
+    expect(kiroPreset).toMatchObject({
+      adapter: "kiro",
+      auth: "oauth",
+      oauthProvider: "kiro",
+      defaultModel: "kiro-auto",
+    });
+    expect(kiroPreset?.baseUrl).toBe(OAUTH_PROVIDERS.kiro.providerConfig.baseUrl);
+    expect(featured).not.toContain("kiro");
     expect(presets.find(p => p.id === "kimi")?.baseUrl).toBe("https://api.kimi.com/coding/v1");
     expect(presets.find(p => p.id === "anthropic")?.defaultModel).toBe("claude-sonnet-5");
     expect(presets.find(p => p.id === "umans")).toMatchObject({
