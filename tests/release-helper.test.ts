@@ -39,7 +39,7 @@ appendFileSync(process.env.FAKE_RELEASE_LOG, JSON.stringify({ name: "bun", args 
 
 const exitCode =
   args[0] === "x" && args[1] === "tsc" ? Number(process.env.FAKE_BUN_TSC_EXIT_CODE ?? "0")
-  : args[0] === "test" && args[1] === "--isolate" && args[2] === "--timeout" && args[3] === "15000" && args[4] === "tests" ? Number(process.env.FAKE_BUN_TEST_EXIT_CODE ?? "0")
+  : args[0] === "run" && args[1] === "test" ? Number(process.env.FAKE_BUN_TEST_EXIT_CODE ?? "0")
   : args[0] === "run" && args[1] === "privacy:scan" ? Number(process.env.FAKE_BUN_PRIVACY_EXIT_CODE ?? "0")
   : 0;
 
@@ -235,7 +235,7 @@ describe("release helper", () => {
     expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
 
     const typecheckIndex = findCallIndex(calls, "bun", call => call.args.join(" ") === "x tsc --noEmit");
-    const testIndex = findCallIndex(calls, "bun", call => call.args.join(" ") === "test --isolate --timeout 15000 tests");
+    const testIndex = findCallIndex(calls, "bun", call => call.args.join(" ") === "run test");
     const privacyIndex = findCallIndex(calls, "bun", call => call.args.join(" ") === "run privacy:scan");
     const versionIndex = findCallIndex(calls, "npm", call => call.args.join(" ") === "version 9.9.9 --no-git-tag-version");
     const dispatchIndex = findCallIndex(calls, "gh", call =>
@@ -287,6 +287,18 @@ describe("release helper", () => {
       && call.args.includes("tag=next")
       && call.args.includes("dry-run=true"),
     )).toBeGreaterThanOrEqual(0);
+  });
+
+  test("an unused version already in package.json resumes from the current HEAD", () => {
+    const currentVersion = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).version as string;
+    const { calls, result } = runRelease(currentVersion, { headSha: "resume123" });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`package.json already at ${currentVersion}; resume release from current HEAD`);
+    expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
+    expect(findCallIndex(calls, "git", call => call.args[0] === "commit")).toBe(-1);
+    expect(findCallIndex(calls, "git", call => call.args[0] === "push" && call.args[1] === "origin" && call.args[2] === "main")).toBeGreaterThanOrEqual(0);
+    expect(findCallIndex(calls, "gh", call => call.args.includes("expected-sha=resume123"))).toBeGreaterThanOrEqual(0);
   });
 
   test("main rejects unrelated prerelease channels", () => {

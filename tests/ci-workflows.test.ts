@@ -51,7 +51,7 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093");
     expect(workflow).toContain("cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml");
     expect(workflow).toContain("name: ocx-notch-win32-x64");
-    expect(workflow).toContain("bun test --isolate tests");
+    expect(workflow).toContain("run: bun run test");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
   });
 

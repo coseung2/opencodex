@@ -101,14 +101,18 @@ async function runLoud(command: string[]): Promise<void> {
   }
 }
 
-async function readPackageName(): Promise<string> {
+async function readPackageMetadata(): Promise<{ name: string; version: string }> {
   try {
-    const pkg = JSON.parse(await Bun.file("package.json").text()) as { name?: unknown };
+    const pkg = JSON.parse(await Bun.file("package.json").text()) as { name?: unknown; version?: unknown };
     if (typeof pkg.name !== "string" || !pkg.name) {
       console.error("✗ package.json is missing a valid name");
       process.exit(1);
     }
-    return pkg.name;
+    if (typeof pkg.version !== "string" || !pkg.version) {
+      console.error("✗ package.json is missing a valid version");
+      process.exit(1);
+    }
+    return { name: pkg.name, version: pkg.version };
   } catch (error) {
     console.error(`✗ failed to read package.json: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
@@ -299,27 +303,30 @@ if (branch === "main" && version.includes("-") && !version.includes("-cs.")) {
 }
 if (!allowedBranches.includes(branch)) { console.error(`✗ must be on ${allowedBranches.join(" or ")} (currently ${branch}).`); process.exit(1); }
 if ((await capture(["git", "status", "--porcelain"])).trim()) { console.error("✗ working tree not clean — commit or stash first."); process.exit(1); }
-const packageName = await readPackageName();
+const { name: packageName, version: currentPackageVersion } = await readPackageMetadata();
 console.log(`→ release metadata preflight (${packageName}@${version})`);
 await assertUnusedReleaseVersion(packageName, version);
 console.log("→ typecheck");
 await runLoud(["bun", "x", "tsc", "--noEmit"]);
 console.log("→ test suite");
-// A release preflight runs the full suite in one process and can transiently
-// exceed Bun's 5 s per-test default on loaded Windows hosts. Keep this bounded;
-// the required Cross-platform CI run below still exercises the repository's
-// normal 5 s default before the release workflow can be dispatched.
-await runLoud(["bun", "test", "--isolate", "--timeout", "15000", "tests"]);
+await runLoud(["bun", "run", "test"]);
 console.log("→ privacy scan");
 await runLoud(["bun", "run", "privacy:scan"]);
 
 // 2. Bump package.json only; the workflow creates the version tag after npm publish.
-console.log(`→ bump package.json → ${version}`);
-await runLoud(["npm", "version", version, "--no-git-tag-version"]);
+// A failed CI gate can leave the version commit on the branch without using any
+// public release metadata. In that state, resume from the current clean HEAD
+// instead of fabricating another version commit or bypassing the release helper.
+if (currentPackageVersion === version) {
+  console.log(`→ package.json already at ${version}; resume release from current HEAD`);
+} else {
+  console.log(`→ bump package.json → ${version}`);
+  await runLoud(["npm", "version", version, "--no-git-tag-version"]);
+  await runLoud(["git", "add", "package.json"]);
+  await runLoud(["git", "commit", "-m", `release: v${version}`]);
+}
 
-// 3. Commit + push the version bump.
-await runLoud(["git", "add", "package.json"]);
-await runLoud(["git", "commit", "-m", `release: v${version}`]);
+// 3. Push the exact candidate (a new version commit or a verified resume HEAD).
 const releaseSha = await capture(["git", "rev-parse", "HEAD"]);
 console.log(`→ push origin ${branch}`);
 await runLoud(["git", "push", "origin", branch]);

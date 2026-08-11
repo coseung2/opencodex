@@ -177,7 +177,7 @@ jobs:
         run: bun x tsc --noEmit
 
       - name: Test
-        run: bun test --isolate tests
+        run: bun run test
 
       - name: GUI tests
         run: cd gui && bun test tests
