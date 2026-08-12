@@ -222,6 +222,8 @@ pub struct CodexAccountsResponse {
 pub struct AccountView {
     pub id: String,
     pub identity: String,
+    /// Auth kind that owns this account: "codex" | "oauth" | "key".
+    pub kind: String,
     pub active: bool,
     pub health: String,
     pub quota: Option<Quota>,
@@ -448,6 +450,7 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
             AccountView {
                 id: account.id,
                 identity,
+                kind: "codex".into(),
                 active: account.is_main,
                 health,
                 quota,
@@ -466,6 +469,34 @@ pub fn mark_codex_active_account(pools: &mut [AccountPool], active_id: Option<&s
     if let Some(pool) = pools.iter_mut().find(|pool| pool.provider == "openai") {
         for account in &mut pool.accounts {
             account.active = account.id == active_id;
+        }
+    }
+}
+
+/// Optimistically mark `id` active in `provider`'s pool; returns the previously
+/// active account id (if any) so a failed switch can be reverted.
+pub fn mark_active_account(
+    pools: &mut [AccountPool],
+    provider: &str,
+    id: &str,
+) -> Option<String> {
+    let pool = pools.iter_mut().find(|pool| pool.provider == provider)?;
+    let previous = pool
+        .accounts
+        .iter()
+        .find(|account| account.active)
+        .map(|account| account.id.clone());
+    for account in &mut pool.accounts {
+        account.active = account.id == id;
+    }
+    previous
+}
+
+/// Revert an optimistic active switch back to `id` (the previously active account).
+pub fn restore_active_account(pools: &mut [AccountPool], provider: &str, id: &str) {
+    if let Some(pool) = pools.iter_mut().find(|pool| pool.provider == provider) {
+        for account in &mut pool.accounts {
+            account.active = account.id == id;
         }
     }
 }
@@ -644,6 +675,47 @@ mod tests {
 
         assert!(!pools[0].accounts[0].active);
         assert!(pools[0].accounts[1].active);
+    }
+
+    #[test]
+    fn active_switch_marks_one_account_and_returns_previous() {
+        let mut pools = vec![AccountPool {
+            provider: "opencode-go".into(),
+            accounts: vec![
+                AccountView {
+                    id: "first".into(),
+                    kind: "key".into(),
+                    active: true,
+                    ..Default::default()
+                },
+                AccountView {
+                    id: "second".into(),
+                    kind: "key".into(),
+                    ..Default::default()
+                },
+            ],
+        }];
+
+        let previous = mark_active_account(&mut pools, "opencode-go", "second");
+
+        assert_eq!(previous.as_deref(), Some("first"));
+        assert!(!pools[0].accounts[0].active);
+        assert!(pools[0].accounts[1].active);
+
+        restore_active_account(&mut pools, "opencode-go", "first");
+        assert!(pools[0].accounts[0].active);
+        assert!(!pools[0].accounts[1].active);
+    }
+
+    #[test]
+    fn codex_account_views_carry_the_codex_kind() {
+        let views = codex_account_views(CodexAccountsResponse {
+            accounts: vec![CodexAccount {
+                id: "pool-a".into(),
+                ..Default::default()
+            }],
+        });
+        assert_eq!(views[0].kind, "codex");
     }
 
     #[test]

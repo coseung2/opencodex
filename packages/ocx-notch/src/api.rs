@@ -277,12 +277,16 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
     }
 
     let mode = config.auth_mode.as_deref().unwrap_or_default();
+    let kind = if mode == "oauth" { "oauth" } else { "key" };
     let path = match mode {
         "oauth" => format!(
             "/api/oauth/accounts?provider={}",
             encode_component(&config.name)
         ),
-        "key" => format!(
+        // Registry-seeded key providers may omit authMode entirely; the server
+        // treats a missing mode as API-key auth (isKeyAuthProvider), so the
+        // masked keys must show up here too.
+        "key" | "" => format!(
             "/api/providers/keys?name={}",
             encode_component(&config.name)
         ),
@@ -302,10 +306,10 @@ pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
             }
         }
     };
-    parse_account_pool_value(config.name.clone(), &value)
+    parse_account_pool_value(config.name.clone(), kind, &value)
 }
 
-fn parse_account_pool_value(provider: String, value: &Value) -> AccountPool {
+fn parse_account_pool_value(provider: String, kind: &str, value: &Value) -> AccountPool {
     let active_id = value
         .get("activeAccountId")
         .or_else(|| value.get("activeId"))
@@ -340,6 +344,7 @@ fn parse_account_pool_value(provider: String, value: &Value) -> AccountPool {
             Some(AccountView {
                 id,
                 identity,
+                kind: kind.to_string(),
                 active,
                 health,
                 quota: None,
@@ -353,6 +358,29 @@ fn parse_account_pool_value(provider: String, value: &Value) -> AccountPool {
         })
         .collect();
     AccountPool { provider, accounts }
+}
+
+/// Make one account the active account for its provider. `kind` is the account's
+/// auth kind ("codex" | "oauth" | "key"), which selects the matching endpoint.
+pub fn set_active_account(provider: &str, kind: &str, id: &str) -> Result<(), String> {
+    let (path, body) = match kind {
+        "codex" => (
+            "/api/codex-auth/active",
+            serde_json::json!({ "accountId": id }),
+        ),
+        "oauth" => (
+            "/api/oauth/accounts/active",
+            serde_json::json!({ "provider": provider, "accountId": id }),
+        ),
+        "key" => (
+            "/api/providers/keys/active",
+            serde_json::json!({ "name": provider, "id": id }),
+        ),
+        _ => return Err("Unknown account kind".into()),
+    };
+    let body = body.to_string();
+    request("PUT", path, Some(body.as_bytes()), 10_000)?;
+    Ok(())
 }
 
 pub fn fetch_codex_account_pool() -> Result<AccountPool, String> {
@@ -409,10 +437,12 @@ mod tests {
             ]
         });
 
-        let pool = parse_account_pool_value("kiro".into(), &value);
+        let pool = parse_account_pool_value("kiro".into(), "oauth", &value);
 
         assert_eq!(pool.provider, "kiro");
         assert_eq!(pool.accounts[0].identity, "fir***@example.com");
+        assert_eq!(pool.accounts[0].kind, "oauth");
+        assert_eq!(pool.accounts[1].kind, "oauth");
         assert!(!pool.accounts[0].active);
         assert_eq!(pool.accounts[1].identity, "work");
         assert!(pool.accounts[1].active);

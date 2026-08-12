@@ -98,6 +98,13 @@ struct AccountControl {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+struct AccountSwitchControl {
+    provider: String,
+    id: String,
+    kind: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct ReauthControl {
     provider: String,
     id: String,
@@ -248,14 +255,19 @@ struct App {
     expanded_providers: HashSet<String>,
     provider_hits: Vec<(RECT, String)>,
     account_pause_hits: Vec<(RECT, AccountControl)>,
+    account_switch_hits: Vec<(RECT, AccountSwitchControl)>,
     account_reauth_hits: Vec<(RECT, ReauthControl)>,
     modal_hits: Vec<(RECT, ModalHit)>,
     hot_account_control: Option<AccountControl>,
+    hot_account_switch: Option<AccountSwitchControl>,
     hot_reauth_control: Option<ReauthControl>,
     pressed_account_control: Option<AccountControl>,
+    pressed_account_switch: Option<AccountSwitchControl>,
     pressed_reauth_control: Option<ReauthControl>,
     pressed_modal_hit: Option<ModalHit>,
     account_mutations: HashSet<String>,
+    account_switch_mutations: HashSet<String>,
+    switch_previous_active: HashMap<String, Option<String>>,
     reauth_mutations: HashMap<String, Arc<AuthCancellation>>,
     provider_modal: Option<ProviderModal>,
     modal_generation: u64,
@@ -602,14 +614,19 @@ fn run() -> windows::core::Result<()> {
             expanded_providers: HashSet::new(),
             provider_hits: Vec::new(),
             account_pause_hits: Vec::new(),
+            account_switch_hits: Vec::new(),
             account_reauth_hits: Vec::new(),
             modal_hits: Vec::new(),
             hot_account_control: None,
+            hot_account_switch: None,
             hot_reauth_control: None,
             pressed_account_control: None,
+            pressed_account_switch: None,
             pressed_reauth_control: None,
             pressed_modal_hit: None,
             account_mutations: HashSet::new(),
+            account_switch_mutations: HashSet::new(),
+            switch_previous_active: HashMap::new(),
             reauth_mutations: HashMap::new(),
             provider_modal: None,
             modal_generation: 0,
@@ -927,6 +944,67 @@ fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
                     app.pause_overrides.remove(&id);
                     set_openai_account_paused(&mut app.state.pools, &id, !paused);
                     app.rebuild_provider_views();
+                    app.state.status = error;
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn account_switch_mutation_key(provider: &str, id: &str) -> String {
+    format!("{provider}:{id}")
+}
+
+fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
+    let mut started = false;
+    let mut identity = String::new();
+    with_app(|app| {
+        let key = account_switch_mutation_key(&control.provider, &control.id);
+        if app.account_switch_mutations.contains(&key) {
+            return;
+        }
+        app.account_switch_mutations.insert(key.clone());
+        let previous = mark_active_account(&mut app.state.pools, &control.provider, &control.id);
+        app.switch_previous_active.insert(key, previous);
+        app.rebuild_provider_views();
+        identity = app
+            .state
+            .pools
+            .iter()
+            .find(|pool| pool.provider == control.provider)
+            .and_then(|pool| pool.accounts.iter().find(|account| account.id == control.id))
+            .map(|account| account.identity.clone())
+            .unwrap_or_else(|| control.id.clone());
+        app.state.status = format!("Switching to {identity}…");
+        started = true;
+    });
+    if !started {
+        return;
+    }
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::set_active_account(&control.provider, &control.kind, &control.id);
+        with_app(|app| {
+            let key = account_switch_mutation_key(&control.provider, &control.id);
+            app.account_switch_mutations.remove(&key);
+            let previous = app.switch_previous_active.remove(&key).flatten();
+            match result {
+                Ok(()) => {
+                    app.state.status = format!("Active: {identity}");
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => {
+                    if let Some(previous) = previous {
+                        restore_active_account(&mut app.state.pools, &control.provider, &previous);
+                        app.rebuild_provider_views();
+                    }
                     app.state.status = error;
                 }
             }
@@ -1940,6 +2018,11 @@ unsafe extern "system" fn window_proc(
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
+                let account_switch = app
+                    .account_switch_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
                 let reauth_control = app
                     .account_reauth_hits
                     .iter()
@@ -1959,9 +2042,20 @@ unsafe extern "system" fn window_proc(
                     app.drag_origin = None;
                     app.drag_moved = false;
                     app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
+                } else if let Some(control) = account_switch {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_account_control = None;
+                    app.pressed_account_switch = Some(control);
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
                 } else if let Some(control) = account_control {
                     app.resize_origin = None;
                     app.pressed_button = None;
+                    app.pressed_account_switch = None;
                     app.pressed_account_control = Some(control);
                     app.button_inside = false;
                     app.drag_origin = None;
@@ -1971,6 +2065,7 @@ unsafe extern "system" fn window_proc(
                     app.resize_origin = None;
                     app.pressed_button = None;
                     app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
                     app.pressed_reauth_control = Some(control);
                     app.button_inside = false;
                     app.drag_origin = None;
@@ -1982,6 +2077,7 @@ unsafe extern "system" fn window_proc(
                     app.drag_origin = None;
                     app.drag_moved = false;
                     app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
                     button_down = true;
                 } else if app.minimize_hot {
                     app.pressed_button = Some(Button::Minimize);
@@ -1989,6 +2085,7 @@ unsafe extern "system" fn window_proc(
                     app.drag_origin = None;
                     app.drag_moved = false;
                     app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
                     button_down = true;
                 } else {
                     app.resize_origin = None;
@@ -1997,6 +2094,7 @@ unsafe extern "system" fn window_proc(
                     app.drag_origin = Some((cursor, window));
                     app.drag_moved = false;
                     app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
                 }
             });
             let _ = SetCapture(hwnd);
@@ -2024,6 +2122,11 @@ unsafe extern "system" fn window_proc(
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
+                let hot_account_switch = app
+                    .account_switch_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
                 let hot_reauth_control = app
                     .account_reauth_hits
                     .iter()
@@ -2036,6 +2139,7 @@ unsafe extern "system" fn window_proc(
                 if app.power_hot != power_hot
                     || app.minimize_hot != minimize_hot
                     || app.hot_account_control != hot_account_control
+                    || app.hot_account_switch != hot_account_switch
                     || app.hot_reauth_control != hot_reauth_control
                     || app.hot_tab != hot_tab
                 {
@@ -2044,6 +2148,7 @@ unsafe extern "system" fn window_proc(
                 app.power_hot = power_hot;
                 app.minimize_hot = minimize_hot;
                 app.hot_account_control = hot_account_control;
+                app.hot_account_switch = hot_account_switch;
                 app.hot_reauth_control = hot_reauth_control;
                 app.hot_tab = hot_tab;
                 if let Some(button) = app.pressed_button {
@@ -2056,6 +2161,7 @@ unsafe extern "system" fn window_proc(
                     }
                     app.button_inside = inside;
                 } else if app.pressed_account_control.is_some()
+                    || app.pressed_account_switch.is_some()
                     || app.pressed_reauth_control.is_some()
                 {
                     // Account controls never initiate a window drag.
@@ -2105,12 +2211,14 @@ unsafe extern "system" fn window_proc(
             let mut handled_button = false;
             let mut power_action = None;
             let mut pause_action = None;
+            let mut switch_action = None;
             let mut reauth_action = None;
             let mut modal_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
                 let pressed_button = app.pressed_button.take();
                 let pressed_account_control = app.pressed_account_control.take();
+                let pressed_account_switch = app.pressed_account_switch.take();
                 let pressed_reauth_control = app.pressed_reauth_control.take();
                 let pressed_modal_hit = app.pressed_modal_hit.take();
                 let button_inside = app.button_inside;
@@ -2140,6 +2248,24 @@ unsafe extern "system" fn window_proc(
                         reauth_action = Some(control);
                     }
                     handled_button = true;
+                    return;
+                }
+                if let Some(control) = pressed_account_switch {
+                    handled_button = true;
+                    changed = true;
+                    let released_inside = app.account_switch_hits.iter().any(|(rect, hit)| {
+                        *hit == control
+                            && point_in(rect, x, y)
+                            && !app
+                                .account_switch_mutations
+                                .contains(&account_switch_mutation_key(
+                                    &control.provider,
+                                    &control.id,
+                                ))
+                    });
+                    if released_inside {
+                        switch_action = Some(control);
+                    }
                     return;
                 }
                 if let Some(control) = pressed_account_control {
@@ -2229,6 +2355,9 @@ unsafe extern "system" fn window_proc(
             if let Some((id, paused)) = pause_action {
                 launch_pause_action(hwnd, id, paused);
             }
+            if let Some(control) = switch_action {
+                launch_switch_action(hwnd, control);
+            }
             if let Some(control) = reauth_action {
                 launch_reauth(hwnd, control);
             }
@@ -2307,6 +2436,7 @@ unsafe extern "system" fn window_proc(
                 app.drag_moved = false;
                 app.pressed_button = None;
                 app.pressed_account_control = None;
+                app.pressed_account_switch = None;
                 app.pressed_reauth_control = None;
                 app.pressed_modal_hit = None;
                 app.button_inside = false;
@@ -2475,6 +2605,7 @@ unsafe fn draw_frame(dc: HDC, width: i32, height: i32) {
 unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.provider_hits.clear();
     app.account_pause_hits.clear();
+    app.account_switch_hits.clear();
     app.account_reauth_hits.clear();
     app.modal_hits.clear();
     app.usage_toggle_hit = None;
@@ -2749,37 +2880,69 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             y += provider_height;
             if app.expanded_providers.contains(&provider.name) {
                 let show_pause_control = provider.name == "openai";
+                let pool_size = provider.accounts.len();
                 for account in provider.accounts {
                     let account_height = account_height(&account);
                     let reauth = reauth_eligible(&provider.name, &account);
                     let reauth_rect = reauth_action_rect(width, y);
                     let identity_width = measure_text_width(dc, &account.identity);
                     let action_rect = account_action_rect(width, y, identity_width);
-                    let busy = app.account_mutations.contains(&account.id);
+                    let show_switch_control = !account.active && pool_size > 1;
+                    let switch_rect = if show_pause_control {
+                        RECT {
+                            left: action_rect.left - ACCOUNT_ACTION_GAP - ACCOUNT_ACTION_WIDTH,
+                            top: action_rect.top,
+                            right: action_rect.left - ACCOUNT_ACTION_GAP,
+                            bottom: action_rect.bottom,
+                        }
+                    } else {
+                        action_rect
+                    };
+                    let pause_busy = app.account_mutations.contains(&account.id);
+                    let switch_busy = app
+                        .account_switch_mutations
+                        .contains(&account_switch_mutation_key(&provider.name, &account.id));
                     set_text_color(dc, 0x00c7cbd2);
+                    let identity_right = if show_switch_control {
+                        switch_rect.left - ACCOUNT_ACTION_GAP
+                    } else if show_pause_control {
+                        action_rect.left - ACCOUNT_ACTION_GAP
+                    } else if reauth {
+                        reauth_rect.left - ACCOUNT_ACTION_GAP
+                    } else {
+                        width - 250
+                    };
                     draw_text(
                         dc,
                         &account.identity,
                         RECT {
                             left: ACCOUNT_IDENTITY_LEFT,
                             top: y,
-                            right: if show_pause_control {
-                                action_rect.left - ACCOUNT_ACTION_GAP
-                            } else if reauth {
-                                reauth_rect.left - ACCOUNT_ACTION_GAP
-                            } else {
-                                width - 250
-                            },
+                            right: identity_right,
                             bottom: y + 30,
                         },
                         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                     );
+                    if show_switch_control {
+                        let control = AccountSwitchControl {
+                            provider: provider.name.clone(),
+                            id: account.id.clone(),
+                            kind: account.kind.clone(),
+                        };
+                        let hot = !switch_busy && app.hot_account_switch.as_ref() == Some(&control);
+                        let pressed =
+                            app.pressed_account_switch.as_ref() == Some(&control);
+                        draw_account_switch_control(dc, switch_rect, hot, pressed, switch_busy);
+                        if !switch_busy && switch_rect.bottom > 101 && switch_rect.top < height {
+                            app.account_switch_hits.push((switch_rect, control));
+                        }
+                    }
                     if show_pause_control {
                         let control = AccountControl {
                             id: account.id.clone(),
                             paused: account.paused,
                         };
-                        let hot = !busy && app.hot_account_control.as_ref() == Some(&control);
+                        let hot = !pause_busy && app.hot_account_control.as_ref() == Some(&control);
                         let pressed = app.pressed_account_control.as_ref() == Some(&control);
                         draw_account_pause_control(
                             dc,
@@ -2787,9 +2950,9 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                             account.paused,
                             hot,
                             pressed,
-                            busy,
+                            pause_busy,
                         );
-                        if !busy && action_rect.bottom > 101 && action_rect.top < height {
+                        if !pause_busy && action_rect.bottom > 101 && action_rect.top < height {
                             app.account_pause_hits.push((action_rect, control));
                         }
                         if reauth {
@@ -3262,6 +3425,32 @@ unsafe fn draw_account_pause_control(
                 top: cy - 6,
                 right: cx + 5,
                 bottom: cy + 6,
+            },
+            color,
+        );
+    }
+}
+
+unsafe fn draw_account_switch_control(dc: HDC, rect: RECT, hot: bool, pressed: bool, busy: bool) {
+    let color = if busy {
+        0x006f7380
+    } else if hot || pressed {
+        0x00e9f4ef
+    } else {
+        0x008edbc0
+    };
+    let cx = (rect.left + rect.right) / 2;
+    let cy = (rect.top + rect.bottom) / 2;
+    // Right-pointing triangle: "make this account active".
+    for step in 0..7 {
+        let half = step.min(5);
+        fill_solid(
+            dc,
+            RECT {
+                left: cx - 5 + step,
+                top: cy - half,
+                right: cx - 3 + step,
+                bottom: cy + half + 1,
             },
             color,
         );
