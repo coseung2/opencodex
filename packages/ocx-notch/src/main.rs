@@ -165,6 +165,9 @@ enum ProviderModal {
         preset: ProviderPreset,
         submitting: bool,
         error: Option<String>,
+        /// True when the provider already exists: submitting adds the key to its
+        /// multi-key pool (POST /api/providers/keys) instead of replacing the row.
+        add_key: bool,
     },
 }
 
@@ -1183,6 +1186,13 @@ fn configured_preset(preset: &ProviderPreset, configs: &[ProviderConfig]) -> boo
         && configs.iter().any(|config| config.name == preset.id)
 }
 
+/// Configured API-key presets stay clickable: selecting one opens the key modal in
+/// "add another key" mode so the user can grow the provider's key pool without
+/// overwriting the existing provider row.
+fn api_key_preset_adds_key(preset: &ProviderPreset, configs: &[ProviderConfig]) -> bool {
+    configured_preset(preset, configs)
+}
+
 fn provider_catalog_tab(preset: &ProviderPreset) -> ProviderCatalogTab {
     match provider_preset_action(preset) {
         ProviderPresetAction::CodexAccount | ProviderPresetAction::OAuth(_) => {
@@ -1548,7 +1558,7 @@ fn begin_codex_account(hwnd: HWND) {
     });
 }
 
-unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset) {
+unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset, add_key: bool) {
     with_app(|app| {
         destroy_api_key_edit(app);
         app.modal_generation = app.modal_generation.wrapping_add(1);
@@ -1556,6 +1566,7 @@ unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset) {
             preset,
             submitting: false,
             error: None,
+            add_key,
         });
         if let Ok(instance) = GetModuleHandleW(None) {
             if let Ok(edit) = CreateWindowExW(
@@ -1611,34 +1622,57 @@ unsafe fn submit_api_key(hwnd: HWND) {
             preset,
             submitting,
             error,
+            add_key,
         }) = &mut app.provider_modal
         {
             if !*submitting {
                 *submitting = true;
                 *error = None;
-                submission = Some((preset.clone(), key, app.modal_generation));
+                submission = Some((preset.clone(), key, app.modal_generation, *add_key));
             }
         }
     });
-    let Some((preset, mut key, generation)) = submission else {
+    let Some((preset, mut key, generation, add_key)) = submission else {
         return;
     };
-    let payload = match provider_create_body(&preset, &key) {
-        Ok(payload) => payload,
-        Err(error) => {
-            key.as_bytes_mut().fill(0);
-            with_app(|app| {
-                if let Some(ProviderModal::ApiKey {
-                    submitting,
-                    error: modal_error,
-                    ..
-                }) = &mut app.provider_modal
-                {
-                    *submitting = false;
-                    *modal_error = Some(error.into());
-                }
-            });
-            return;
+    let payload = if add_key {
+        serde_json::json!({ "name": preset.id, "key": key })
+    } else {
+        let create = match provider_create_body(&preset, &key) {
+            Ok(payload) => payload,
+            Err(error) => {
+                key.as_bytes_mut().fill(0);
+                with_app(|app| {
+                    if let Some(ProviderModal::ApiKey {
+                        submitting,
+                        error: modal_error,
+                        ..
+                    }) = &mut app.provider_modal
+                    {
+                        *submitting = false;
+                        *modal_error = Some(error.into());
+                    }
+                });
+                return;
+            }
+        };
+        match serde_json::to_value(create) {
+            Ok(payload) => payload,
+            Err(error) => {
+                key.as_bytes_mut().fill(0);
+                with_app(|app| {
+                    if let Some(ProviderModal::ApiKey {
+                        submitting,
+                        error: modal_error,
+                        ..
+                    }) = &mut app.provider_modal
+                    {
+                        *submitting = false;
+                        *modal_error = Some(format!("Invalid provider request: {error}"));
+                    }
+                });
+                return;
+            }
         }
     };
     let body = match serde_json::to_vec(&payload) {
@@ -1663,8 +1697,14 @@ unsafe fn submit_api_key(hwnd: HWND) {
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
         let mut body = body;
-        let result = api::post_raw("/api/providers", &body);
+        let payload = payload;
+        let result = if add_key {
+            api::post_json::<serde_json::Value>("/api/providers/keys", &payload).map(|_| ())
+        } else {
+            api::post_raw("/api/providers", &body)
+        };
         body.fill(0);
+        drop(payload);
         with_app(|app| {
             if app.modal_generation != generation {
                 return;
@@ -1673,7 +1713,11 @@ unsafe fn submit_api_key(hwnd: HWND) {
                 Ok(()) => {
                     app.provider_modal = None;
                     app.modal_generation = app.modal_generation.wrapping_add(1);
-                    app.state.status = format!("Added {}", preset.label);
+                    app.state.status = if add_key {
+                        format!("Added key to {}", preset.label)
+                    } else {
+                        format!("Added {}", preset.label)
+                    };
                     app.force_refresh.store(true, Ordering::Release);
                 }
                 Err(value) => {
@@ -2209,23 +2253,28 @@ unsafe extern "system" fn window_proc(
                         }
                     }),
                     ModalHit::Preset(index) => {
-                        let preset = APP.get().and_then(|app| {
+                        let selection = APP.get().and_then(|app| {
                             let app = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                             match &app.provider_modal {
-                                Some(ProviderModal::Picker { presets, .. }) => {
-                                    presets.get(index).cloned()
-                                }
+                                Some(ProviderModal::Picker { presets, .. }) => presets
+                                    .get(index)
+                                    .cloned()
+                                    .map(|preset| {
+                                        let add_key =
+                                            api_key_preset_adds_key(&preset, &app.state.configs);
+                                        (preset, add_key)
+                                    }),
                                 _ => None,
                             }
                         });
-                        if let Some(preset) = preset {
+                        if let Some((preset, add_key)) = selection {
                             match provider_preset_action(&preset) {
                                 ProviderPresetAction::CodexAccount => begin_codex_account(hwnd),
                                 ProviderPresetAction::OAuth(provider) => {
                                     begin_oauth_preset(hwnd, provider)
                                 }
                                 ProviderPresetAction::ApiKey => unsafe {
-                                    show_api_key_preset(hwnd, preset)
+                                    show_api_key_preset(hwnd, preset, add_key)
                                 },
                                 ProviderPresetAction::Unsupported => {}
                             }
@@ -3436,7 +3485,7 @@ unsafe fn draw_provider_modal(
                             set_text_color(dc, 0x006ee7a8);
                             draw_text(
                                 dc,
-                                "Configured",
+                                "Add key",
                                 RECT {
                                     left: row.right - 118,
                                     top: y,
@@ -3445,9 +3494,8 @@ unsafe fn draw_provider_modal(
                                 },
                                 DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
                             );
-                        } else {
-                            app.modal_hits.push((row, ModalHit::Preset(index)));
                         }
+                        app.modal_hits.push((row, ModalHit::Preset(index)));
                     }
                     y += 54;
                 }
@@ -3486,6 +3534,7 @@ unsafe fn draw_provider_modal(
             preset,
             submitting,
             error,
+            add_key,
         }) => {
             set_text_color(dc, 0x00e9e4df);
             draw_text(
@@ -3503,7 +3552,11 @@ unsafe fn draw_provider_modal(
             set_text_color(dc, 0x009da3ad);
             draw_text(
                 dc,
-                "키는 OCX로 직접 전송되며 사용 후 입력란에서 지워집니다.",
+                if *add_key {
+                    "기존 프로바이더에 키가 추가되며 새 키가 활성 계정이 됩니다."
+                } else {
+                    "키는 OCX로 직접 전송되며 사용 후 입력란에서 지워집니다."
+                },
                 RECT {
                     left: 60,
                     top: 188,
@@ -4041,6 +4094,27 @@ mod account_control_tests {
         }];
 
         assert!(!configured_preset(&preset, &configs));
+    }
+
+    #[test]
+    fn configured_key_presets_stay_clickable_and_add_to_the_pool() {
+        let preset = ProviderPreset {
+            id: "opencode-go".into(),
+            label: "opencode go".into(),
+            adapter: "openai-chat".into(),
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            auth: "key".into(),
+            ..Default::default()
+        };
+        let configs = vec![ProviderConfig {
+            name: "opencode-go".into(),
+            ..Default::default()
+        }];
+
+        assert!(configured_preset(&preset, &configs));
+        // A configured key preset must still open the key modal in add-key mode
+        // (POST /api/providers/keys) so extra accounts can be added from Notch.
+        assert!(api_key_preset_adds_key(&preset, &configs));
     }
 
     #[test]
