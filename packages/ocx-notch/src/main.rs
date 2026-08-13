@@ -975,6 +975,7 @@ fn account_switch_mutation_key(provider: &str, id: &str) -> String {
 fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
     let mut started = false;
     let mut identity = String::new();
+    let mut needs_unpause = false;
     with_app(|app| {
         let key = account_switch_mutation_key(&control.provider, &control.id);
         if app.account_switch_mutations.contains(&key) {
@@ -982,6 +983,29 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
         }
         app.account_switch_mutations.insert(key.clone());
         let previous = mark_active_account(&mut app.state.pools, &control.provider, &control.id);
+        needs_unpause = control.kind == "codex"
+            && app
+                .state
+                .pools
+                .iter()
+                .find(|pool| pool.provider == control.provider)
+                .and_then(|pool| pool.accounts.iter().find(|account| account.id == control.id))
+                .map(|account| account.paused)
+                .unwrap_or(false);
+        if needs_unpause {
+            // Play on a paused row means "use this account again": clear the pause
+            // locally so the row state flips before the refresh lands.
+            if let Some(pool) = app
+                .state
+                .pools
+                .iter_mut()
+                .find(|pool| pool.provider == control.provider)
+            {
+                if let Some(account) = pool.accounts.iter_mut().find(|account| account.id == control.id) {
+                    account.paused = false;
+                }
+            }
+        }
         app.switch_previous_active.insert(key, previous);
         app.rebuild_provider_views();
         identity = app
@@ -1004,6 +1028,10 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
 
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
+        // The server refuses to activate a paused Codex account (409), so unpause first.
+        if needs_unpause {
+            let _ = api::set_codex_account_paused(&control.id, false);
+        }
         let result = api::set_active_account(&control.provider, &control.kind, &control.id);
         with_app(|app| {
             let key = account_switch_mutation_key(&control.provider, &control.id);
@@ -2902,7 +2930,6 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             }
             y += provider_height;
             if app.expanded_providers.contains(&provider.name) {
-                let show_pause_control = provider.name == "openai";
                 let pool_size = provider.accounts.len();
                 for account in provider.accounts {
                     let account_height = account_height(&account);
@@ -2910,25 +2937,15 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     let reauth_rect = reauth_action_rect(width, y);
                     let identity_width = measure_text_width(dc, &account.identity);
                     let action_rect = account_action_rect(width, y, identity_width);
-                    let show_switch_control = !account.active && pool_size > 1;
-                    let switch_rect = if show_pause_control {
-                        RECT {
-                            left: action_rect.left - ACCOUNT_ACTION_GAP - ACCOUNT_ACTION_WIDTH,
-                            top: action_rect.top,
-                            right: action_rect.left - ACCOUNT_ACTION_GAP,
-                            bottom: action_rect.bottom,
-                        }
-                    } else {
-                        action_rect
-                    };
+                    // One control per pool row: the ACTIVE account shows pause, every
+                    // other account shows play ("make this account active").
+                    let show_action_control = provider.name == "openai" || pool_size > 1;
                     let pause_busy = app.account_mutations.contains(&account.id);
                     let switch_busy = app
                         .account_switch_mutations
                         .contains(&account_switch_mutation_key(&provider.name, &account.id));
                     set_text_color(dc, 0x00c7cbd2);
-                    let identity_right = if show_switch_control {
-                        switch_rect.left - ACCOUNT_ACTION_GAP
-                    } else if show_pause_control {
+                    let identity_right = if show_action_control {
                         action_rect.left - ACCOUNT_ACTION_GAP
                     } else if reauth {
                         reauth_rect.left - ACCOUNT_ACTION_GAP
@@ -2946,38 +2963,60 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                         },
                         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                     );
-                    if show_switch_control {
-                        let control = AccountSwitchControl {
-                            provider: provider.name.clone(),
-                            id: account.id.clone(),
-                            kind: account.kind.clone(),
-                        };
-                        let hot = !switch_busy && app.hot_account_switch.as_ref() == Some(&control);
-                        let pressed =
-                            app.pressed_account_switch.as_ref() == Some(&control);
-                        draw_account_switch_control(dc, switch_rect, hot, pressed, switch_busy);
-                        if !switch_busy && switch_rect.bottom > 101 && switch_rect.top < height {
-                            app.account_switch_hits.push((switch_rect, control));
+                    if show_action_control {
+                        if account.active {
+                            // Pause: this account is the one currently in use. Codex
+                            // accounts can be paused (excluded from rotation); OAuth/API
+                            // key rows show the same state indicator without a pause API.
+                            let control = AccountControl {
+                                id: account.id.clone(),
+                                paused: false,
+                            };
+                            let hot = !pause_busy
+                                && app.hot_account_control.as_ref() == Some(&control);
+                            let pressed =
+                                app.pressed_account_control.as_ref() == Some(&control);
+                            draw_account_pause_control(
+                                dc,
+                                action_rect,
+                                hot,
+                                pressed,
+                                pause_busy,
+                            );
+                            if provider.name == "openai"
+                                && !pause_busy
+                                && action_rect.bottom > 101
+                                && action_rect.top < height
+                            {
+                                app.account_pause_hits.push((action_rect, control));
+                            }
+                        } else {
+                            // Play: make this account/key active.
+                            let control = AccountSwitchControl {
+                                provider: provider.name.clone(),
+                                id: account.id.clone(),
+                                kind: account.kind.clone(),
+                            };
+                            let hot = !switch_busy
+                                && app.hot_account_switch.as_ref() == Some(&control);
+                            let pressed =
+                                app.pressed_account_switch.as_ref() == Some(&control);
+                            draw_account_play_control(
+                                dc,
+                                action_rect,
+                                hot,
+                                pressed,
+                                switch_busy,
+                            );
+                            if !switch_busy
+                                && action_rect.bottom > 101
+                                && action_rect.top < height
+                            {
+                                app.account_switch_hits.push((action_rect, control));
+                            }
                         }
                     }
-                    if show_pause_control {
-                        let control = AccountControl {
-                            id: account.id.clone(),
-                            paused: account.paused,
-                        };
-                        let hot = !pause_busy && app.hot_account_control.as_ref() == Some(&control);
-                        let pressed = app.pressed_account_control.as_ref() == Some(&control);
-                        draw_account_pause_control(
-                            dc,
-                            action_rect,
-                            account.paused,
-                            hot,
-                            pressed,
-                            pause_busy,
-                        );
-                        if !pause_busy && action_rect.bottom > 101 && action_rect.top < height {
-                            app.account_pause_hits.push((action_rect, control));
-                        }
+                    if provider.name == "openai" {
                         if reauth {
                             let control = ReauthControl {
                                 provider: provider.name.clone(),
@@ -3361,7 +3400,6 @@ unsafe fn draw_minimize_control(dc: HDC, width: i32, app: &App) {
 unsafe fn draw_account_pause_control(
     dc: HDC,
     rect: RECT,
-    paused: bool,
     hot: bool,
     pressed: bool,
     busy: bool,
@@ -3370,41 +3408,32 @@ unsafe fn draw_account_pause_control(
         0x006f7380
     } else if hot || pressed {
         0x00e9f4ef
-    } else if paused {
-        0x0024bffb
     } else {
         0x009a9fa8
     };
     let cx = (rect.left + rect.right) / 2;
     let cy = (rect.top + rect.bottom) / 2;
-    if paused {
-        // Play means include this account in the rotation pool again.
-        for rect in play_triangle_columns(cx - 4, cy, 7, 5) {
-            fill_solid(dc, rect, color);
-        }
-    } else {
-        // Pause means exclude this account from the rotation pool.
-        fill_solid(
-            dc,
-            RECT {
-                left: cx - 5,
-                top: cy - 6,
-                right: cx - 2,
-                bottom: cy + 6,
-            },
-            color,
-        );
-        fill_solid(
-            dc,
-            RECT {
-                left: cx + 2,
-                top: cy - 6,
-                right: cx + 5,
-                bottom: cy + 6,
-            },
-            color,
-        );
-    }
+    // Pause: exclude this (currently active) account from the rotation pool.
+    fill_solid(
+        dc,
+        RECT {
+            left: cx - 5,
+            top: cy - 6,
+            right: cx - 2,
+            bottom: cy + 6,
+        },
+        color,
+    );
+    fill_solid(
+        dc,
+        RECT {
+            left: cx + 2,
+            top: cy - 6,
+            right: cx + 5,
+            bottom: cy + 6,
+        },
+        color,
+    );
 }
 
 unsafe fn draw_usage_toggle(
@@ -3459,7 +3488,7 @@ unsafe fn draw_usage_toggle(
     );
 }
 
-unsafe fn draw_account_switch_control(dc: HDC, rect: RECT, hot: bool, pressed: bool, busy: bool) {
+unsafe fn draw_account_play_control(dc: HDC, rect: RECT, hot: bool, pressed: bool, busy: bool) {
     let color = if busy {
         0x006f7380
     } else if hot || pressed {
@@ -3469,18 +3498,18 @@ unsafe fn draw_account_switch_control(dc: HDC, rect: RECT, hot: bool, pressed: b
     };
     let cx = (rect.left + rect.right) / 2;
     let cy = (rect.top + rect.bottom) / 2;
-    // Right-pointing triangle: "make this account active".
+    // Standard right-pointing play triangle: "make this account active".
     for rect in play_triangle_columns(cx - 5, cy, 7, 5) {
         fill_solid(dc, rect, color);
     }
 }
 
-/// Column rects forming a RIGHT-pointing play triangle: a 1px apex at the left edge
-/// that grows to the full height on the right edge (heights plateau at `max_half`).
+/// Column rects forming the standard RIGHT-pointing play triangle: the flat edge on
+/// the left, narrowing to a 1px apex on the right (heights plateau at `max_half`).
 fn play_triangle_columns(origin_x: i32, cy: i32, steps: i32, max_half: i32) -> Vec<RECT> {
     (0..steps)
         .map(|step| {
-            let half = step.min(max_half);
+            let half = (steps - 1 - step).min(max_half);
             RECT {
                 left: origin_x + step,
                 top: cy - half,
@@ -4449,14 +4478,14 @@ mod account_control_tests {
     }
 
     #[test]
-    fn play_triangle_points_right_with_the_apex_on_the_left() {
+    fn play_triangle_points_right_with_the_apex_on_the_right() {
         let columns = play_triangle_columns(20, 30, 7, 5);
         assert_eq!(columns.len(), 7);
-        // Apex on the left edge, base on the right edge.
+        // Flat edge on the left, 1px apex on the right (standard play ▶).
         let heights: Vec<i32> = columns.iter().map(|rect| rect.bottom - rect.top).collect();
-        assert_eq!(heights[0], 1);
-        assert_eq!(heights[6], 11);
-        assert!(heights.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(heights[0], 11);
+        assert_eq!(heights[6], 1);
+        assert!(heights.windows(2).all(|pair| pair[0] >= pair[1]));
         assert!(columns[0].left < columns[6].left);
         assert_eq!(columns[0].left, 20);
         assert_eq!(columns[6].right, 20 + 6 + 2);
