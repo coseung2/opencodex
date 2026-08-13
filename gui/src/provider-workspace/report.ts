@@ -28,6 +28,7 @@ export function accountQuotaFromReport(report?: ProviderQuotaReportView): Accoun
           label: row.label,
           percent: row.percent as number,
           ...(num(row.resetAt) !== undefined ? { resetAt: row.resetAt as number } : {}),
+          ...(typeof row.valueLabel === "string" && row.valueLabel.trim() ? { valueLabel: row.valueLabel } : {}),
         }];
       })
     : [];

@@ -7,7 +7,14 @@ import { type AccountQuota, normalizeQuotaForPlan } from "../codex-quota-utils";
 /* Helpers are co-located with QuotaBars for overview sorting / stacked layout. */
 /* eslint-disable react-refresh/only-export-components */
 
-export type QuotaBarRow = { label: string; limitLabel: string; percent: number; resetAt?: number };
+export type QuotaBarRow = {
+  label: string;
+  limitLabel: string;
+  percent: number;
+  resetAt?: number;
+  /** Text value rendered instead of the percent bar (e.g. an estimated cost). */
+  valueLabel?: string;
+};
 
 /**
  * Window ordering is computed from RAW wire identities BEFORE localization
@@ -76,7 +83,13 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
     const localized = localizeCustomQuotaLabel(w.label, t);
     ranked.push({
       rank: rawCustomWindowRank(w.label),
-      row: { label: localized, limitLabel: localized, percent: w.percent, resetAt: w.resetAt },
+      row: {
+        label: localized,
+        limitLabel: localized,
+        percent: w.percent,
+        resetAt: w.resetAt,
+        ...(w.valueLabel !== undefined ? { valueLabel: w.valueLabel } : {}),
+      },
     });
   }
   return ranked.sort((a, b) => a.rank - b.rank).map(entry => entry.row);
@@ -206,18 +219,22 @@ export default function QuotaBars({ quota, plan, threshold, t, className, layout
       </div>
     );
   }
-  return (
-    <div className={`codex-account-quota-slot quota-compact${className ? ` ${className}` : ""}`}>
+    return (
+      <div className={`codex-account-quota-slot quota-compact${className ? ` ${className}` : ""}`}>
       {rows.map(row => (
-        <QuotaRow
-          key={row.label}
-          label={row.label}
-          percent={row.percent}
-          resetAt={row.resetAt}
-          threshold={threshold}
-          t={t}
-          locale={locale}
-        />
+        row.valueLabel !== undefined
+          ? <QuotaValueRow key={row.label} label={row.label} value={row.valueLabel} />
+          : (
+            <QuotaRow
+              key={row.label}
+              label={row.label}
+              percent={row.percent}
+              resetAt={row.resetAt}
+              threshold={threshold}
+              t={t}
+              locale={locale}
+            />
+          )
       ))}
     </div>
   );
@@ -254,12 +271,33 @@ function QuotaRow({ label, percent, resetAt, threshold, t, locale }: {
   );
 }
 
+function QuotaValueRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="quota-row quota-row--value">
+      <span className="quota-label">{label}</span>
+      <span className="quota-val">{value}</span>
+    </div>
+  );
+}
+
 function StackedQuotaRow({ row, threshold, t, locale }: {
   row: QuotaBarRow;
   threshold: number;
   t: TFn;
   locale: Locale;
 }) {
+  if (row.valueLabel !== undefined) {
+    return (
+      <div className="quota-stacked-row quota-stacked-row--value">
+        <div className="quota-stacked-head">
+          <span className="quota-stacked-limit">{row.limitLabel}</span>
+        </div>
+        <div className="quota-stacked-bar-row">
+          <span className="quota-stacked-used">{row.valueLabel}</span>
+        </div>
+      </div>
+    );
+  }
   const exhausted = isQuotaExhausted(row.percent);
   const warn = isQuotaWarn(row.percent, threshold);
   const color = quotaBarTone(row.percent, threshold);

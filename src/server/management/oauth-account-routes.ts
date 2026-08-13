@@ -417,7 +417,17 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const name = (url.searchParams.get("name") ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
     const { listProviderApiKeys } = await import("../../providers/api-keys");
-    return jsonResponse(listProviderApiKeys(config, name));
+    const { opencodeGoKeyQuotaEstimates } = await import("../../providers/quota");
+    const result = listProviderApiKeys(config, name);
+    const keyQuotas = opencodeGoKeyQuotaEstimates(config, name);
+    if (!keyQuotas) return jsonResponse(result);
+    return jsonResponse({
+      ...result,
+      keys: result.keys.map(key => ({
+        ...key,
+        ...(keyQuotas[key.id] ? { quota: keyQuotas[key.id] } : {}),
+      })),
+    });
   }
   if (url.pathname === "/api/providers/keys" && req.method === "POST") {
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; key?: string; label?: string };

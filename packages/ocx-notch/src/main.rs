@@ -490,6 +490,7 @@ struct QuotaBarRow {
     label: String,
     percent: f64,
     reset_at: Option<f64>,
+    value_label: Option<String>,
 }
 
 fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
@@ -502,6 +503,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
             label: "5h limit".into(),
             percent,
             reset_at: quota.five_hour_reset_at,
+            value_label: None,
         });
     }
     if let Some(percent) = quota.weekly_percent {
@@ -509,6 +511,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
             label: "Weekly limit".into(),
             percent,
             reset_at: quota.weekly_reset_at,
+            value_label: None,
         });
     }
     if let Some(percent) = quota.monthly_percent {
@@ -516,6 +519,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
             label: "Monthly limit".into(),
             percent,
             reset_at: quota.monthly_reset_at,
+            value_label: None,
         });
     }
     for window in &quota.custom_windows {
@@ -524,6 +528,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
                 label: window.label.clone(),
                 percent,
                 reset_at: window.reset_at,
+                value_label: window.value_label.clone(),
             });
         }
     }
@@ -3951,6 +3956,22 @@ unsafe fn draw_quota_row(
         },
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
+    if let Some(value) = &row.value_label {
+        // Text-only row (e.g. an estimated cost): no bar, no percent.
+        set_text_color(dc, 0x00ececec);
+        draw_text(
+            dc,
+            value,
+            RECT {
+                left: left + 196,
+                top,
+                right,
+                bottom: top + 16,
+            },
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        return;
+    }
     if let Some(reset) = format_reset(row.reset_at) {
         set_text_color(dc, 0x00868686);
         draw_text(
@@ -4521,6 +4542,26 @@ mod account_control_tests {
         assert_eq!(rows[0].label, "Weekly limit");
         assert_eq!(rows[0].percent, 100.0);
         assert_eq!(rows[0].reset_at, Some(reset_at));
+    }
+
+    #[test]
+    fn value_label_windows_render_as_text_rows() {
+        let quota = Quota {
+            custom_windows: vec![QuotaWindow {
+                label: "추산 비용 · 30일".into(),
+                percent: Some(0.0),
+                reset_at: None,
+                value_label: Some("~$8.48".into()),
+            }],
+            ..Default::default()
+        };
+
+        let rows = quota_rows(Some(&quota));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "추산 비용 · 30일");
+        assert_eq!(rows[0].percent, 0.0);
+        assert_eq!(rows[0].value_label.as_deref(), Some("~$8.48"));
     }
 
     #[test]

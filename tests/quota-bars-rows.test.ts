@@ -62,6 +62,18 @@ describe("buildQuotaRows (WP070)", () => {
     expect(rows.map(r => r.label)).toEqual(["codexAuth.monthly", "Gem"]);
   });
 
+  test("value-label custom windows carry text through instead of a percent bar", () => {
+    const rows = buildQuotaRows(quota({
+      customWindows: [{ label: "추산 비용 · 30일", percent: 0, valueLabel: "~$8.48" }],
+    }), null, t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      label: "추산 비용 · 30일",
+      percent: 0,
+      valueLabel: "~$8.48",
+    });
+  });
+
   test("Kimi total subscription credits use the localized quota label", () => {
     const rows = buildQuotaRows(quota({
       customWindows: [{ label: "Total subscription credits", percent: 1 }],

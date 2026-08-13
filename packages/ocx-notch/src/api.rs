@@ -341,13 +341,16 @@ fn parse_account_pool_value(provider: String, kind: &str, value: &Value) -> Acco
                 .and_then(Value::as_str)
                 .unwrap_or(if active { "Active" } else { "Available" })
                 .to_string();
+            let quota = account
+                .get("quota")
+                .and_then(|value| serde_json::from_value::<Quota>(value.clone()).ok());
             Some(AccountView {
                 id,
                 identity,
                 kind: kind.to_string(),
                 active,
                 health,
-                quota: None,
+                quota,
                 paused: false,
                 needs_reauth: account
                     .get("needsReauth")

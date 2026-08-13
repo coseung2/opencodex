@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { clearAccountQuota } from "../src/codex/quota";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { saveCredential } from "../src/oauth/store";
-import { clearProviderQuotaCache, fetchProviderQuotaReports } from "../src/providers/quota";
+import { clearProviderQuotaCache, fetchProviderQuotaReports, opencodeGoKeyQuotaEstimates } from "../src/providers/quota";
 import type { OcxConfig } from "../src/types";
 
 const originalFetch = globalThis.fetch;
@@ -346,6 +346,101 @@ describe("fetchProviderQuotaReports", () => {
 
     expect(result.reports).toHaveLength(1);
     expect(result.reports[0]?.quota.weeklyPercent).toBe(25);
+  });
+
+  function opencodeGoOnlyConfig(): OcxConfig {
+    return {
+      defaultProvider: "opencode-go",
+      providers: {
+        "opencode-go": {
+          adapter: "openai-chat",
+          baseUrl: "https://opencode.ai/zen/go/v1",
+          apiKey: "active-secret",
+          apiKeyPool: [
+            { id: "key-active", key: "active-secret" },
+            { id: "key-standby", key: "standby-secret" },
+          ],
+        },
+      },
+    } as OcxConfig;
+  }
+
+  function seedOpencodeGoUsage(): void {
+    const now = Date.now();
+    const rows = [
+      {
+        requestId: "ocx-go-1",
+        timestamp: now - 60_000,
+        provider: "opencode-go",
+        model: "deepseek-v4-flash",
+        status: 200,
+        durationMs: 500,
+        usage: { inputTokens: 5_000_000, outputTokens: 1_000_000, cachedInputTokens: 0 },
+      },
+      {
+        requestId: "ocx-go-2",
+        timestamp: now - 3_600_000,
+        provider: "opencode-go",
+        model: "deepseek-v4-flash",
+        status: 200,
+        durationMs: 400,
+        usage: { inputTokens: 10_000_000, outputTokens: 0, cachedInputTokens: 10_000_000 },
+      },
+      {
+        requestId: "ocx-go-old",
+        timestamp: now - 40 * 86_400_000,
+        provider: "opencode-go",
+        model: "deepseek-v4-flash",
+        status: 200,
+        durationMs: 300,
+        usage: { inputTokens: 1_000_000, outputTokens: 0, cachedInputTokens: 0 },
+      },
+    ];
+    writeFileSync(join(opencodexHome, "usage.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+  }
+
+  test("opencode-go estimates 30-day cost and 5-hour limits from the local usage log", async () => {
+    seedOpencodeGoUsage();
+    const result = await fetchProviderQuotaReports(opencodeGoOnlyConfig(), true);
+    const report = result.reports.find(item => item.provider === "opencode-go");
+    expect(report?.source).toBe("opencode-go:docs-estimate");
+    expect(report?.quota.customWindows?.[0]).toEqual({
+      label: "추산 비용 · 30일",
+      percent: 0,
+      valueLabel: "~$1.01",
+    });
+    // 5M uncached input × $0.14/M + 1M output × $0.28/M + 10M cached × $0.0028/M ≈ $1.01.
+    const fiveHour = report?.quota.customWindows?.[1];
+    expect(fiveHour?.label).toBe("5h · DeepSeek V4 Flash");
+    expect(fiveHour?.percent).toBeGreaterThan(0);
+    expect(fiveHour?.resetAt).toBeGreaterThan(Date.now());
+  });
+
+  test("opencode-go key estimates cover every connected key, charging traffic to the active key", async () => {
+    seedOpencodeGoUsage();
+    const config = opencodeGoOnlyConfig();
+    const estimates = opencodeGoKeyQuotaEstimates(config, "opencode-go");
+    expect(estimates).not.toBeNull();
+    expect(Object.keys(estimates!).sort()).toEqual(["key-active", "key-standby"]);
+    expect(estimates!["key-active"]?.customWindows?.[0]?.valueLabel).toBe("~$1.01");
+    expect(estimates!["key-standby"]?.customWindows?.[0]?.valueLabel).toBe("~$0.00");
+  });
+
+  test("opencode-go quota fails closed for a lookalike base URL", async () => {
+    seedOpencodeGoUsage();
+    const config = {
+      defaultProvider: "opencode-go",
+      providers: {
+        "opencode-go": {
+          adapter: "openai-chat",
+          baseUrl: "https://attacker.example/zen/go/v1",
+          apiKey: "active-secret",
+          apiKeyPool: [{ id: "key-active", key: "active-secret" }],
+        },
+      },
+    } as OcxConfig;
+    const result = await fetchProviderQuotaReports(config, true);
+    expect(result.reports.find(item => item.provider === "opencode-go")).toBeUndefined();
   });
 
   function kimiOnlyConfig(baseUrl = "https://api.kimi.com/coding/v1"): OcxConfig {

@@ -28,6 +28,8 @@ pub struct QuotaWindow {
     pub label: String,
     pub percent: Option<f64>,
     pub reset_at: Option<f64>,
+    #[serde(default)]
+    pub value_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
