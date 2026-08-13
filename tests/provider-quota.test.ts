@@ -399,25 +399,22 @@ describe("fetchProviderQuotaReports", () => {
     writeFileSync(join(opencodexHome, "usage.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   }
 
-  test("opencode-go reports one row with 5h/weekly/monthly percent segments", async () => {
+  test("opencode-go segments count requests against the published per-model limits", async () => {
     seedOpencodeGoUsage();
     const result = await fetchProviderQuotaReports(opencodeGoOnlyConfig(), true);
     const report = result.reports.find(item => item.provider === "opencode-go");
     expect(report?.source).toBe("opencode-go:docs-estimate");
     expect(report?.quota.customWindows?.[0]).toMatchObject({
-      label: "할당량",
       percent: 0,
       segments: [
-        { label: "5h", percent: (1.008 / 12) * 100, resetAt: expect.any(Number) },
-        { label: "주", percent: (1.008 / 30) * 100, resetAt: expect.any(Number) },
-        { label: "월", percent: (1.008 / 60) * 100, resetAt: expect.any(Number) },
+        { label: "5h", percent: (2 / 31_650) * 100, resetAt: expect.any(Number) },
+        { label: "주", percent: (2 / 79_050) * 100, resetAt: expect.any(Number) },
+        { label: "월", percent: (2 / 158_150) * 100, resetAt: expect.any(Number) },
       ],
     });
-    // 5M uncached input × $0.14/M + 1M output × $0.28/M + 10M cached × $0.0028/M ≈ $1.01.
-    // Both seeded requests fall inside every window, so each percent is cost/limit.
   });
 
-  test("opencode-go key rows show monthly-limit percents for every connected key", async () => {
+  test("opencode-go key rows show monthly request-limit percents for every connected key", async () => {
     seedOpencodeGoUsage();
     const config = opencodeGoOnlyConfig();
     const estimates = opencodeGoKeyQuotaEstimates(config, "opencode-go");
@@ -425,7 +422,7 @@ describe("fetchProviderQuotaReports", () => {
     expect(Object.keys(estimates!).sort()).toEqual(["key-active", "key-standby"]);
     expect(estimates!["key-active"]?.customWindows?.[0]).toMatchObject({
       label: "월간 할당",
-      percent: (1.008 / 60) * 100,
+      percent: (2 / 158_150) * 100,
     });
     expect(estimates!["key-standby"]?.customWindows?.[0]).toMatchObject({
       label: "월간 할당",

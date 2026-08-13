@@ -1320,7 +1320,6 @@ dialog.modal-overlay::backdrop {
 .quota-segment { display: flex; flex: 1 1 0; flex-direction: column; gap: 3px; min-width: 0; }
 .quota-segment-label { font-size: var(--text-caption); color: var(--muted); }
 .quota-segment-bar { width: 100%; }
-.quota-segment-pct { font-size: var(--text-caption); font-family: var(--font-code); color: var(--text); }
 .quota-reset-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-caption); color: var(--faint); }
 .quota-reset-day,
 .quota-reset-time { font-size: var(--text-caption); color: var(--muted); white-space: nowrap; }

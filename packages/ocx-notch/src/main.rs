@@ -3960,15 +3960,16 @@ unsafe fn draw_quota_row(
             let x0 = seg_left + index as i32 * (width + gap);
             let percent = segment.percent.unwrap_or(0.0);
             let warning = (threshold > 0 && percent >= threshold as f64) || percent >= 99.5;
-            set_text_color(dc, 0x00a6a6a6);
+            // Label + percent share one line ABOVE the bar.
+            set_text_color(dc, if warning { 0x0024bffb } else { 0x00a6a6a6 });
             draw_text(
                 dc,
-                &segment.label,
+                &format!("{} {}", segment.label, format_percent(percent)),
                 RECT {
                     left: x0,
                     top,
                     right: x0 + width,
-                    bottom: top + 13,
+                    bottom: top + 14,
                 },
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
@@ -3976,25 +3977,13 @@ unsafe fn draw_quota_row(
                 dc,
                 RECT {
                     left: x0,
-                    top: top + 14,
+                    top: top + 15,
                     right: x0 + width,
-                    bottom: top + 19,
+                    bottom: top + 20,
                 },
                 0x00303030,
             );
-            draw_quota_fill(dc, x0, x0 + width, top + 14, percent, warning);
-            set_text_color(dc, if warning { 0x0024bffb } else { 0x00ececec });
-            draw_text(
-                dc,
-                &format_percent(percent),
-                RECT {
-                    left: x0,
-                    top: top + 20,
-                    right: x0 + width,
-                    bottom: top + 28,
-                },
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-            );
+            draw_quota_fill(dc, x0, x0 + width, top + 15, percent, warning);
         }
         return;
     }

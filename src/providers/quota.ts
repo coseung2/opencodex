@@ -36,37 +36,27 @@ const OPENCODE_GO_COST_WINDOW_MS = 30 * 86_400_000;
 const OPENCODE_GO_FIVE_HOUR_MS = 5 * 3_600_000;
 const OPENCODE_GO_WEEK_MS = 7 * 86_400_000;
 
-/**
- * opencode.go published per-model prices (USD per 1M tokens), from opencode.ai/docs/go.
- * Over-cap token tiers (GPT 5.6 Luna >272K, Qwen3.7/3.6 Plus >256K) use the base tier;
- * the estimate is intentionally approximate ("정확할 필요는 없고").
- */
-const OPENCODE_GO_PRICES: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-  "grok-4.5": { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
-  "gpt-5.6-luna": { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
-  "glm-5.2": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
-  "glm-5.1": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
-  "kimi-k3": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
-  "kimi-k2.7-code": { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
-  "kimi-k2.6": { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
-  "mimo-v2.5": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
-  "mimo-v2.5-pro": { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
-  "minimax-m3": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
-  "minimax-m2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
-  "minimax-m2.5": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
-  "qwen3.8-max": { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 },
-  "qwen3.7-max": { input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.125 },
-  "qwen3.7-plus": { input: 0.4, output: 1.6, cacheRead: 0.04, cacheWrite: 0.5 },
-  "qwen3.6-plus": { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 },
-  "deepseek-v4-pro": { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
-  "deepseek-v4-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
-  "hy3": { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 },
+/** opencode.go published request limits per window (1x tier), opencode.ai/docs/go. */
+const OPENCODE_GO_LIMITS: Record<string, { label: string; fiveHour: number; weekly: number; monthly: number }> = {
+  "grok-4.5": { label: "Grok 4.5", fiveHour: 120, weekly: 300, monthly: 600 },
+  "gpt-5.6-luna": { label: "GPT 5.6 Luna", fiveHour: 2_050, weekly: 5_100, monthly: 10_250 },
+  "glm-5.2": { label: "GLM-5.2", fiveHour: 880, weekly: 2_150, monthly: 4_300 },
+  "glm-5.1": { label: "GLM-5.1", fiveHour: 880, weekly: 2_150, monthly: 4_300 },
+  "kimi-k3": { label: "Kimi K3", fiveHour: 110, weekly: 250, monthly: 490 },
+  "kimi-k2.7-code": { label: "Kimi K2.7 Code", fiveHour: 1_350, weekly: 3_380, monthly: 6_750 },
+  "kimi-k2.6": { label: "Kimi K2.6", fiveHour: 1_150, weekly: 2_880, monthly: 5_750 },
+  "mimo-v2.5": { label: "MiMo-V2.5", fiveHour: 30_100, weekly: 75_200, monthly: 150_400 },
+  "mimo-v2.5-pro": { label: "MiMo-V2.5 Pro", fiveHour: 3_250, weekly: 8_150, monthly: 16_300 },
+  "minimax-m3": { label: "MiniMax M3", fiveHour: 3_200, weekly: 8_000, monthly: 16_000 },
+  "minimax-m2.7": { label: "MiniMax M2.7", fiveHour: 3_400, weekly: 8_500, monthly: 17_000 },
+  "qwen3.8-max": { label: "Qwen3.8 Max", fiveHour: 160, weekly: 400, monthly: 810 },
+  "qwen3.7-max": { label: "Qwen3.7 Max", fiveHour: 340, weekly: 840, monthly: 1_690 },
+  "qwen3.7-plus": { label: "Qwen3.7 Plus", fiveHour: 4_300, weekly: 10_800, monthly: 21_600 },
+  "qwen3.6-plus": { label: "Qwen3.6 Plus", fiveHour: 3_300, weekly: 8_200, monthly: 16_300 },
+  "deepseek-v4-pro": { label: "DeepSeek V4 Pro", fiveHour: 3_450, weekly: 8_550, monthly: 17_150 },
+  "deepseek-v4-flash": { label: "DeepSeek V4 Flash", fiveHour: 31_650, weekly: 79_050, monthly: 158_150 },
+  "hy3": { label: "Hy3", fiveHour: 4_300, weekly: 10_750, monthly: 21_500 },
 };
-
-/** opencode.go published dollar limits per window, opencode.ai/docs/go ("Limits are defined in dollar value"). */
-const OPENCODE_GO_FIVE_HOUR_LIMIT_USD = 12;
-const OPENCODE_GO_WEEKLY_LIMIT_USD = 30;
-const OPENCODE_GO_MONTHLY_LIMIT_USD = 60;
 
 export interface ProviderQuotaWindow {
   label: string;
@@ -780,18 +770,18 @@ function isCanonicalOpencodeGoBaseUrl(baseUrl: string | undefined): boolean {
 }
 
 interface OpencodeGoUsageEstimate {
-  costFiveHourUsd: number;
-  costWeeklyUsd: number;
-  costMonthlyUsd: number;
-  priced: boolean;
-  perKeyCostUsd: Map<string, { costUsd: number; priced: boolean }>;
+  /** model -> request count in each window (status 200). */
+  fiveHourCounts: Map<string, number>;
+  weeklyCounts: Map<string, number>;
+  monthlyCounts: Map<string, number>;
+  /** key id -> 30-day request count (all traffic attributed to the active key). */
+  perKeyMonthlyCounts: Map<string, number>;
 }
 
 /**
- * Read the local usage log once and estimate opencode.go usage in DOLLARS per window:
- * the published per-model prices (cache-aware) applied to the recorded token split.
- * The published limits are dollar values too (5h $12 / week $30 / month $60, per
- * opencode.ai/docs/go), so the percent rows compare like with like.
+ * Read the local usage log once and count opencode.go requests per model per window.
+ * The console's allocation percent is request-count based (each model has published
+ * 5h/week/month request limits on opencode.ai/docs/go), so we compare like with like.
  *
  * Attribution: the pool's ACTIVE key serves every provider-bound request (loopback
  * traffic carries no client key id), so all rows are charged to it. Rows written before
@@ -807,73 +797,61 @@ function estimateOpencodeGoUsage(name: string, config: OcxProviderConfig): Openc
   const activeKeyId = activeKey ? pool.find(entry => entry.key === activeKey)?.id : undefined;
 
   const estimate: OpencodeGoUsageEstimate = {
-    costFiveHourUsd: 0,
-    costWeeklyUsd: 0,
-    costMonthlyUsd: 0,
-    priced: false,
-    perKeyCostUsd: new Map(pool.map(entry => [entry.id, { costUsd: 0, priced: false }])),
+    fiveHourCounts: new Map(),
+    weeklyCounts: new Map(),
+    monthlyCounts: new Map(),
+    perKeyMonthlyCounts: new Map(pool.map(entry => [entry.id, 0])),
   };
   for (const entry of readUsageEntries()) {
     if (entry.provider !== name || entry.status !== 200) continue;
-    const usage = entry.usage;
-    if (!usage || typeof usage.inputTokens !== "number") continue;
     const timestamp = entry.timestamp ?? 0;
-    const price = OPENCODE_GO_PRICES[entry.model];
-    if (!price) continue;
-    const cachedRead = usage.cachedInputTokens ?? 0;
-    const cachedWrite = usage.cacheCreationInputTokens ?? 0;
-    const uncached = Math.max(0, usage.inputTokens - cachedRead - cachedWrite);
-    const amount = (
-      uncached * price.input
-      + cachedRead * price.cacheRead
-      + cachedWrite * price.cacheWrite
-      + usage.outputTokens * price.output
-    ) / 1_000_000;
-    estimate.priced = true;
-    if (timestamp >= fiveHourAgo) estimate.costFiveHourUsd += amount;
-    if (timestamp >= now - OPENCODE_GO_WEEK_MS) estimate.costWeeklyUsd += amount;
-    if (timestamp >= monthAgo) estimate.costMonthlyUsd += amount;
+    if (!OPENCODE_GO_LIMITS[entry.model]) continue;
+    if (timestamp >= fiveHourAgo) {
+      estimate.fiveHourCounts.set(entry.model, (estimate.fiveHourCounts.get(entry.model) ?? 0) + 1);
+    }
+    if (timestamp >= now - OPENCODE_GO_WEEK_MS) {
+      estimate.weeklyCounts.set(entry.model, (estimate.weeklyCounts.get(entry.model) ?? 0) + 1);
+    }
     if (timestamp >= monthAgo && activeKeyId) {
-      const bucket = estimate.perKeyCostUsd.get(activeKeyId) ?? { costUsd: 0, priced: false };
-      bucket.costUsd += amount;
-      bucket.priced = true;
-      estimate.perKeyCostUsd.set(activeKeyId, bucket);
+      estimate.monthlyCounts.set(entry.model, (estimate.monthlyCounts.get(entry.model) ?? 0) + 1);
+      estimate.perKeyMonthlyCounts.set(activeKeyId, (estimate.perKeyMonthlyCounts.get(activeKeyId) ?? 0) + 1);
     }
   }
   return estimate;
 }
 
 /**
- * opencode.go has no per-key billing API (the console endpoint is session-authenticated),
- * so the quota is estimated locally from the traffic we already proxy. The published
- * limits are dollar values (5h $12 / week $30 / month $60), so each window's estimated
- * cost is compared against its dollar limit; the estimated 30-day cost is also shown
- * as a text row.
+ * One row with three narrow bars (5h / weekly / monthly) for the DOMINANT model —
+ * the model with the most 30-day requests — compared against its published request
+ * limits, mirroring the console's allocation display.
  */
 function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): ProviderQuotaReport | null {
   const estimate = estimateOpencodeGoUsage(name, config);
   if (!estimate) return null;
+  const dominant = [...estimate.monthlyCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || (estimate.weeklyCounts.get(b[0]) ?? 0) - (estimate.weeklyCounts.get(a[0]) ?? 0))[0]?.[0];
+  if (!dominant) return null;
+  const { fiveHour, weekly, monthly } = OPENCODE_GO_LIMITS[dominant]!;
   const now = Date.now();
 
   const quota: ProviderQuota = {
-    // One row with three narrow bars: 5h / weekly / monthly dollar-limit utilization.
     customWindows: [{
       label: "할당량",
       percent: 0,
       segments: [
         {
           label: "5h",
-          percent: normalizePercent((estimate.costFiveHourUsd / OPENCODE_GO_FIVE_HOUR_LIMIT_USD) * 100) ?? 0,
+          percent: normalizePercent(((estimate.fiveHourCounts.get(dominant) ?? 0) / fiveHour) * 100) ?? 0,
           resetAt: now + OPENCODE_GO_FIVE_HOUR_MS,
         },
         {
           label: "주",
-          percent: normalizePercent((estimate.costWeeklyUsd / OPENCODE_GO_WEEKLY_LIMIT_USD) * 100) ?? 0,
+          percent: normalizePercent(((estimate.weeklyCounts.get(dominant) ?? 0) / weekly) * 100) ?? 0,
           resetAt: now + OPENCODE_GO_WEEK_MS,
         },
         {
           label: "월",
-          percent: normalizePercent((estimate.costMonthlyUsd / OPENCODE_GO_MONTHLY_LIMIT_USD) * 100) ?? 0,
+          percent: normalizePercent(((estimate.monthlyCounts.get(dominant) ?? 0) / monthly) * 100) ?? 0,
           resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
         },
       ],
@@ -884,21 +862,25 @@ function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Provider
 }
 
 /**
- * Per-key estimated-cost quota for every connected key of a canonical opencode.go
- * provider. Each key gets a value row even at $0.00 so the notch pool shows all keys.
+ * Per-key monthly-allocation percent for every connected key of a canonical
+ * opencode.go provider, using the dominant model's published monthly request limit.
  */
 export function opencodeGoKeyQuotaEstimates(config: OcxConfig, name: string): Record<string, ProviderQuota> | null {
   const provider = config.providers[name];
   if (!provider) return null;
   const estimate = estimateOpencodeGoUsage(name, provider);
   if (!estimate) return null;
+  const dominant = [...estimate.monthlyCounts.entries()]
+    .sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!dominant) return null;
+  const monthlyLimit = OPENCODE_GO_LIMITS[dominant]!.monthly;
   const now = Date.now();
   const out: Record<string, ProviderQuota> = {};
-  for (const [keyId, bucket] of estimate.perKeyCostUsd) {
+  for (const [keyId, count] of estimate.perKeyMonthlyCounts) {
     out[keyId] = {
       customWindows: [{
         label: "월간 할당",
-        percent: normalizePercent((bucket.costUsd / OPENCODE_GO_MONTHLY_LIMIT_USD) * 100) ?? 0,
+        percent: normalizePercent((count / monthlyLimit) * 100) ?? 0,
         resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
       }],
       updatedAt: now,

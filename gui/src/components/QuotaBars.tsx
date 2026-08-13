@@ -291,11 +291,10 @@ function QuotaSegmentsRow({ row }: { row: QuotaBarRow }) {
       <div className="quota-segments">
         {(row.segments ?? []).map(segment => (
           <div className="quota-segment" key={segment.label}>
-            <span className="quota-segment-label">{segment.label}</span>
+            <span className="quota-segment-label">{segment.label} {Math.round(segment.percent)}%</span>
             <div className="bar quota-segment-bar">
               <div className="bar-fill" style={barFillStyle(segment.percent)} />
             </div>
-            <span className="quota-segment-pct">{Math.round(segment.percent)}%</span>
           </div>
         ))}
       </div>
@@ -318,11 +317,10 @@ function StackedQuotaRow({ row, threshold, t, locale }: {
         <div className="quota-segments">
           {row.segments.map(segment => (
             <div className="quota-segment" key={segment.label}>
-              <span className="quota-segment-label">{segment.label}</span>
+              <span className="quota-segment-label">{segment.label} {Math.round(segment.percent)}%</span>
               <div className="bar quota-segment-bar">
                 <div className="bar-fill" style={barFillStyle(segment.percent)} />
               </div>
-              <span className="quota-segment-pct">{Math.round(segment.percent)}%</span>
             </div>
           ))}
         </div>
