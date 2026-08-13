@@ -399,7 +399,7 @@ describe("fetchProviderQuotaReports", () => {
     writeFileSync(join(opencodexHome, "usage.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   }
 
-  test("opencode-go estimates 30-day cost and 5-hour limits from the local usage log", async () => {
+  test("opencode-go reports dollar-based 5h/weekly/monthly limits plus the 30-day cost", async () => {
     seedOpencodeGoUsage();
     const result = await fetchProviderQuotaReports(opencodeGoOnlyConfig(), true);
     const report = result.reports.find(item => item.provider === "opencode-go");
@@ -410,20 +410,13 @@ describe("fetchProviderQuotaReports", () => {
       valueLabel: "~$1.01",
     });
     // 5M uncached input × $0.14/M + 1M output × $0.28/M + 10M cached × $0.0028/M ≈ $1.01.
-    const fiveHour = report?.quota.customWindows?.[1];
-    expect(fiveHour?.label).toBe("5h · DeepSeek V4 Flash");
-    expect(fiveHour?.percent).toBeGreaterThan(0);
-    expect(fiveHour?.resetAt).toBeGreaterThan(Date.now());
-    // Both seeded requests fall inside the weekly and monthly windows too.
-    const weekly = report?.quota.customWindows?.[2];
-    expect(weekly?.label).toBe("Weekly · DeepSeek V4 Flash");
-    expect(weekly?.percent).toBeGreaterThan(0);
-    expect(weekly?.percent).toBe((2 / 79_050) * 100);
-    expect(weekly?.resetAt).toBeGreaterThan(Date.now());
-    const monthly = report?.quota.customWindows?.[3];
-    expect(monthly?.label).toBe("Monthly · DeepSeek V4 Flash");
-    expect(monthly?.percent).toBe((2 / 158_150) * 100);
-    expect(monthly?.resetAt).toBeGreaterThan(Date.now());
+    // Both seeded requests fall inside every window, so each percent is cost/limit.
+    expect(report?.quota.fiveHourPercent).toBe((1.008 / 12) * 100);
+    expect(report?.quota.fiveHourResetAt).toBeGreaterThan(Date.now());
+    expect(report?.quota.weeklyPercent).toBe((1.008 / 30) * 100);
+    expect(report?.quota.weeklyResetAt).toBeGreaterThan(Date.now());
+    expect(report?.quota.monthlyPercent).toBe((1.008 / 60) * 100);
+    expect(report?.quota.monthlyResetAt).toBeGreaterThan(Date.now());
   });
 
   test("opencode-go key estimates cover every connected key, charging traffic to the active key", async () => {
