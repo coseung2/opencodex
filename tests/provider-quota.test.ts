@@ -414,6 +414,16 @@ describe("fetchProviderQuotaReports", () => {
     expect(fiveHour?.label).toBe("5h · DeepSeek V4 Flash");
     expect(fiveHour?.percent).toBeGreaterThan(0);
     expect(fiveHour?.resetAt).toBeGreaterThan(Date.now());
+    // Both seeded requests fall inside the weekly and monthly windows too.
+    const weekly = report?.quota.customWindows?.[2];
+    expect(weekly?.label).toBe("Weekly · DeepSeek V4 Flash");
+    expect(weekly?.percent).toBeGreaterThan(0);
+    expect(weekly?.percent).toBe((2 / 79_050) * 100);
+    expect(weekly?.resetAt).toBeGreaterThan(Date.now());
+    const monthly = report?.quota.customWindows?.[3];
+    expect(monthly?.label).toBe("Monthly · DeepSeek V4 Flash");
+    expect(monthly?.percent).toBe((2 / 158_150) * 100);
+    expect(monthly?.resetAt).toBeGreaterThan(Date.now());
   });
 
   test("opencode-go key estimates cover every connected key, charging traffic to the active key", async () => {

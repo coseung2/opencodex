@@ -34,6 +34,7 @@ const LAST_GOOD_MAX_AGE_MS = 30 * 60_000;
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1";
 const OPENCODE_GO_COST_WINDOW_MS = 30 * 86_400_000;
 const OPENCODE_GO_FIVE_HOUR_MS = 5 * 3_600_000;
+const OPENCODE_GO_WEEK_MS = 7 * 86_400_000;
 
 /**
  * opencode.go published per-model prices (USD per 1M tokens), from opencode.ai/docs/go.
@@ -62,26 +63,26 @@ const OPENCODE_GO_PRICES: Record<string, { input: number; output: number; cacheR
   "hy3": { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 },
 };
 
-/** opencode.go published request limits per 5-hour window (1x tier), opencode.ai/docs/go. */
-const OPENCODE_GO_FIVE_HOUR_LIMITS: Record<string, { label: string; limit: number }> = {
-  "grok-4.5": { label: "Grok 4.5", limit: 120 },
-  "gpt-5.6-luna": { label: "GPT 5.6 Luna", limit: 2_050 },
-  "glm-5.2": { label: "GLM-5.2", limit: 880 },
-  "glm-5.1": { label: "GLM-5.1", limit: 880 },
-  "kimi-k3": { label: "Kimi K3", limit: 110 },
-  "kimi-k2.7-code": { label: "Kimi K2.7 Code", limit: 1_350 },
-  "kimi-k2.6": { label: "Kimi K2.6", limit: 1_150 },
-  "mimo-v2.5": { label: "MiMo-V2.5", limit: 30_100 },
-  "mimo-v2.5-pro": { label: "MiMo-V2.5 Pro", limit: 3_250 },
-  "minimax-m3": { label: "MiniMax M3", limit: 3_200 },
-  "minimax-m2.7": { label: "MiniMax M2.7", limit: 3_400 },
-  "qwen3.8-max": { label: "Qwen3.8 Max", limit: 160 },
-  "qwen3.7-max": { label: "Qwen3.7 Max", limit: 340 },
-  "qwen3.7-plus": { label: "Qwen3.7 Plus", limit: 4_300 },
-  "qwen3.6-plus": { label: "Qwen3.6 Plus", limit: 3_300 },
-  "deepseek-v4-pro": { label: "DeepSeek V4 Pro", limit: 3_450 },
-  "deepseek-v4-flash": { label: "DeepSeek V4 Flash", limit: 31_650 },
-  "hy3": { label: "Hy3", limit: 4_300 },
+/** opencode.go published request limits (1x tier), opencode.ai/docs/go. */
+const OPENCODE_GO_LIMITS: Record<string, { label: string; fiveHour: number; weekly: number; monthly: number }> = {
+  "grok-4.5": { label: "Grok 4.5", fiveHour: 120, weekly: 300, monthly: 600 },
+  "gpt-5.6-luna": { label: "GPT 5.6 Luna", fiveHour: 2_050, weekly: 5_100, monthly: 10_250 },
+  "glm-5.2": { label: "GLM-5.2", fiveHour: 880, weekly: 2_150, monthly: 4_300 },
+  "glm-5.1": { label: "GLM-5.1", fiveHour: 880, weekly: 2_150, monthly: 4_300 },
+  "kimi-k3": { label: "Kimi K3", fiveHour: 110, weekly: 250, monthly: 490 },
+  "kimi-k2.7-code": { label: "Kimi K2.7 Code", fiveHour: 1_350, weekly: 3_380, monthly: 6_750 },
+  "kimi-k2.6": { label: "Kimi K2.6", fiveHour: 1_150, weekly: 2_880, monthly: 5_750 },
+  "mimo-v2.5": { label: "MiMo-V2.5", fiveHour: 30_100, weekly: 75_200, monthly: 150_400 },
+  "mimo-v2.5-pro": { label: "MiMo-V2.5 Pro", fiveHour: 3_250, weekly: 8_150, monthly: 16_300 },
+  "minimax-m3": { label: "MiniMax M3", fiveHour: 3_200, weekly: 8_000, monthly: 16_000 },
+  "minimax-m2.7": { label: "MiniMax M2.7", fiveHour: 3_400, weekly: 8_500, monthly: 17_000 },
+  "qwen3.8-max": { label: "Qwen3.8 Max", fiveHour: 160, weekly: 400, monthly: 810 },
+  "qwen3.7-max": { label: "Qwen3.7 Max", fiveHour: 340, weekly: 840, monthly: 1_690 },
+  "qwen3.7-plus": { label: "Qwen3.7 Plus", fiveHour: 4_300, weekly: 10_800, monthly: 21_600 },
+  "qwen3.6-plus": { label: "Qwen3.6 Plus", fiveHour: 3_300, weekly: 8_200, monthly: 16_300 },
+  "deepseek-v4-pro": { label: "DeepSeek V4 Pro", fiveHour: 3_450, weekly: 8_550, monthly: 17_150 },
+  "deepseek-v4-flash": { label: "DeepSeek V4 Flash", fiveHour: 31_650, weekly: 79_050, monthly: 158_150 },
+  "hy3": { label: "Hy3", fiveHour: 4_300, weekly: 10_750, monthly: 21_500 },
 };
 
 export interface ProviderQuotaWindow {
@@ -797,7 +798,9 @@ interface OpencodeGoUsageEstimate {
   costUsd: number;
   priced: boolean;
   perKeyCostUsd: Map<string, { costUsd: number; priced: boolean }>;
-  windowCounts: Map<string, number>;
+  fiveHourCounts: Map<string, number>;
+  weeklyCounts: Map<string, number>;
+  monthlyCounts: Map<string, number>;
 }
 
 /**
@@ -821,13 +824,26 @@ function estimateOpencodeGoUsage(name: string, config: OcxProviderConfig): Openc
     costUsd: 0,
     priced: false,
     perKeyCostUsd: new Map(pool.map(entry => [entry.id, { costUsd: 0, priced: false }])),
-    windowCounts: new Map(),
+    fiveHourCounts: new Map(),
+    weeklyCounts: new Map(),
+    monthlyCounts: new Map(),
   };
   for (const entry of readUsageEntries()) {
     if (entry.provider !== name || entry.status !== 200) continue;
     const usage = entry.usage;
     if (!usage || typeof usage.inputTokens !== "number") continue;
     const timestamp = entry.timestamp ?? 0;
+    if (OPENCODE_GO_LIMITS[entry.model]) {
+      if (timestamp >= fiveHourAgo) {
+        estimate.fiveHourCounts.set(entry.model, (estimate.fiveHourCounts.get(entry.model) ?? 0) + 1);
+      }
+      if (timestamp >= now - OPENCODE_GO_WEEK_MS) {
+        estimate.weeklyCounts.set(entry.model, (estimate.weeklyCounts.get(entry.model) ?? 0) + 1);
+      }
+      if (timestamp >= monthAgo) {
+        estimate.monthlyCounts.set(entry.model, (estimate.monthlyCounts.get(entry.model) ?? 0) + 1);
+      }
+    }
     if (timestamp >= monthAgo) {
       const price = OPENCODE_GO_PRICES[entry.model];
       if (price) {
@@ -850,9 +866,6 @@ function estimateOpencodeGoUsage(name: string, config: OcxProviderConfig): Openc
         }
       }
     }
-    if (timestamp >= fiveHourAgo && OPENCODE_GO_FIVE_HOUR_LIMITS[entry.model]) {
-      estimate.windowCounts.set(entry.model, (estimate.windowCounts.get(entry.model) ?? 0) + 1);
-    }
   }
   return estimate;
 }
@@ -874,13 +887,37 @@ function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Provider
     percent: 0,
     valueLabel: `~$${estimate.costUsd.toFixed(2)}`,
   }];
-  for (const [model, count] of [...estimate.windowCounts.entries()].sort((a, b) => b[1] - a[1])) {
-    const { label, limit } = OPENCODE_GO_FIVE_HOUR_LIMITS[model]!;
-    customWindows.push({
-      label: `5h · ${label}`,
-      percent: normalizePercent((count / limit) * 100) ?? 0,
-      resetAt: now + OPENCODE_GO_FIVE_HOUR_MS,
-    });
+  const models = [...new Set([
+    ...estimate.fiveHourCounts.keys(),
+    ...estimate.weeklyCounts.keys(),
+    ...estimate.monthlyCounts.keys(),
+  ])].sort((a, b) => (estimate.monthlyCounts.get(b) ?? 0) - (estimate.monthlyCounts.get(a) ?? 0));
+  for (const model of models) {
+    const { label, fiveHour, weekly, monthly } = OPENCODE_GO_LIMITS[model]!;
+    const fiveHourCount = estimate.fiveHourCounts.get(model) ?? 0;
+    const weeklyCount = estimate.weeklyCounts.get(model) ?? 0;
+    const monthlyCount = estimate.monthlyCounts.get(model) ?? 0;
+    if (fiveHourCount > 0) {
+      customWindows.push({
+        label: `5h · ${label}`,
+        percent: normalizePercent((fiveHourCount / fiveHour) * 100) ?? 0,
+        resetAt: now + OPENCODE_GO_FIVE_HOUR_MS,
+      });
+    }
+    if (weeklyCount > 0) {
+      customWindows.push({
+        label: `Weekly · ${label}`,
+        percent: normalizePercent((weeklyCount / weekly) * 100) ?? 0,
+        resetAt: now + OPENCODE_GO_WEEK_MS,
+      });
+    }
+    if (monthlyCount > 0) {
+      customWindows.push({
+        label: `Monthly · ${label}`,
+        percent: normalizePercent((monthlyCount / monthly) * 100) ?? 0,
+        resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
+      });
+    }
   }
   return report(name, "opencode-go:docs-estimate", {
     customWindows,
