@@ -437,7 +437,15 @@ impl App {
             };
         }
         let mut height = 0;
-        for provider in self.visible_providers() {
+        // Layout: quota providers first, then the usage-only toggle, then the
+        // usage-only providers. The toggle therefore sits on the boundary between
+        // the two groups and stays pinned above the expanded content.
+        for provider in self
+            .state
+            .providers
+            .iter()
+            .filter(|provider| provider_has_quota(provider))
+        {
             height += provider_height(provider);
             if self.expanded_providers.contains(&provider.name) {
                 height += provider.accounts.iter().map(account_height).sum::<i32>();
@@ -446,14 +454,20 @@ impl App {
         if self.usage_only_count() > 0 {
             height += USAGE_TOGGLE_HEIGHT;
         }
+        if self.show_usage_only {
+            for provider in self
+                .state
+                .providers
+                .iter()
+                .filter(|provider| !provider_has_quota(provider))
+            {
+                height += provider_height(provider);
+                if self.expanded_providers.contains(&provider.name) {
+                    height += provider.accounts.iter().map(account_height).sum::<i32>();
+                }
+            }
+        }
         height
-    }
-
-    fn visible_providers(&self) -> impl Iterator<Item = &ProviderView> {
-        self.state
-            .providers
-            .iter()
-            .filter(|provider| provider_has_quota(provider) || self.show_usage_only)
     }
 
     fn usage_only_count(&self) -> usize {
@@ -2802,7 +2816,16 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
         let mut providers = app.state.providers.clone();
         providers.sort_by_key(|provider| !provider_has_quota(provider));
         providers.retain(|provider| provider_has_quota(provider) || app.show_usage_only);
+        // The toggle sits on the boundary between the two groups: after the quota
+        // providers and BEFORE the usage-only providers, so expanding the section
+        // never pushes the toggle itself down.
+        let mut toggle_drawn = false;
         for provider in providers {
+            if !toggle_drawn && !provider_has_quota(&provider) {
+                draw_usage_toggle(dc, width, height, y, app, small_font);
+                y += USAGE_TOGGLE_HEIGHT;
+                toggle_drawn = true;
+            }
             let provider_height = provider_height(&provider);
             let row = RECT {
                 left: 10,
@@ -3028,45 +3051,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                 }
             }
         }
-        if usage_only_count > 0 {
-            let toggle = RECT {
-                left: 10,
-                top: y,
-                right: width - 10,
-                bottom: y + USAGE_TOGGLE_HEIGHT,
-            };
-            if toggle.bottom > 101 && toggle.top < height {
-                app.usage_toggle_hit = Some(toggle);
-            }
-            let _ = SelectObject(dc, small_font);
-            set_text_color(dc, 0x00a6a6a6);
-            draw_text(
-                dc,
-                &if app.show_usage_only {
-                    format!("▾ 사용량만 있는 프로바이더 {usage_only_count}개 접기")
-                } else {
-                    format!("▸ 사용량만 있는 프로바이더 {usage_only_count}개 보기")
-                },
-                RECT {
-                    left: 18,
-                    top: y,
-                    right: width - 18 - USAGE_TOGGLE_VERSION_WIDTH - USAGE_TOGGLE_VERSION_GAP,
-                    bottom: y + USAGE_TOGGLE_HEIGHT,
-                },
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-            );
-            set_text_color(dc, 0x007a7a7a);
-            draw_text(
-                dc,
-                ocx_version_label(),
-                RECT {
-                    left: width - 18 - USAGE_TOGGLE_VERSION_WIDTH,
-                    top: y,
-                    right: width - 18,
-                    bottom: y + USAGE_TOGGLE_HEIGHT,
-                },
-                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-            );
+        if !toggle_drawn && usage_only_count > 0 {
+            draw_usage_toggle(dc, width, height, y, app, small_font);
         }
         let _ = SelectClipRgn(dc, None);
     }
@@ -3393,18 +3379,8 @@ unsafe fn draw_account_pause_control(
     let cy = (rect.top + rect.bottom) / 2;
     if paused {
         // Play means include this account in the rotation pool again.
-        for step in 0..7 {
-            let half = 6 - step;
-            fill_solid(
-                dc,
-                RECT {
-                    left: cx - 4 + step,
-                    top: cy - half,
-                    right: cx - 2 + step,
-                    bottom: cy + half,
-                },
-                color,
-            );
+        for rect in play_triangle_columns(cx - 4, cy, 7, 5) {
+            fill_solid(dc, rect, color);
         }
     } else {
         // Pause means exclude this account from the rotation pool.
@@ -3431,6 +3407,58 @@ unsafe fn draw_account_pause_control(
     }
 }
 
+unsafe fn draw_usage_toggle(
+    dc: HDC,
+    width: i32,
+    height: i32,
+    y: i32,
+    app: &mut App,
+    small_font: HFONT,
+) {
+    let usage_only_count = app.usage_only_count();
+    if usage_only_count == 0 {
+        return;
+    }
+    let toggle = RECT {
+        left: 10,
+        top: y,
+        right: width - 10,
+        bottom: y + USAGE_TOGGLE_HEIGHT,
+    };
+    if toggle.bottom > 101 && toggle.top < height {
+        app.usage_toggle_hit = Some(toggle);
+    }
+    let _ = SelectObject(dc, small_font);
+    set_text_color(dc, 0x00a6a6a6);
+    draw_text(
+        dc,
+        &if app.show_usage_only {
+            format!("▾ 사용량만 있는 프로바이더 {usage_only_count}개 접기")
+        } else {
+            format!("▸ 사용량만 있는 프로바이더 {usage_only_count}개 보기")
+        },
+        RECT {
+            left: 18,
+            top: y,
+            right: width - 18 - USAGE_TOGGLE_VERSION_WIDTH - USAGE_TOGGLE_VERSION_GAP,
+            bottom: y + USAGE_TOGGLE_HEIGHT,
+        },
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+    set_text_color(dc, 0x007a7a7a);
+    draw_text(
+        dc,
+        ocx_version_label(),
+        RECT {
+            left: width - 18 - USAGE_TOGGLE_VERSION_WIDTH,
+            top: y,
+            right: width - 18,
+            bottom: y + USAGE_TOGGLE_HEIGHT,
+        },
+        DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+}
+
 unsafe fn draw_account_switch_control(dc: HDC, rect: RECT, hot: bool, pressed: bool, busy: bool) {
     let color = if busy {
         0x006f7380
@@ -3442,19 +3470,25 @@ unsafe fn draw_account_switch_control(dc: HDC, rect: RECT, hot: bool, pressed: b
     let cx = (rect.left + rect.right) / 2;
     let cy = (rect.top + rect.bottom) / 2;
     // Right-pointing triangle: "make this account active".
-    for step in 0..7 {
-        let half = step.min(5);
-        fill_solid(
-            dc,
-            RECT {
-                left: cx - 5 + step,
-                top: cy - half,
-                right: cx - 3 + step,
-                bottom: cy + half + 1,
-            },
-            color,
-        );
+    for rect in play_triangle_columns(cx - 5, cy, 7, 5) {
+        fill_solid(dc, rect, color);
     }
+}
+
+/// Column rects forming a RIGHT-pointing play triangle: a 1px apex at the left edge
+/// that grows to the full height on the right edge (heights plateau at `max_half`).
+fn play_triangle_columns(origin_x: i32, cy: i32, steps: i32, max_half: i32) -> Vec<RECT> {
+    (0..steps)
+        .map(|step| {
+            let half = step.min(max_half);
+            RECT {
+                left: origin_x + step,
+                top: cy - half,
+                right: origin_x + step + 2,
+                bottom: cy + half + 1,
+            }
+        })
+        .collect()
 }
 
 unsafe fn draw_native_button(dc: HDC, rect: RECT, label: &str, disabled: bool) {
@@ -4412,6 +4446,20 @@ mod account_control_tests {
         assert_eq!(rect.left, ACCOUNT_IDENTITY_LEFT + 96 + ACCOUNT_ACTION_GAP);
         assert_eq!(rect.right - rect.left, ACCOUNT_ACTION_WIDTH);
         assert!(rect.right <= DEFAULT_WIDTH - 244);
+    }
+
+    #[test]
+    fn play_triangle_points_right_with_the_apex_on_the_left() {
+        let columns = play_triangle_columns(20, 30, 7, 5);
+        assert_eq!(columns.len(), 7);
+        // Apex on the left edge, base on the right edge.
+        let heights: Vec<i32> = columns.iter().map(|rect| rect.bottom - rect.top).collect();
+        assert_eq!(heights[0], 1);
+        assert_eq!(heights[6], 11);
+        assert!(heights.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(columns[0].left < columns[6].left);
+        assert_eq!(columns[0].left, 20);
+        assert_eq!(columns[6].right, 20 + 6 + 2);
     }
 
     #[test]
