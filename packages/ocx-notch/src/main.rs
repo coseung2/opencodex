@@ -3971,7 +3971,7 @@ unsafe fn draw_quota_row(
                     right: x0 + width,
                     bottom: top + 14,
                 },
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
             fill_solid(
                 dc,

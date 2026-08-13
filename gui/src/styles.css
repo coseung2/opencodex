@@ -1318,7 +1318,7 @@ dialog.modal-overlay::backdrop {
 .quota-row--segments { display: flex; align-items: center; min-width: 0; }
 .quota-segments { display: flex; flex: 1 1 auto; gap: 10px; min-width: 0; }
 .quota-segment { display: flex; flex: 1 1 0; flex-direction: column; gap: 3px; min-width: 0; }
-.quota-segment-label { font-size: var(--text-caption); color: var(--muted); }
+.quota-segment-label { font-size: var(--text-caption); color: var(--muted); text-align: right; }
 .quota-segment-bar { width: 100%; }
 .quota-reset-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-caption); color: var(--faint); }
 .quota-reset-day,
