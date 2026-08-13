@@ -288,7 +288,6 @@ function QuotaValueRow({ label, value }: { label: string; value: string }) {
 function QuotaSegmentsRow({ row }: { row: QuotaBarRow }) {
   return (
     <div className="quota-row quota-row--segments">
-      <span className="quota-label">{row.label}</span>
       <div className="quota-segments">
         {(row.segments ?? []).map(segment => (
           <div className="quota-segment" key={segment.label}>

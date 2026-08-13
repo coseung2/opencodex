@@ -3950,19 +3950,8 @@ unsafe fn draw_quota_row(
     if !row.segments.is_empty() {
         // Compact triple-bar row: narrow label + three side-by-side bars.
         let _ = SelectObject(dc, font);
-        set_text_color(dc, 0x00a6a6a6);
-        draw_text(
-            dc,
-            &row.label,
-            RECT {
-                left,
-                top,
-                right: left + 52,
-                bottom: top + 16,
-            },
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-        );
-        let seg_left = left + 58;
+        // No row label: the three bars share one baseline and start at the same edge.
+        let seg_left = left;
         let seg_right = right;
         let count = row.segments.len() as i32;
         let gap = 10;
