@@ -35,6 +35,7 @@ const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1";
 const OPENCODE_GO_COST_WINDOW_MS = 30 * 86_400_000;
 const OPENCODE_GO_FIVE_HOUR_MS = 5 * 3_600_000;
 const OPENCODE_GO_WEEK_MS = 7 * 86_400_000;
+const OPENCODE_GO_USAGE_PATH = "/usage";
 
 /** opencode.go published request limits per window (1x tier), opencode.ai/docs/go. */
 const OPENCODE_GO_LIMITS: Record<string, { label: string; fiveHour: number; weekly: number; monthly: number }> = {
@@ -820,12 +821,91 @@ function estimateOpencodeGoUsage(name: string, config: OcxProviderConfig): Openc
   return estimate;
 }
 
+interface OpencodeGoUsageWindow {
+  percent?: number;
+  resetAt?: number;
+}
+
 /**
- * One row with three narrow bars (5h / weekly / monthly) for the DOMINANT model —
- * the model with the most 30-day requests — compared against its published request
- * limits, mirroring the console's allocation display.
+ * Real allocation windows from the opencode.go usage endpoint (key-scoped).
+ * The console shows exactly these percents and reset times, so this replaces the
+ * local estimate whenever the endpoint answers.
  */
-function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): ProviderQuotaReport | null {
+async function fetchOpencodeGoUsageApi(apiKey: string | undefined): Promise<{
+  fiveHour: OpencodeGoUsageWindow;
+  weekly: OpencodeGoUsageWindow;
+  monthly: OpencodeGoUsageWindow;
+} | null> {
+  if (!apiKey?.trim()) return null;
+  const response = await fetch(`${OPENCODE_GO_BASE_URL}${OPENCODE_GO_USAGE_PATH}`, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) return null;
+  const body = asRecord(await response.json().catch(() => null));
+  const usage = asRecord(body?.usage);
+  if (!usage) return null;
+  const parse = (raw: unknown): OpencodeGoUsageWindow => {
+    const window = asRecord(raw);
+    const percent = normalizePercent(toFiniteNumber(window?.percent));
+    const resetAt = normalizeResetAt(window?.resetsAt);
+    return {
+      ...(percent !== undefined ? { percent } : {}),
+      ...(resetAt !== undefined ? { resetAt } : {}),
+    };
+  };
+  const fiveHour = parse(usage.rolling);
+  const weekly = parse(usage.weekly);
+  const monthly = parse(usage.monthly);
+  if (fiveHour.percent === undefined && weekly.percent === undefined && monthly.percent === undefined) {
+    return null;
+  }
+  return { fiveHour, weekly, monthly };
+}
+
+function opencodeGoSegments(api: NonNullable<Awaited<ReturnType<typeof fetchOpencodeGoUsageApi>>>): NonNullable<ProviderQuotaWindow["segments"]> {
+  const segments: NonNullable<ProviderQuotaWindow["segments"]> = [];
+  const push = (label: string, window: OpencodeGoUsageWindow) => {
+    if (window.percent === undefined) return;
+    segments.push({
+      label,
+      percent: window.percent,
+      ...(window.resetAt !== undefined ? { resetAt: window.resetAt } : {}),
+    });
+  };
+  push("5h", api.fiveHour);
+  push("Weekly", api.weekly);
+  push("Monthly", api.monthly);
+  return segments;
+}
+
+/**
+ * opencode.go allocation: prefer the key-scoped usage endpoint (exact console
+ * percents + real reset times); fall back to the local request-count estimate
+ * against published limits when the endpoint is unreachable or rejects.
+ */
+async function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
+  const activeKey = resolveEnvValue(config.apiKey)?.trim() ?? config.apiKey;
+  const api = await fetchOpencodeGoUsageApi(activeKey).catch(() => null);
+  if (api) {
+    const segments = opencodeGoSegments(api);
+    if (segments.length > 0) {
+      return report(name, "opencode-go:usage-api", {
+        customWindows: [{
+          // Row label intentionally empty: the segments carry their own labels.
+          label: "",
+          percent: 0,
+          segments,
+        }],
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
+  // Fallback: dominant model's local request counts against published limits.
   const estimate = estimateOpencodeGoUsage(name, config);
   if (!estimate) return null;
   const dominant = [...estimate.monthlyCounts.entries()]
@@ -833,10 +913,9 @@ function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Provider
   if (!dominant) return null;
   const { fiveHour, weekly, monthly } = OPENCODE_GO_LIMITS[dominant]!;
   const now = Date.now();
-
-  const quota: ProviderQuota = {
+  return report(name, "opencode-go:docs-estimate", {
     customWindows: [{
-      label: "할당량",
+      label: "",
       percent: 0,
       segments: [
         {
@@ -845,48 +924,70 @@ function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Provider
           resetAt: now + OPENCODE_GO_FIVE_HOUR_MS,
         },
         {
-          label: "주",
+          label: "Weekly",
           percent: normalizePercent(((estimate.weeklyCounts.get(dominant) ?? 0) / weekly) * 100) ?? 0,
           resetAt: now + OPENCODE_GO_WEEK_MS,
         },
         {
-          label: "월",
+          label: "Monthly",
           percent: normalizePercent(((estimate.monthlyCounts.get(dominant) ?? 0) / monthly) * 100) ?? 0,
           resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
         },
       ],
     }],
     updatedAt: now,
-  };
-  return report(name, "opencode-go:docs-estimate", quota);
+  });
 }
 
 /**
- * Per-key monthly-allocation percent for every connected key of a canonical
- * opencode.go provider, using the dominant model's published monthly request limit.
+ * Per-key monthly-allocation percent for every connected key: the usage endpoint
+ * answers per key, so each pool key reports its own real monthly percent. Keys the
+ * endpoint rejects fall back to the local 30-day request estimate.
  */
-export function opencodeGoKeyQuotaEstimates(config: OcxConfig, name: string): Record<string, ProviderQuota> | null {
+export async function opencodeGoKeyQuotaEstimates(config: OcxConfig, name: string): Promise<Record<string, ProviderQuota> | null> {
   const provider = config.providers[name];
   if (!provider) return null;
-  const estimate = estimateOpencodeGoUsage(name, provider);
-  if (!estimate) return null;
-  const dominant = [...estimate.monthlyCounts.entries()]
-    .sort((a, b) => b[1] - a[1])[0]?.[0];
-  if (!dominant) return null;
-  const monthlyLimit = OPENCODE_GO_LIMITS[dominant]!.monthly;
   const now = Date.now();
   const out: Record<string, ProviderQuota> = {};
-  for (const [keyId, count] of estimate.perKeyMonthlyCounts) {
-    out[keyId] = {
-      customWindows: [{
-        label: "월간 할당",
-        percent: normalizePercent((count / monthlyLimit) * 100) ?? 0,
-        resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
-      }],
-      updatedAt: now,
-    };
+  const pool = provider.apiKeyPool ?? [];
+  if (pool.length > 0) {
+    const results = await Promise.all(pool.map(async entry => {
+      const api = await fetchOpencodeGoUsageApi(entry.key).catch(() => null);
+      return [entry.id, api?.monthly] as const;
+    }));
+    for (const [keyId, monthly] of results) {
+      if (monthly?.percent === undefined) continue;
+      out[keyId] = {
+        customWindows: [{
+          label: "월간 할당",
+          percent: monthly.percent,
+          ...(monthly.resetAt !== undefined ? { resetAt: monthly.resetAt } : {}),
+        }],
+        updatedAt: now,
+      };
+    }
   }
-  return out;
+  // Fallback for keys the endpoint did not answer.
+  const estimate = estimateOpencodeGoUsage(name, provider);
+  if (estimate) {
+    const dominant = [...estimate.monthlyCounts.entries()]
+      .sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (dominant) {
+      const monthlyLimit = OPENCODE_GO_LIMITS[dominant]!.monthly;
+      for (const [keyId, count] of estimate.perKeyMonthlyCounts) {
+        if (out[keyId]) continue;
+        out[keyId] = {
+          customWindows: [{
+            label: "월간 할당",
+            percent: normalizePercent((count / monthlyLimit) * 100) ?? 0,
+            resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
+          }],
+          updatedAt: now,
+        };
+      }
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 /** Cursor included usage via api2.cursor.sh (Bearer from OAuth) — unofficial, may change. */

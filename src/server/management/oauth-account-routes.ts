@@ -419,7 +419,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const { listProviderApiKeys } = await import("../../providers/api-keys");
     const { opencodeGoKeyQuotaEstimates } = await import("../../providers/quota");
     const result = listProviderApiKeys(config, name);
-    const keyQuotas = opencodeGoKeyQuotaEstimates(config, name);
+    const keyQuotas = await opencodeGoKeyQuotaEstimates(config, name);
     if (!keyQuotas) return jsonResponse(result);
     return jsonResponse({
       ...result,

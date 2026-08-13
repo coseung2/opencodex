@@ -399,34 +399,69 @@ describe("fetchProviderQuotaReports", () => {
     writeFileSync(join(opencodexHome, "usage.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   }
 
-  test("opencode-go segments count requests against the published per-model limits", async () => {
+  test("opencode-go reports live usage-api segments with real percents and reset times", async () => {
     seedOpencodeGoUsage();
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://opencode.ai/zen/go/v1/usage");
+      return new Response(JSON.stringify({
+        usage: {
+          rolling: { status: "ok", percent: 9, resetsAt: "2026-08-13T19:35:53.051Z" },
+          weekly: { status: "ok", percent: 7, resetsAt: "2026-08-17T00:00:00.051Z" },
+          monthly: { status: "ok", percent: 3, resetsAt: "2026-08-21T21:26:36.051Z" },
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const result = await fetchProviderQuotaReports(opencodeGoOnlyConfig(), true);
+    const report = result.reports.find(item => item.provider === "opencode-go");
+    expect(report?.source).toBe("opencode-go:usage-api");
+    const segments = report?.quota.customWindows?.[0]?.segments ?? [];
+    expect(segments.map(segment => segment.label)).toEqual(["5h", "Weekly", "Monthly"]);
+    expect(segments.map(segment => segment.percent)).toEqual([9, 7, 3]);
+    expect(segments[0]?.resetAt).toBe(Date.parse("2026-08-13T19:35:53.051Z"));
+    expect(segments[1]?.resetAt).toBe(Date.parse("2026-08-17T00:00:00.051Z"));
+    expect(segments[2]?.resetAt).toBe(Date.parse("2026-08-21T21:26:36.051Z"));
+  });
+
+  test("opencode-go falls back to the request-limit estimate when the usage API rejects", async () => {
+    seedOpencodeGoUsage();
+    globalThis.fetch = (async () => new Response("unauthorized", { status: 401 })) as typeof fetch;
     const result = await fetchProviderQuotaReports(opencodeGoOnlyConfig(), true);
     const report = result.reports.find(item => item.provider === "opencode-go");
     expect(report?.source).toBe("opencode-go:docs-estimate");
-    expect(report?.quota.customWindows?.[0]).toMatchObject({
-      percent: 0,
-      segments: [
-        { label: "5h", percent: (2 / 31_650) * 100, resetAt: expect.any(Number) },
-        { label: "주", percent: (2 / 79_050) * 100, resetAt: expect.any(Number) },
-        { label: "월", percent: (2 / 158_150) * 100, resetAt: expect.any(Number) },
-      ],
-    });
+    const segments = report?.quota.customWindows?.[0]?.segments ?? [];
+    expect(segments.map(segment => segment.label)).toEqual(["5h", "Weekly", "Monthly"]);
+    expect(segments[0]).toMatchObject({ percent: (2 / 31_650) * 100 });
+    expect(segments[1]).toMatchObject({ percent: (2 / 79_050) * 100 });
+    expect(segments[2]).toMatchObject({ percent: (2 / 158_150) * 100 });
+    for (const segment of segments) {
+      expect(segment.resetAt).toBeGreaterThan(Date.now());
+    }
   });
 
-  test("opencode-go key rows show monthly request-limit percents for every connected key", async () => {
+  test("opencode-go key rows show live monthly percents for every connected key", async () => {
     seedOpencodeGoUsage();
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
+      const monthly = auth.includes("active-secret") ? 4.2 : 1.1;
+      return new Response(JSON.stringify({
+        usage: {
+          rolling: { status: "ok", percent: 9 },
+          weekly: { status: "ok", percent: 7 },
+          monthly: { status: "ok", percent: monthly, resetsAt: "2026-08-21T21:26:36.051Z" },
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
     const config = opencodeGoOnlyConfig();
-    const estimates = opencodeGoKeyQuotaEstimates(config, "opencode-go");
+    const estimates = await opencodeGoKeyQuotaEstimates(config, "opencode-go");
     expect(estimates).not.toBeNull();
     expect(Object.keys(estimates!).sort()).toEqual(["key-active", "key-standby"]);
     expect(estimates!["key-active"]?.customWindows?.[0]).toMatchObject({
       label: "월간 할당",
-      percent: (2 / 158_150) * 100,
+      percent: 4.2,
     });
     expect(estimates!["key-standby"]?.customWindows?.[0]).toMatchObject({
       label: "월간 할당",
-      percent: 0,
+      percent: 1.1,
     });
   });
 

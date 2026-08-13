@@ -226,9 +226,9 @@ export default function QuotaBars({ quota, plan, threshold, t, className, layout
       <div className={`codex-account-quota-slot quota-compact${className ? ` ${className}` : ""}`}>
       {rows.map(row => (
         row.segments !== undefined && row.segments.length > 0
-          ? <QuotaSegmentsRow key={row.label} row={row} />
+          ? <QuotaSegmentsRow key={row.label} row={row} threshold={threshold} t={t} locale={locale} />
           : row.valueLabel !== undefined
-            ? <QuotaValueRow key={row.label} label={row.label} value={row.valueLabel} />
+          ? <QuotaValueRow key={row.label} label={row.label} value={row.valueLabel} />
           : (
             <QuotaRow
               key={row.label}
@@ -285,18 +285,51 @@ function QuotaValueRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function QuotaSegmentsRow({ row }: { row: QuotaBarRow }) {
+function QuotaSegmentsRow({ row, threshold, t, locale }: {
+  row: QuotaBarRow;
+  threshold: number;
+  t: TFn;
+  locale: Locale;
+}) {
   return (
     <div className="quota-row quota-row--segments">
       <div className="quota-segments">
         {(row.segments ?? []).map(segment => (
-          <div className="quota-segment" key={segment.label}>
-            <span className="quota-segment-label">{segment.label} {Math.round(segment.percent)}%</span>
-            <div className="bar quota-segment-bar">
-              <div className="bar-fill" style={barFillStyle(segment.percent)} />
-            </div>
-          </div>
+          <QuotaSegment
+            key={segment.label}
+            segment={segment}
+            threshold={threshold}
+            t={t}
+            locale={locale}
+          />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function QuotaSegment({ segment, threshold, t, locale }: {
+  segment: { label: string; percent: number; resetAt?: number };
+  threshold: number;
+  t: TFn;
+  locale: Locale;
+}) {
+  const warn = isQuotaWarn(segment.percent, threshold);
+  const color = quotaBarTone(segment.percent, threshold);
+  const reset = formatResetFuture(segment.resetAt, t, locale);
+  return (
+    <div className="quota-segment">
+      <span className="quota-segment-head">
+        <span className="quota-segment-title">
+          {segment.label}
+          {reset ? <span className="quota-segment-reset"> · {reset}</span> : null}
+        </span>
+        <span className={`quota-segment-val${warn ? " quota-segment-val--warn" : ""}`}>
+          {Math.round(segment.percent)}%
+        </span>
+      </span>
+      <div className="bar quota-segment-bar">
+        <div className={`bar-fill ${color}`} style={barFillStyle(segment.percent)} />
       </div>
     </div>
   );
@@ -315,13 +348,14 @@ function StackedQuotaRow({ row, threshold, t, locale }: {
           <span className="quota-stacked-limit">{row.limitLabel}</span>
         </div>
         <div className="quota-segments">
-          {row.segments.map(segment => (
-            <div className="quota-segment" key={segment.label}>
-              <span className="quota-segment-label">{segment.label} {Math.round(segment.percent)}%</span>
-              <div className="bar quota-segment-bar">
-                <div className="bar-fill" style={barFillStyle(segment.percent)} />
-              </div>
-            </div>
+          {(row.segments ?? []).map(segment => (
+            <QuotaSegment
+              key={segment.label}
+              segment={segment}
+              threshold={threshold}
+              t={t}
+              locale={locale}
+            />
           ))}
         </div>
       </div>

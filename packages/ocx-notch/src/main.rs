@@ -46,7 +46,9 @@ const MAX_WIDTH: i32 = 1_200;
 const RESIZE_EDGE: i32 = 7;
 const COLLAPSED_HEIGHT: i32 = 58;
 const CONTENT_TOP: i32 = 101;
-const USAGE_TOGGLE_HEIGHT: i32 = 42;
+// Compact row: 28px keeps the space below the toggle text equal to the
+// provider-row bottom spacing, so the collapsed and expanded states look the same.
+const USAGE_TOGGLE_HEIGHT: i32 = 28;
 const USAGE_TOGGLE_VERSION_WIDTH: i32 = 140;
 const USAGE_TOGGLE_VERSION_GAP: i32 = 4;
 const LOG_ROW_HEIGHT: i32 = 44;
@@ -425,7 +427,9 @@ impl App {
         if !self.expanded {
             return COLLAPSED_HEIGHT;
         }
-        (114 + self.content_height()).clamp(180, 720)
+        // Content runs from CONTENT_TOP; the 6px bottom gap matches the header's
+        // 6px top padding so the expanded panel is vertically balanced.
+        (107 + self.content_height()).clamp(180, 720)
     }
 
     fn content_height(&self) -> i32 {
@@ -3948,25 +3952,39 @@ unsafe fn draw_quota_row(
     threshold: u32,
 ) {
     if !row.segments.is_empty() {
-        // Compact triple-bar row: narrow label + three side-by-side bars.
+        // One row of standard-style bars: label + reset left, percent right,
+        // bar below — repeated side by side for every allocation window.
         let _ = SelectObject(dc, font);
-        // No row label: the three bars share one baseline and start at the same edge.
-        let seg_left = left;
-        let seg_right = right;
         let count = row.segments.len() as i32;
-        let gap = 10;
-        let width = ((seg_right - seg_left - gap * (count - 1)) / count).max(24);
+        let gap = 12;
+        let width = ((right - left - gap * (count - 1)) / count).max(24);
         for (index, segment) in row.segments.iter().enumerate() {
-            let x0 = seg_left + index as i32 * (width + gap);
+            let x0 = left + index as i32 * (width + gap);
             let percent = segment.percent.unwrap_or(0.0);
             let warning = (threshold > 0 && percent >= threshold as f64) || percent >= 99.5;
-            // Label + percent share one line ABOVE the bar.
-            set_text_color(dc, if warning { 0x0024bffb } else { 0x00a6a6a6 });
+            // Label + reset share one line ABOVE the bar, like the standard rows.
+            let head = match format_reset(segment.reset_at) {
+                Some(reset) => format!("{} · {}", segment.label, reset),
+                None => segment.label.clone(),
+            };
+            set_text_color(dc, 0x00a6a6a6);
             draw_text(
                 dc,
-                &format!("{} {}", segment.label, format_percent(percent)),
+                &head,
                 RECT {
                     left: x0,
+                    top,
+                    right: x0 + width - 44,
+                    bottom: top + 14,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            set_text_color(dc, if warning { 0x0024bffb } else { 0x00ececec });
+            draw_text(
+                dc,
+                &format_percent(percent),
+                RECT {
+                    left: x0 + width - 42,
                     top,
                     right: x0 + width,
                     bottom: top + 14,
@@ -3977,13 +3995,13 @@ unsafe fn draw_quota_row(
                 dc,
                 RECT {
                     left: x0,
-                    top: top + 15,
+                    top: top + 16,
                     right: x0 + width,
-                    bottom: top + 20,
+                    bottom: top + 21,
                 },
                 0x00303030,
             );
-            draw_quota_fill(dc, x0, x0 + width, top + 15, percent, warning);
+            draw_quota_fill(dc, x0, x0 + width, top + 16, percent, warning);
         }
         return;
     }
@@ -4619,9 +4637,9 @@ mod account_control_tests {
                 reset_at: None,
                 value_label: None,
                 segments: vec![
-                    QuotaSegment { label: "5h".into(), percent: Some(8.4), reset_at: None },
-                    QuotaSegment { label: "주".into(), percent: Some(3.36), reset_at: None },
-                    QuotaSegment { label: "월".into(), percent: Some(33.9), reset_at: None },
+                    QuotaSegment { label: "5h".into(), percent: Some(8.4), reset_at: Some(1_785_945_600_000.0) },
+                    QuotaSegment { label: "Weekly".into(), percent: Some(3.36), reset_at: Some(1_785_945_600_000.0) },
+                    QuotaSegment { label: "Monthly".into(), percent: Some(33.9), reset_at: None },
                 ],
             }],
             ..Default::default()
@@ -4632,8 +4650,10 @@ mod account_control_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "할당량");
         assert_eq!(rows[0].segments.len(), 3);
-        assert_eq!(rows[0].segments[2].label, "월");
-        assert_eq!(rows[0].segments[2].percent, Some(33.9));
+        assert_eq!(rows[0].segments[1].label, "Weekly");
+        assert_eq!(rows[0].segments[1].percent, Some(3.36));
+        assert_eq!(rows[0].segments[2].label, "Monthly");
+        assert_eq!(rows[0].segments[2].reset_at, None);
     }
 
     #[test]
