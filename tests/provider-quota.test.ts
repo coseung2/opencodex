@@ -303,6 +303,51 @@ describe("fetchProviderQuotaReports", () => {
     });
   });
 
+  test("xAI unified billing with zero usage still reports the weekly meter at 0%", async () => {
+    await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      config: {
+        currentPeriod: {
+          type: "USAGE_PERIOD_TYPE_WEEKLY",
+          start: "2026-08-12T14:12:26Z",
+          end: "2026-08-19T14:12:26Z",
+        },
+        isUnifiedBillingUser: true,
+        onDemandCap: { val: 0 },
+        onDemandUsed: { val: 0 },
+        prepaidBalance: { val: 0 },
+        topUpMethod: "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(xaiOnlyConfig(), true);
+
+    expect(result.reports).toHaveLength(1);
+    expect(result.reports[0]?.source).toBe("xai:grok-credits");
+    expect(result.reports[0]?.quota).toEqual({
+      weeklyPercent: 0,
+      weeklyResetAt: Date.parse("2026-08-19T14:12:26Z"),
+      updatedAt: expect.any(Number),
+    });
+  });
+
+  test("xAI unified billing computes weekly percent from the on-demand cap", async () => {
+    await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      config: {
+        currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-08-19T14:12:26Z" },
+        isUnifiedBillingUser: true,
+        onDemandCap: { val: 200 },
+        onDemandUsed: { val: 50 },
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(xaiOnlyConfig(), true);
+
+    expect(result.reports).toHaveLength(1);
+    expect(result.reports[0]?.quota.weeklyPercent).toBe(25);
+  });
+
   function kimiOnlyConfig(baseUrl = "https://api.kimi.com/coding/v1"): OcxConfig {
     return {
       defaultProvider: "kimi",

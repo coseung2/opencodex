@@ -20,6 +20,10 @@ const ACCOUNT_TOKEN_SKEW_MS = 60_000;
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
+/** Kiro's getUsageLimits endpoint cold-starts slowly after idle periods (>8s seen); keep a
+ *  dedicated, more generous bound so a flaky first hit does not drop the provider into the
+ *  "no quota" bucket for the rest of the negative-cache window. */
+const KIRO_QUOTA_TIMEOUT_MS = 20_000;
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_USAGE_URL = `${KIMI_CODE_BASE_URL}/usages`;
 const KIRO_USAGE_LIMITS_PATH = "getUsageLimits";
@@ -118,6 +122,13 @@ function normalizePercent(value: unknown): number | undefined {
   return numeric === undefined ? undefined : Math.max(0, Math.min(100, numeric));
 }
 
+/** Numeric value from a billing object ({ val: 123 }) or a bare number. */
+function billingValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const record = asRecord(value);
+  return toFiniteNumber(record?.val);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -177,14 +188,33 @@ async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | nu
   const body = asRecord(await response.json().catch(() => null));
   const config = asRecord(body?.config);
   const currentPeriod = asRecord(config?.currentPeriod);
+  // A weekly window is the meter contract; other shapes (spend-cap etc.) fail closed.
   if (currentPeriod?.type !== "USAGE_PERIOD_TYPE_WEEKLY") return null;
-  const creditUsagePercent = config?.creditUsagePercent;
-  if (typeof creditUsagePercent !== "number" || !Number.isFinite(creditUsagePercent) || creditUsagePercent < 0 || creditUsagePercent > 100) return null;
   if (typeof currentPeriod.end !== "string" || !currentPeriod.end.trim()) return null;
   const resetAt = normalizeResetAt(currentPeriod.end);
   if (resetAt === undefined) return null;
+
+  let weeklyPercent: number | undefined;
+  if (typeof config?.creditUsagePercent === "number"
+    && Number.isFinite(config.creditUsagePercent)
+    && config.creditUsagePercent >= 0
+    && config.creditUsagePercent <= 100) {
+    weeklyPercent = config.creditUsagePercent;
+  } else {
+    // Unified-billing shape exposes on-demand usage vs cap as { val } objects.
+    const cap = billingValue(config?.onDemandCap);
+    const used = billingValue(config?.onDemandUsed);
+    if (cap !== undefined && cap > 0 && used !== undefined) {
+      weeklyPercent = normalizePercent((used / cap) * 100);
+    } else if (used === 0) {
+      // A zero-usage unified account still owns the weekly meter; report 0% so the
+      // provider stays in the usage section instead of being reclassified as no-quota.
+      weeklyPercent = 0;
+    }
+  }
+  if (weeklyPercent === undefined) return null;
   const quota: ProviderQuota = {
-    weeklyPercent: creditUsagePercent,
+    weeklyPercent,
     weeklyResetAt: resetAt,
     updatedAt: Date.now(),
   };
@@ -226,7 +256,7 @@ async function fetchKiroUsageQuota(
 
   const response = await fetch(url, {
     headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(KIRO_QUOTA_TIMEOUT_MS),
   });
   if (!response.ok) return null;
   const body = asRecord(await response.json().catch(() => null));
