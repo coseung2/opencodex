@@ -399,34 +399,38 @@ describe("fetchProviderQuotaReports", () => {
     writeFileSync(join(opencodexHome, "usage.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   }
 
-  test("opencode-go reports dollar-based 5h/weekly/monthly limits plus the 30-day cost", async () => {
+  test("opencode-go reports one row with 5h/weekly/monthly percent segments", async () => {
     seedOpencodeGoUsage();
     const result = await fetchProviderQuotaReports(opencodeGoOnlyConfig(), true);
     const report = result.reports.find(item => item.provider === "opencode-go");
     expect(report?.source).toBe("opencode-go:docs-estimate");
-    expect(report?.quota.customWindows?.[0]).toEqual({
-      label: "추산 비용 · 30일",
+    expect(report?.quota.customWindows?.[0]).toMatchObject({
+      label: "할당량",
       percent: 0,
-      valueLabel: "~$1.01",
+      segments: [
+        { label: "5h", percent: (1.008 / 12) * 100, resetAt: expect.any(Number) },
+        { label: "주", percent: (1.008 / 30) * 100, resetAt: expect.any(Number) },
+        { label: "월", percent: (1.008 / 60) * 100, resetAt: expect.any(Number) },
+      ],
     });
     // 5M uncached input × $0.14/M + 1M output × $0.28/M + 10M cached × $0.0028/M ≈ $1.01.
     // Both seeded requests fall inside every window, so each percent is cost/limit.
-    expect(report?.quota.fiveHourPercent).toBe((1.008 / 12) * 100);
-    expect(report?.quota.fiveHourResetAt).toBeGreaterThan(Date.now());
-    expect(report?.quota.weeklyPercent).toBe((1.008 / 30) * 100);
-    expect(report?.quota.weeklyResetAt).toBeGreaterThan(Date.now());
-    expect(report?.quota.monthlyPercent).toBe((1.008 / 60) * 100);
-    expect(report?.quota.monthlyResetAt).toBeGreaterThan(Date.now());
   });
 
-  test("opencode-go key estimates cover every connected key, charging traffic to the active key", async () => {
+  test("opencode-go key rows show monthly-limit percents for every connected key", async () => {
     seedOpencodeGoUsage();
     const config = opencodeGoOnlyConfig();
     const estimates = opencodeGoKeyQuotaEstimates(config, "opencode-go");
     expect(estimates).not.toBeNull();
     expect(Object.keys(estimates!).sort()).toEqual(["key-active", "key-standby"]);
-    expect(estimates!["key-active"]?.customWindows?.[0]?.valueLabel).toBe("~$1.01");
-    expect(estimates!["key-standby"]?.customWindows?.[0]?.valueLabel).toBe("~$0.00");
+    expect(estimates!["key-active"]?.customWindows?.[0]).toMatchObject({
+      label: "월간 할당",
+      percent: (1.008 / 60) * 100,
+    });
+    expect(estimates!["key-standby"]?.customWindows?.[0]).toMatchObject({
+      label: "월간 할당",
+      percent: 0,
+    });
   });
 
   test("opencode-go quota fails closed for a lookalike base URL", async () => {

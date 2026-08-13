@@ -74,6 +74,8 @@ export interface ProviderQuotaWindow {
   resetAt?: number;
   /** Text value shown instead of a percent bar (e.g. an estimated cost). */
   valueLabel?: string;
+  /** Compact percent segments rendered as narrow bars on ONE row (label/percent per segment). */
+  segments?: { label: string; percent: number; resetAt?: number }[];
 }
 
 export interface ProviderQuota {
@@ -854,16 +856,27 @@ function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Provider
   const now = Date.now();
 
   const quota: ProviderQuota = {
-    fiveHourPercent: normalizePercent((estimate.costFiveHourUsd / OPENCODE_GO_FIVE_HOUR_LIMIT_USD) * 100) ?? 0,
-    fiveHourResetAt: now + OPENCODE_GO_FIVE_HOUR_MS,
-    weeklyPercent: normalizePercent((estimate.costWeeklyUsd / OPENCODE_GO_WEEKLY_LIMIT_USD) * 100) ?? 0,
-    weeklyResetAt: now + OPENCODE_GO_WEEK_MS,
-    monthlyPercent: normalizePercent((estimate.costMonthlyUsd / OPENCODE_GO_MONTHLY_LIMIT_USD) * 100) ?? 0,
-    monthlyResetAt: now + OPENCODE_GO_COST_WINDOW_MS,
+    // One row with three narrow bars: 5h / weekly / monthly dollar-limit utilization.
     customWindows: [{
-      label: "추산 비용 · 30일",
+      label: "할당량",
       percent: 0,
-      valueLabel: `~$${estimate.costMonthlyUsd.toFixed(2)}`,
+      segments: [
+        {
+          label: "5h",
+          percent: normalizePercent((estimate.costFiveHourUsd / OPENCODE_GO_FIVE_HOUR_LIMIT_USD) * 100) ?? 0,
+          resetAt: now + OPENCODE_GO_FIVE_HOUR_MS,
+        },
+        {
+          label: "주",
+          percent: normalizePercent((estimate.costWeeklyUsd / OPENCODE_GO_WEEKLY_LIMIT_USD) * 100) ?? 0,
+          resetAt: now + OPENCODE_GO_WEEK_MS,
+        },
+        {
+          label: "월",
+          percent: normalizePercent((estimate.costMonthlyUsd / OPENCODE_GO_MONTHLY_LIMIT_USD) * 100) ?? 0,
+          resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
+        },
+      ],
     }],
     updatedAt: now,
   };
@@ -884,9 +897,9 @@ export function opencodeGoKeyQuotaEstimates(config: OcxConfig, name: string): Re
   for (const [keyId, bucket] of estimate.perKeyCostUsd) {
     out[keyId] = {
       customWindows: [{
-        label: "추산 비용 · 30일",
-        percent: 0,
-        valueLabel: `~$${bucket.costUsd.toFixed(2)}`,
+        label: "월간 할당",
+        percent: normalizePercent((bucket.costUsd / OPENCODE_GO_MONTHLY_LIMIT_USD) * 100) ?? 0,
+        resetAt: now + OPENCODE_GO_COST_WINDOW_MS,
       }],
       updatedAt: now,
     };

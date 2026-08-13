@@ -491,6 +491,7 @@ struct QuotaBarRow {
     percent: f64,
     reset_at: Option<f64>,
     value_label: Option<String>,
+    segments: Vec<QuotaSegment>,
 }
 
 fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
@@ -504,6 +505,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
             percent,
             reset_at: quota.five_hour_reset_at,
             value_label: None,
+            segments: Vec::new(),
         });
     }
     if let Some(percent) = quota.weekly_percent {
@@ -512,6 +514,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
             percent,
             reset_at: quota.weekly_reset_at,
             value_label: None,
+            segments: Vec::new(),
         });
     }
     if let Some(percent) = quota.monthly_percent {
@@ -520,6 +523,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
             percent,
             reset_at: quota.monthly_reset_at,
             value_label: None,
+            segments: Vec::new(),
         });
     }
     for window in &quota.custom_windows {
@@ -529,6 +533,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
                 percent,
                 reset_at: window.reset_at,
                 value_label: window.value_label.clone(),
+                segments: window.segments.clone(),
             });
         }
     }
@@ -3942,6 +3947,68 @@ unsafe fn draw_quota_row(
     font: HFONT,
     threshold: u32,
 ) {
+    if !row.segments.is_empty() {
+        // Compact triple-bar row: narrow label + three side-by-side bars.
+        let _ = SelectObject(dc, font);
+        set_text_color(dc, 0x00a6a6a6);
+        draw_text(
+            dc,
+            &row.label,
+            RECT {
+                left,
+                top,
+                right: left + 52,
+                bottom: top + 16,
+            },
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        let seg_left = left + 58;
+        let seg_right = right;
+        let count = row.segments.len() as i32;
+        let gap = 10;
+        let width = ((seg_right - seg_left - gap * (count - 1)) / count).max(24);
+        for (index, segment) in row.segments.iter().enumerate() {
+            let x0 = seg_left + index as i32 * (width + gap);
+            let percent = segment.percent.unwrap_or(0.0);
+            let warning = (threshold > 0 && percent >= threshold as f64) || percent >= 99.5;
+            set_text_color(dc, 0x00a6a6a6);
+            draw_text(
+                dc,
+                &segment.label,
+                RECT {
+                    left: x0,
+                    top,
+                    right: x0 + width,
+                    bottom: top + 13,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            fill_solid(
+                dc,
+                RECT {
+                    left: x0,
+                    top: top + 14,
+                    right: x0 + width,
+                    bottom: top + 19,
+                },
+                0x00303030,
+            );
+            draw_quota_fill(dc, x0, x0 + width, top + 14, percent, warning);
+            set_text_color(dc, if warning { 0x0024bffb } else { 0x00ececec });
+            draw_text(
+                dc,
+                &format_percent(percent),
+                RECT {
+                    left: x0,
+                    top: top + 20,
+                    right: x0 + width,
+                    bottom: top + 28,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+        return;
+    }
     let warning = (threshold > 0 && row.percent >= threshold as f64) || row.percent >= 99.5;
     let _ = SelectObject(dc, font);
     set_text_color(dc, if warning { 0x0024bffb } else { 0x00a6a6a6 });
@@ -4552,6 +4619,7 @@ mod account_control_tests {
                 percent: Some(0.0),
                 reset_at: None,
                 value_label: Some("~$8.48".into()),
+                segments: Vec::new(),
             }],
             ..Default::default()
         };
@@ -4562,6 +4630,32 @@ mod account_control_tests {
         assert_eq!(rows[0].label, "추산 비용 · 30일");
         assert_eq!(rows[0].percent, 0.0);
         assert_eq!(rows[0].value_label.as_deref(), Some("~$8.48"));
+    }
+
+    #[test]
+    fn segment_windows_become_one_row_with_three_narrow_bars() {
+        let quota = Quota {
+            custom_windows: vec![QuotaWindow {
+                label: "할당량".into(),
+                percent: Some(0.0),
+                reset_at: None,
+                value_label: None,
+                segments: vec![
+                    QuotaSegment { label: "5h".into(), percent: Some(8.4), reset_at: None },
+                    QuotaSegment { label: "주".into(), percent: Some(3.36), reset_at: None },
+                    QuotaSegment { label: "월".into(), percent: Some(33.9), reset_at: None },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let rows = quota_rows(Some(&quota));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "할당량");
+        assert_eq!(rows[0].segments.len(), 3);
+        assert_eq!(rows[0].segments[2].label, "월");
+        assert_eq!(rows[0].segments[2].percent, Some(33.9));
     }
 
     #[test]

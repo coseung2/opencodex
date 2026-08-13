@@ -30,6 +30,16 @@ pub struct QuotaWindow {
     pub reset_at: Option<f64>,
     #[serde(default)]
     pub value_label: Option<String>,
+    #[serde(default)]
+    pub segments: Vec<QuotaSegment>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSegment {
+    pub label: String,
+    pub percent: Option<f64>,
+    pub reset_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -14,6 +14,8 @@ export type QuotaBarRow = {
   resetAt?: number;
   /** Text value rendered instead of the percent bar (e.g. an estimated cost). */
   valueLabel?: string;
+  /** Compact percent segments rendered as narrow bars on ONE row. */
+  segments?: { label: string; percent: number; resetAt?: number }[];
 };
 
 /**
@@ -89,6 +91,7 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
         percent: w.percent,
         resetAt: w.resetAt,
         ...(w.valueLabel !== undefined ? { valueLabel: w.valueLabel } : {}),
+        ...(w.segments !== undefined && w.segments.length > 0 ? { segments: w.segments } : {}),
       },
     });
   }
@@ -222,8 +225,10 @@ export default function QuotaBars({ quota, plan, threshold, t, className, layout
     return (
       <div className={`codex-account-quota-slot quota-compact${className ? ` ${className}` : ""}`}>
       {rows.map(row => (
-        row.valueLabel !== undefined
-          ? <QuotaValueRow key={row.label} label={row.label} value={row.valueLabel} />
+        row.segments !== undefined && row.segments.length > 0
+          ? <QuotaSegmentsRow key={row.label} row={row} />
+          : row.valueLabel !== undefined
+            ? <QuotaValueRow key={row.label} label={row.label} value={row.valueLabel} />
           : (
             <QuotaRow
               key={row.label}
@@ -280,12 +285,51 @@ function QuotaValueRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function QuotaSegmentsRow({ row }: { row: QuotaBarRow }) {
+  return (
+    <div className="quota-row quota-row--segments">
+      <span className="quota-label">{row.label}</span>
+      <div className="quota-segments">
+        {(row.segments ?? []).map(segment => (
+          <div className="quota-segment" key={segment.label}>
+            <span className="quota-segment-label">{segment.label}</span>
+            <div className="bar quota-segment-bar">
+              <div className="bar-fill" style={barFillStyle(segment.percent)} />
+            </div>
+            <span className="quota-segment-pct">{Math.round(segment.percent)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StackedQuotaRow({ row, threshold, t, locale }: {
   row: QuotaBarRow;
   threshold: number;
   t: TFn;
   locale: Locale;
 }) {
+  if (row.segments !== undefined && row.segments.length > 0) {
+    return (
+      <div className="quota-stacked-row quota-stacked-row--segments">
+        <div className="quota-stacked-head">
+          <span className="quota-stacked-limit">{row.limitLabel}</span>
+        </div>
+        <div className="quota-segments">
+          {row.segments.map(segment => (
+            <div className="quota-segment" key={segment.label}>
+              <span className="quota-segment-label">{segment.label}</span>
+              <div className="bar quota-segment-bar">
+                <div className="bar-fill" style={barFillStyle(segment.percent)} />
+              </div>
+              <span className="quota-segment-pct">{Math.round(segment.percent)}%</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (row.valueLabel !== undefined) {
     return (
       <div className="quota-stacked-row quota-stacked-row--value">

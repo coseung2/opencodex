@@ -74,6 +74,29 @@ describe("buildQuotaRows (WP070)", () => {
     });
   });
 
+  test("segment custom windows carry three narrow percents on one row", () => {
+    const rows = buildQuotaRows(quota({
+      customWindows: [{
+        label: "할당량",
+        percent: 0,
+        segments: [
+          { label: "5h", percent: 8.4 },
+          { label: "주", percent: 3.36 },
+          { label: "월", percent: 33.9 },
+        ],
+      }],
+    }), null, t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      label: "할당량",
+      segments: [
+        { label: "5h", percent: 8.4 },
+        { label: "주", percent: 3.36 },
+        { label: "월", percent: 33.9 },
+      ],
+    });
+  });
+
   test("Kimi total subscription credits use the localized quota label", () => {
     const rows = buildQuotaRows(quota({
       customWindows: [{ label: "Total subscription credits", percent: 1 }],
