@@ -775,6 +775,10 @@ const configSchema = z.object({
   syncCodexSubagentDefaults: z.boolean().optional().catch(undefined),
   codexShimAutoRestore: z.boolean().optional(),
   pausedCodexAccountIds: z.array(z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/)).optional(),
+  // OAuth account ids come from external identity providers (JWT sub, ARN-derived
+  // hashes, UUIDs), so validate only length, never charset: a foreign id must not
+  // drop the whole paused set on config load.
+  pausedOauthAccountIds: z.record(z.string(), z.array(z.string().min(1).max(128))).optional(),
   codexAccountNamespaces: codexAccountNamespacesSchema.optional(),
   // Model ids excluded from the Grok Build managed block (dashboard switches).
   grokExcludedModels: z.array(z.string()).optional(),

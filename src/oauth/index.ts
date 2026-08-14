@@ -878,11 +878,17 @@ export async function runLogin(
       if (!existing.accountId && !existing.email) {
         throw new Error("Could not verify signed-in account identity for reauth.");
       }
-      const identityMatches = existing.accountId && cred.accountId
-        ? existing.accountId === cred.accountId
-        : existing.email && cred.email
-          ? existing.email.toLowerCase() === cred.email.toLowerCase()
-          : false;
+      // Kiro social accounts share one device-scoped profile ARN, so reauth identity
+      // must compare the signed-in email first; otherwise reauthenticating a different
+      // Google account would silently overwrite the selected slot. Other providers keep
+      // accountId-first matching.
+      const identityMatches = provider === "kiro" && existing.email && cred.email
+        ? existing.email.toLowerCase() === cred.email.toLowerCase()
+        : existing.accountId && cred.accountId
+          ? existing.accountId === cred.accountId
+          : existing.email && cred.email
+            ? existing.email.toLowerCase() === cred.email.toLowerCase()
+            : false;
       if (!identityMatches) {
         throw new Error("Signed-in account does not match the selected account. Sign in with the same account.");
       }

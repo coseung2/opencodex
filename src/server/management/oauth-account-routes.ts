@@ -23,6 +23,7 @@ import {
   submitManualLoginCode,
 } from "../../oauth";
 import { OAuthMutationBusyError, removeCredential } from "../../oauth/store";
+import { isOauthAccountPaused, setOauthAccountPaused } from "../../oauth/account-pause";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
@@ -242,7 +243,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
               needsReauth: summary.needsReauth === true,
               reauthReason: summary.needsReauth === true ? "refresh_failed" : undefined,
             });
-          return { ...summary, ...oauthAccountHealthFields(provider, summary.id, health) };
+          return {
+            ...summary,
+            paused: isOauthAccountPaused(config, provider, summary.id),
+            ...oauthAccountHealthFields(provider, summary.id, health),
+          };
         }),
       };
     };
@@ -275,6 +280,9 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const provider = (body.provider ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
     if (!body.accountId) return jsonResponse({ error: "missing accountId" }, 400);
+    if (isOauthAccountPaused(config, provider, body.accountId)) {
+      return jsonResponse({ error: "Account is paused" }, 409);
+    }
     const { setActiveAccount } = await import("../../oauth/store");
     if (!(await setActiveAccount(provider, body.accountId))) return jsonResponse({ error: "account not found" }, 404);
     if (provider === "anthropic") {
@@ -284,6 +292,37 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
     return jsonResponse({ ok: true, provider, activeAccountId: body.accountId });
+  }
+
+  // OAuth account pause/resume: administratively exclude an account from pool
+  // selection without touching its credential. Pausing the active account promotes
+  // the first remaining non-paused account (or clears the active selection).
+  if (url.pathname === "/api/oauth/accounts/pause" && req.method === "PUT") {
+    const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; accountId?: string; paused?: boolean };
+    const provider = (body.provider ?? "").trim().toLowerCase();
+    if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
+    if (!body.accountId) return jsonResponse({ error: "missing accountId" }, 400);
+    if (typeof body.paused !== "boolean") return jsonResponse({ error: "paused must be a boolean" }, 400);
+
+    const { getAccountSet, setActiveAccount } = await import("../../oauth/store");
+    const set = getAccountSet(provider);
+    if (!set?.accounts.some(account => account.id === body.accountId)) {
+      return jsonResponse({ error: "account not found" }, 404);
+    }
+
+    setOauthAccountPaused(config, provider, body.accountId, body.paused);
+    if (body.paused && set.activeAccountId === body.accountId) {
+      const fallback = set.accounts.find(account =>
+        account.id !== body.accountId && !isOauthAccountPaused(config, provider, account.id),
+      );
+      if (fallback) await setActiveAccount(provider, fallback.id);
+      else await setActiveAccount(provider, body.accountId); // no replacement; keep selection but paused
+    }
+    const { clearProviderQuotaCache } = await import("../../providers/quota");
+    clearProviderQuotaCache();
+    saveConfigPreservingClaudeCode(config);
+    reconcileLiveStateStores();
+    return jsonResponse({ ok: true, provider, accountId: body.accountId, paused: body.paused });
   }
 
   // Opt-in Anthropic OAuth account pool (#294): enable/threshold/strategy + clear cooldown.

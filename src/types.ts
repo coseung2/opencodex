@@ -725,6 +725,13 @@ export interface OcxConfig {
   /** Account ids administratively excluded from future pool selection until resumed. */
   pausedCodexAccountIds?: string[];
   /**
+   * OAuth provider account ids administratively excluded from pool selection until
+   * resumed, keyed by provider name (for example `kiro`, `anthropic`, `xai`).
+   * A paused account cannot be activated; pausing the active account promotes the
+   * first non-paused account (or clears the active selection when none remain).
+   */
+  pausedOauthAccountIds?: Record<string, string[]>;
+  /**
    * Public model-selector namespaces bound to one Codex account. Values are stored account ids;
    * `"@main"` selects the Codex Desktop/main auth.json account. Account display aliases
    * are intentionally separate from these selectors.

@@ -266,6 +266,23 @@ function kiroCliImportSelectorConfigured(): boolean {
   return Boolean(process.env.KIROCLI_DB_PATH?.trim() || process.env.KIRO_CLI_DB_FILE?.trim());
 }
 
+/**
+ * True only when a custom KIROCLI_DB_PATH / KIRO_CLI_DB_FILE selector points at a
+ * DIFFERENT database than the native kiro-cli store. A selector that resolves to the
+ * native store (the common Windows case where the installer path is exported into the
+ * environment) is not ambiguous for logout rollback: the file being snapshotted is
+ * exactly the one `kiro-cli logout` mutates.
+ */
+function kiroCliImportSelectorConflictsWithNative(): boolean {
+  const configured = process.env.KIROCLI_DB_PATH?.trim() || process.env.KIRO_CLI_DB_FILE?.trim();
+  if (!configured) return false;
+  const configuredPath = expandPath(configured);
+  const normalize = process.platform === "win32"
+    ? (value: string) => win32.normalize(value).toLowerCase()
+    : (value: string) => posix.normalize(value);
+  return !nativeKiroCliSessionEntries().some(entry => normalize(entry.path) === normalize(configuredPath));
+}
+
 function selectTokenRow(db: Database): { value: string } | null | "ambiguous" | "selected_missing" {
   const rows = db.query("SELECT key, value FROM auth_kv WHERE key LIKE ? ORDER BY key ASC").all("%:token") as Array<{ key: string; value: string }>;
   const selectedKey = process.env.KIROCLI_TOKEN_KEY?.trim();
@@ -488,7 +505,7 @@ export function inspectKiroCliSessionSnapshot(): {
   blocked: boolean;
 } {
   const diagnostics: KiroImportDiagnostic[] = [];
-  if (kiroCliImportSelectorConfigured()) {
+  if (kiroCliImportSelectorConflictsWithNative()) {
     diagnostics.push({ location: "kiro-cli-db-env", status: "token_ambiguous" });
     return { snapshot: null, diagnostics, blocked: true };
   }

@@ -456,19 +456,42 @@ export async function saveCredential(
   if (!safe) return;
   await mutateStore(store => {
     const set = store[provider];
-    const identity = safe.accountId ?? safe.email;
+    // Kiro social logins share one device-scoped CodeWhisperer profile ARN, so the
+    // profile ARN cannot distinguish Google accounts. Prefer the signed-in email for
+    // Kiro identity so a second Google account appends a pool row instead of silently
+    // replacing the first. Other providers keep accountId-first identity semantics.
+    const identityKey = (candidate: OAuthCredentials): string | undefined =>
+      provider === "kiro"
+        ? (candidate.email ?? candidate.accountId)
+        : (candidate.accountId ?? candidate.email);
+    const identity = identityKey(safe);
     if (!set || SINGLE_SLOT_PROVIDERS.has(provider)) {
       const id = newAccountId(safe);
       store[provider] = { activeAccountId: id, accounts: [{ id, credential: safe, addedAt: Date.now() }] };
       return;
     }
     if (identity) {
-      const existing = set.accounts.find(a => (a.credential.accountId ?? a.credential.email) === identity);
+      const existing = set.accounts.find(a => identityKey(a.credential) === identity);
       if (existing) {
         existing.credential = safe;
         delete existing.needsReauth;
         set.activeAccountId = existing.id;
         return;
+      }
+      // Kiro legacy rows created before email was extracted carry only the profile ARN.
+      // Upgrade an email-less row in place when the new credential proves it is the
+      // same underlying Kiro profile, instead of appending a duplicate for the same human.
+      if (provider === "kiro" && safe.email && safe.kiro?.profileArn) {
+        const legacy = set.accounts.find(a =>
+          a.credential.email === undefined
+          && a.credential.kiro?.profileArn === safe.kiro?.profileArn,
+        );
+        if (legacy) {
+          legacy.credential = safe;
+          delete legacy.needsReauth;
+          set.activeAccountId = legacy.id;
+          return;
+        }
       }
       // Legacy migration: a pre-identity row (no accountId/email) for this provider is the
       // SAME human re-logging in after the identity extraction shipped — upgrading the

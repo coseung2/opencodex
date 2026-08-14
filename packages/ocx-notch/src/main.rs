@@ -95,6 +95,8 @@ enum ContentTab {
 
 #[derive(Clone, PartialEq, Eq)]
 struct AccountControl {
+    provider: String,
+    kind: String,
     id: String,
     paused: bool,
 }
@@ -918,10 +920,10 @@ fn reauth_text_color(_waiting: bool) -> u32 {
     0x0024bffb
 }
 
-fn set_openai_account_paused(pools: &mut [AccountPool], id: &str, paused: bool) -> bool {
+fn set_pool_account_paused(pools: &mut [AccountPool], provider: &str, id: &str, paused: bool) -> bool {
     let Some(account) = pools
         .iter_mut()
-        .find(|pool| pool.provider == "openai")
+        .find(|pool| pool.provider == provider)
         .and_then(|pool| pool.accounts.iter_mut().find(|account| account.id == id))
     else {
         return false;
@@ -930,15 +932,15 @@ fn set_openai_account_paused(pools: &mut [AccountPool], id: &str, paused: bool) 
     true
 }
 
-fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
+fn launch_pause_action(hwnd: HWND, control: AccountControl, paused: bool) {
     let mut started = false;
     with_app(|app| {
-        if app.account_mutations.contains(&id) {
+        if app.account_mutations.contains(&control.id) {
             return;
         }
-        app.account_mutations.insert(id.clone());
-        app.pause_overrides.insert(id.clone(), paused);
-        set_openai_account_paused(&mut app.state.pools, &id, paused);
+        app.account_mutations.insert(control.id.clone());
+        app.pause_overrides.insert(control.id.clone(), paused);
+        set_pool_account_paused(&mut app.state.pools, &control.provider, &control.id, paused);
         app.rebuild_provider_views();
         app.state.status = if paused {
             "Pausing account…".into()
@@ -956,9 +958,13 @@ fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
 
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
-        let result = api::set_codex_account_paused(&id, paused);
+        let result = if control.kind == "oauth" {
+            api::set_oauth_account_paused(&control.provider, &control.id, paused)
+        } else {
+            api::set_codex_account_paused(&control.id, paused)
+        };
         with_app(|app| {
-            app.account_mutations.remove(&id);
+            app.account_mutations.remove(&control.id);
             match result {
                 Ok(()) => {
                     app.state.status = if paused {
@@ -969,8 +975,8 @@ fn launch_pause_action(hwnd: HWND, id: String, paused: bool) {
                     app.force_refresh.store(true, Ordering::Release);
                 }
                 Err(error) => {
-                    app.pause_overrides.remove(&id);
-                    set_openai_account_paused(&mut app.state.pools, &id, !paused);
+                    app.pause_overrides.remove(&control.id);
+                    set_pool_account_paused(&mut app.state.pools, &control.provider, &control.id, !paused);
                     app.rebuild_provider_views();
                     app.state.status = error;
                 }
@@ -997,7 +1003,7 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
         }
         app.account_switch_mutations.insert(key.clone());
         let previous = mark_active_account(&mut app.state.pools, &control.provider, &control.id);
-        needs_unpause = control.kind == "codex"
+        needs_unpause = (control.kind == "codex" || control.kind == "oauth")
             && app
                 .state
                 .pools
@@ -1042,9 +1048,13 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
 
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
-        // The server refuses to activate a paused Codex account (409), so unpause first.
+        // The server refuses to activate a paused Codex/OAuth account (409), so unpause first.
         if needs_unpause {
-            let _ = api::set_codex_account_paused(&control.id, false);
+            if control.kind == "oauth" {
+                let _ = api::set_oauth_account_paused(&control.provider, &control.id, false);
+            } else {
+                let _ = api::set_codex_account_paused(&control.id, false);
+            }
         }
         let result = api::set_active_account(&control.provider, &control.kind, &control.id);
         with_app(|app| {
@@ -1500,7 +1510,10 @@ fn begin_oauth_preset(hwnd: HWND, provider: String) {
         let deadline = Instant::now() + Duration::from_secs(300);
         let flow: Result<AuthFlowResponse, String> = api::post_json(
             "/api/oauth/login",
-            &serde_json::json!({"provider": provider}),
+            // addAccount forces a fresh browser identity instead of re-importing the
+            // current local CLI session, so "add account" really adds a new pool row
+            // (kiro, anthropic, xai, ...) rather than silently refreshing the old one.
+            &serde_json::json!({"provider": provider, "addAccount": true}),
         );
         let result = flow.and_then(|flow| {
             with_app(|app| {
@@ -2332,7 +2345,7 @@ unsafe extern "system" fn window_proc(
                         .iter()
                         .any(|(rect, hit)| hit.id == control.id && point_in(rect, x, y));
                     if released_inside && !app.account_mutations.contains(&control.id) {
-                        pause_action = Some((control.id, !control.paused));
+                        pause_action = Some((control.clone(), !control.paused));
                     }
                     return;
                 }
@@ -2408,8 +2421,8 @@ unsafe extern "system" fn window_proc(
             if let Some(action) = power_action {
                 launch_power_action(hwnd, action);
             }
-            if let Some((id, paused)) = pause_action {
-                launch_pause_action(hwnd, id, paused);
+            if let Some((control, paused)) = pause_action {
+                launch_pause_action(hwnd, control, paused);
             }
             if let Some(control) = switch_action {
                 launch_switch_action(hwnd, control);
@@ -2952,8 +2965,10 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     let identity_width = measure_text_width(dc, &account.identity);
                     let action_rect = account_action_rect(width, y, identity_width);
                     // One control per pool row: the ACTIVE account shows pause, every
-                    // other account shows play ("make this account active").
-                    let show_action_control = provider.name == "openai" || pool_size > 1;
+                    // other account shows play ("make this account active"). OAuth pools
+                    // (kiro/anthropic/xai) get the same controls as the Codex/API-key pools.
+                    let show_action_control =
+                        provider.name == "openai" || pool_size > 1 || account.kind == "oauth";
                     let pause_busy = app.account_mutations.contains(&account.id);
                     let switch_busy = app
                         .account_switch_mutations
@@ -2979,10 +2994,13 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     );
                     if show_action_control {
                         if account.active {
-                            // Pause: this account is the one currently in use. Codex
-                            // accounts can be paused (excluded from rotation); OAuth/API
-                            // key rows show the same state indicator without a pause API.
+                            // Pause: this account is the one currently in use. Codex and
+                            // OAuth (kiro/anthropic/xai) pool accounts can be paused
+                            // (excluded from selection); API-key rows show the same state
+                            // indicator without a pause API.
                             let control = AccountControl {
+                                provider: provider.name.clone(),
+                                kind: account.kind.clone(),
                                 id: account.id.clone(),
                                 paused: false,
                             };
@@ -2997,7 +3015,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                                 pressed,
                                 pause_busy,
                             );
-                            if provider.name == "openai"
+                            if (provider.name == "openai" || account.kind == "oauth")
                                 && !pause_busy
                                 && action_rect.bottom > 101
                                 && action_rect.top < height

@@ -325,12 +325,15 @@ describe("Kiro review regressions", () => {
     await saveCredential("kiro", credential, { preserveIdentityless: true });
 
     const set = getAccountSet("kiro")!;
-    expect(set.accounts.length).toBeGreaterThanOrEqual(2);
-    const legacy = getAccountCredential("kiro", legacySlot);
-    expect(legacy).toMatchObject({
-      accountId: legacyArn,
-      refresh: "rt-legacy",
-      kiro: { profileArn: legacyArn },
+    // Identity is email-first for Kiro social logins, so the same signed-in Google
+    // account (same email, new profile ARN) upgrades the bound legacy slot in place
+    // instead of appending a duplicate row. The slot stays active and selectable.
+    expect(set.accounts).toHaveLength(1);
+    expect(getAccountCredential("kiro", legacySlot)).toMatchObject({
+      accountId: nextArn,
+      refresh: "rt-next",
+      email: "legacy@example.test",
+      kiro: { profileArn: nextArn },
     });
     expect(await setActiveAccount("kiro", legacySlot)).toBe(true);
     expect(getAccountSet("kiro")?.activeAccountId).toBe(legacySlot);
@@ -372,6 +375,53 @@ describe("Kiro review regressions", () => {
       accountId: profileArn,
       kiro: { profileArn },
     });
+  });
+
+  test("Kiro social accounts behind one device profile ARN pool by email", async () => {
+    const deviceArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/device";
+    const kiroMeta = { kiro: { profileArn: deviceArn, apiRegion: "us-east-1" } };
+    await saveCredential("kiro", {
+      access: "aoa-a",
+      refresh: "rt-a",
+      expires: Date.now() + 60_000,
+      accountId: deviceArn,
+      email: "a@example.test",
+      source: "local-cli",
+      ...kiroMeta,
+    });
+    const firstId = getAccountSet("kiro")!.activeAccountId;
+
+    // Re-login of the SAME Google account (same email, same device ARN) upserts in place.
+    await saveCredential("kiro", {
+      access: "aoa-a2",
+      refresh: "rt-a2",
+      expires: Date.now() + 60_000,
+      accountId: deviceArn,
+      email: "a@example.test",
+      source: "local-cli",
+      ...kiroMeta,
+    });
+    let set = getAccountSet("kiro")!;
+    expect(set.accounts).toHaveLength(1);
+    expect(set.activeAccountId).toBe(firstId);
+    expect(getAccountCredential("kiro", firstId)).toMatchObject({ access: "aoa-a2" });
+
+    // A DIFFERENT Google account behind the same device profile ARN appends a pool row.
+    await saveCredential("kiro", {
+      access: "aoa-b",
+      refresh: "rt-b",
+      expires: Date.now() + 60_000,
+      accountId: deviceArn,
+      email: "b@example.test",
+      source: "local-cli",
+      ...kiroMeta,
+    });
+    set = getAccountSet("kiro")!;
+    expect(set.accounts).toHaveLength(2);
+    const b = set.accounts.find(account => account.credential.email === "b@example.test");
+    expect(b).toBeDefined();
+    expect(set.activeAccountId).toBe(b!.id);
+    expect(getAccountCredential("kiro", firstId)).toMatchObject({ access: "aoa-a2" });
   });
 
   test("same-PID process restart restores a stale Kiro CLI recovery transaction", () => {

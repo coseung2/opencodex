@@ -79,6 +79,23 @@ pub fn set_codex_account_paused(id: &str, paused: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Pause or resume one OAuth pool account (kiro, anthropic, xai, ...).
+pub fn set_oauth_account_paused(provider: &str, id: &str, paused: bool) -> Result<(), String> {
+    let body = serde_json::json!({
+        "provider": provider,
+        "accountId": id,
+        "paused": paused,
+    })
+    .to_string();
+    request(
+        "PUT",
+        "/api/oauth/accounts/pause",
+        Some(body.as_bytes()),
+        10_000,
+    )?;
+    Ok(())
+}
+
 pub fn run_ocx_command(action: &str) -> Result<(), String> {
     let action = match action {
         "start" | "stop" => action,
@@ -351,7 +368,10 @@ fn parse_account_pool_value(provider: String, kind: &str, value: &Value) -> Acco
                 active,
                 health,
                 quota,
-                paused: false,
+                paused: account
+                    .get("paused")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 needs_reauth: account
                     .get("needsReauth")
                     .and_then(Value::as_bool)
@@ -430,7 +450,7 @@ mod tests {
         let value = serde_json::json!({
             "activeAccountId": "second",
             "accounts": [
-                {"id": "first", "masked": "fir***@example.com"},
+                {"id": "first", "masked": "fir***@example.com", "paused": true},
                 {
                     "id": "second",
                     "label": "work",
@@ -447,6 +467,8 @@ mod tests {
         assert_eq!(pool.accounts[0].kind, "oauth");
         assert_eq!(pool.accounts[1].kind, "oauth");
         assert!(!pool.accounts[0].active);
+        assert!(pool.accounts[0].paused);
+        assert!(!pool.accounts[1].paused);
         assert_eq!(pool.accounts[1].identity, "work");
         assert!(pool.accounts[1].active);
         assert!(pool.accounts[1].needs_reauth);
