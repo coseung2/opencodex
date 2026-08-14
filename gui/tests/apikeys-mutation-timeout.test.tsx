@@ -6,7 +6,6 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import ApiKeys from "../src/pages/ApiKeys";
-import { settleAssertion } from "./_settle";
 
 // Delete and rename hold the detail pane's navigation lock while they run. A
 // connection that accepts the request and then never answers used to leave the
@@ -178,7 +177,7 @@ test("a delete that never answers gives navigation back instead of locking it", 
 
     // While it is in flight the lock is correct: another key must not receive
     // the result of this one.
-    await settleAssertion(() => expect(backButton(container).disabled).toBe(true));
+    expect(backButton(container).disabled).toBe(true);
 
     // The bound fires and the page is usable again — no reload required.
     await tick(120);

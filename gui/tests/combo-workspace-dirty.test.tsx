@@ -5,7 +5,6 @@ import type { Root } from "react-dom/client";
 import type { ComboItem } from "../src/combo-workspace-data";
 import ComboWorkspace from "../src/components/ComboWorkspace";
 import { LanguageProvider } from "../src/i18n/provider";
-import { settleAssertion } from "./_settle";
 
 const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
@@ -118,7 +117,7 @@ test("Strict Mode: edit, revert, and unsaved navigation keep dirty state coheren
   await act(async () => {
     railButton(container, "combo/beta").click();
   });
-  await settleAssertion(() => expect(container.querySelector("#cwi-unsaved-title")).toBeTruthy());
+  expect(container.querySelector("#cwi-unsaved-title")).toBeTruthy();
 
   const keepButton = container.querySelector<HTMLButtonElement>('[data-testid="cwi-unsaved-keep"]');
   expect(keepButton).toBeTruthy();

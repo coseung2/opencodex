@@ -5,7 +5,6 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import { ClaudeCodeSettingsCard } from "../src/pages/claude-code-sections";
 import type { ClaudeCodeState } from "../src/pages/claude-code-types";
-import { settleAssertion } from "./_settle";
 
 const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], PropertyDescriptor | undefined>;
@@ -129,9 +128,7 @@ test("Empty Auto draft keeps model input enabled until Inherit is chosen", async
       .set!.call(model, "gpt-4o");
     model.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
   });
-  await settleAssertion(() =>
-    expect(getState().webSearchSidecar).toEqual({ backend: undefined, model: "gpt-4o" }),
-  );
+  expect(getState().webSearchSidecar).toEqual({ backend: undefined, model: "gpt-4o" });
 
   await act(async () => {
     Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")!

@@ -5,7 +5,6 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import ProviderModels from "../src/components/provider-workspace/ProviderModels";
 import type { WorkspaceItem } from "../src/provider-workspace/catalog";
-import { settleAssertion } from "./_settle";
 
 const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 const originalFetch = globalThis.fetch;
@@ -108,7 +107,7 @@ test("quick-add submits the trimmed model id for the current provider", async ()
     method: "POST",
     body: { provider: "AiCodeWith", modelId: "claude-opus-5.1" },
   }]);
-  await settleAssertion(() => expect(refreshes).toBe(1));
+  expect(refreshes).toBe(1);
   expect(input.value).toBe("");
   expect(container.querySelector('[role="status"]')?.textContent).toContain("Custom model added");
 
@@ -148,9 +147,7 @@ test("quick-add keeps the model id when the server rejects it", async () => {
   });
 
   expect(input.value).toBe("claude-opus-5.1");
-  await settleAssertion(() =>
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Failed to save custom model"),
-  );
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("Failed to save custom model");
 
   await act(async () => { root.unmount(); });
 });
@@ -170,9 +167,7 @@ test("quick-add recovers from a network failure", async () => {
   });
 
   expect(input.disabled).toBe(false);
-  await settleAssertion(() =>
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Network error"),
-  );
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("Network error");
 
   await act(async () => { root.unmount(); });
 });
@@ -226,7 +221,7 @@ test("a failed custom-model lookup recovers through retry without a remount", as
 
   // The retry refetched in the same mount and Add is usable again.
   expect(getCalls).toBe(2);
-  await settleAssertion(() => expect(addButton.disabled).toBe(false));
+  expect(addButton.disabled).toBe(false);
 
   await act(async () => { addButton.click(); await Promise.resolve(); await Promise.resolve(); });
   expect(posts).toHaveLength(1);
@@ -249,9 +244,7 @@ test("successful quick-add appears immediately when catalog refresh is unavailab
     await Promise.resolve();
   });
 
-  await settleAssertion(() =>
-    expect(container.querySelector(".pws-model-id")?.textContent).toBe("claude-opus-5.1-custom"),
-  );
+  expect(container.querySelector(".pws-model-id")?.textContent).toBe("claude-opus-5.1-custom");
   await act(async () => { root.unmount(); });
 });
 

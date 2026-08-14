@@ -6,7 +6,6 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import ApiKeys from "../src/pages/ApiKeys";
-import { settleAssertion } from "./_settle";
 
 // The model catalog had one sentence for three different situations: nothing
 // installed, nothing matching the search, and a load that failed. This pins
@@ -145,7 +144,7 @@ test("a query matching nothing names the query, and does not claim the catalog i
     await tick();
 
     // Two models exist; the catalog is not empty, the filter is.
-    await settleAssertion(() => expect(container.textContent).toContain("No models match"));
+    expect(container.textContent).toContain("No models match");
     expect(container.textContent).toContain("nothing-matches-this");
     expect(container.textContent).not.toContain("No externally callable models are available yet.");
   } finally {
