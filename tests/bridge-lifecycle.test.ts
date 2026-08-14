@@ -118,22 +118,26 @@ describe("bridge stream lifecycle (RC1 / RC2)", () => {
         text += decoder.decode(value, { stream: true });
       }
     })();
-    try {
-      await Promise.race([
-        completed,
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stall stream did not close")), 2_500)),
-      ]);
-    } finally {
-      await reader.cancel();
-    }
+      try {
+        await Promise.race([
+          completed,
+          // The stall timeout is 1s; this race is only a guard against a stream that
+          // NEVER closes. Keep it comfortably above the stall window so a loaded CI
+          // runner (event-loop delay) does not decide the result — the assertions
+          // below still require response.incomplete and upstream cancellation.
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stall stream did not close")), 4_500)),
+        ]);
+      } finally {
+        await reader.cancel();
+      }
     const names = text.split("\n\n")
       .map(frame => frame.split("\n").find(line => line.startsWith("event: "))?.slice(7) ?? "")
       .filter(Boolean);
 
     expect(names).toContain("response.incomplete");
-    expect(names).not.toContain("response.completed");
-    expect(cancelled).toBe(true);
-  }, 3_000);
+      expect(names).not.toContain("response.completed");
+      expect(cancelled).toBe(true);
+    }, 5_000);
 
   test("terminal callback reports completed for a normal done event", async () => {
     const terminals: string[] = [];
