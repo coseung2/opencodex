@@ -6,6 +6,7 @@ import ProviderSettings from "../src/components/provider-workspace/ProviderSetti
 import type { ProviderUpdatePatch } from "../src/components/provider-workspace/types";
 import { LanguageProvider } from "../src/i18n/provider";
 import type { WorkspaceItem } from "../src/provider-workspace/catalog";
+import { settleAssertion } from "./_settle";
 
 const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
@@ -70,10 +71,15 @@ async function mountSettings(item: WorkspaceItem): Promise<{
 }
 
 async function save(container: HTMLElement): Promise<void> {
-  const button = container.querySelector<HTMLButtonElement>(".pwi-settings-sticky-bar .btn-primary");
-  expect(button).toBeTruthy();
+  // The sticky save bar renders only after the dirty-state update lands; on a
+  // loaded runner that can trail the input event by more than one flush.
+  await settleAssertion(() => {
+    const button = container.querySelector<HTMLButtonElement>(".pwi-settings-sticky-bar .btn-primary");
+    expect(button).toBeTruthy();
+  });
+  const button = container.querySelector<HTMLButtonElement>(".pwi-settings-sticky-bar .btn-primary")!;
   await act(async () => {
-    button!.click();
+    button.click();
     await Promise.resolve();
   });
 }

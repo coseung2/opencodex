@@ -5,6 +5,7 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import ProviderOverview from "../src/components/provider-workspace/ProviderOverview";
 import type { WorkspaceItem } from "../src/provider-workspace/catalog";
+import { settleAssertion } from "./_settle";
 
 const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
@@ -111,10 +112,12 @@ test("notes save keeps editor open, draft, and error when update is rejected", a
   await setDraft(textarea, "draft that must survive");
   await blurNotes(textarea);
 
-  expect(calls).toBe(1);
+  await settleAssertion(() => expect(calls).toBe(1));
   expect(container.querySelector(".pws-notes-textarea")).toBeTruthy();
   expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.value).toBe("draft that must survive");
-  expect(container.querySelector('[role="alert"]')?.textContent).toBe("quota exceeded");
+  await settleAssertion(() =>
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("quota exceeded"),
+  );
   expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.disabled).toBe(false);
 
   await act(async () => { root.unmount(); });
@@ -136,9 +139,11 @@ test("notes save closes editor only after an acknowledged success", async () => 
   await setDraft(textarea, "saved note");
   await blurNotes(textarea);
 
-  expect(calls).toBe(1);
+  await settleAssertion(() => expect(calls).toBe(1));
   expect(container.querySelector(".pws-notes-textarea")).toBeTruthy();
-  expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.disabled).toBe(true);
+  await settleAssertion(() =>
+    expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.disabled).toBe(true),
+  );
 
   await act(async () => {
     resolveUpdate({ ok: true });
