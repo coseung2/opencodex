@@ -1,0 +1,6 @@
+# The GUI suite drives React through happy-dom with act()/flush timing. bun's
+# default test worker count equals the runner's CPU count; on loaded shared CI
+# runners the event-loop starvation inside those workers makes the timing
+# assertions flaky. Cap workers so each test file gets a stable CPU slice.
+[test]
+parallel = 2
