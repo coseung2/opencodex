@@ -11,6 +11,7 @@ import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isol
 let testDir = "";
 let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
+const originalFetch = globalThis.fetch;
 
 function baseConfig(): OcxConfig {
   return {
@@ -28,6 +29,12 @@ beforeEach(() => {
   isolatedCodexHome = installIsolatedCodexHome("ocx-provider-keys-codex-");
   testDir = mkdtempSync(join(tmpdir(), "ocx-provider-keys-"));
   process.env.OPENCODEX_HOME = testDir;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "https://opencode.ai/zen/go/v1/usage") {
+      return new Response("unauthorized", { status: 401 });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
   saveConfig(baseConfig());
 });
 
@@ -36,6 +43,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
+  globalThis.fetch = originalFetch;
   if (testDir) rmSync(testDir, { recursive: true, force: true });
 });
 
