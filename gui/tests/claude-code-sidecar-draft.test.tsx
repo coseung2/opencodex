@@ -131,7 +131,6 @@ test("Empty Auto draft keeps model input enabled until Inherit is chosen", async
   });
   await settleAssertion(
     () => expect(getState().webSearchSidecar).toEqual({ backend: undefined, model: "gpt-4o" }),
-    testWindow,
   );
 
   await act(async () => {

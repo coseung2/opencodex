@@ -173,7 +173,7 @@ test("rename is pessimistic: pending locks, failure keeps the draft, success clo
 
   // In flight: the typed name went out, and the controls lock so a second
   // submit cannot race the first.
-  await settleAssertion(() => expect(calls).toEqual([["k1", "renamed"]]), testWindow);
+  await settleAssertion(() => expect(calls).toEqual([["k1", "renamed"]]));
   expect(container.querySelector<HTMLInputElement>("#awi-key-name")!.disabled).toBe(true);
 
   // Rejected: the editor, the draft and a local error all survive.

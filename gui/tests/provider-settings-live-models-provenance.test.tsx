@@ -76,7 +76,7 @@ async function save(container: HTMLElement): Promise<void> {
   await settleAssertion(() => {
     const button = container.querySelector<HTMLButtonElement>(".pwi-settings-sticky-bar .btn-primary");
     expect(button).toBeTruthy();
-  }, testWindow);
+  });
   const button = container.querySelector<HTMLButtonElement>(".pwi-settings-sticky-bar .btn-primary")!;
   await act(async () => {
     button.click();

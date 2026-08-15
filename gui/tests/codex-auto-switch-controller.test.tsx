@@ -397,7 +397,7 @@ describe("Codex auto-switch controller interactions", () => {
       keyDown(harness.input, "Enter");
       await Promise.resolve();
     });
-    await settleAssertion(() => expect(harness.writes).toEqual([95]), testWindow);
+    await settleAssertion(() => expect(harness.writes).toEqual([95]));
 
     await act(async () => {
       write.resolve(new Response(null, { status: 204 }));
@@ -422,7 +422,7 @@ describe("Codex auto-switch controller interactions", () => {
       await flush();
     });
 
-    await settleAssertion(() => expect(harness.input.value).toBe("80"), testWindow);
+    await settleAssertion(() => expect(harness.input.value).toBe("80"));
     expect(harness.container.textContent).toContain("80% usage or above");
     expect(harness.container.querySelector('[role="alert"]')?.textContent).toContain("could not be confirmed");
     expect(harness.writes).toEqual([95]);
@@ -440,7 +440,7 @@ describe("Codex auto-switch controller interactions", () => {
     });
 
     expect(harness.input.value).toBe("80");
-    await settleAssertion(() => expect(harness.writes).toEqual([]), testWindow);
+    await settleAssertion(() => expect(harness.writes).toEqual([]));
     expect(harness.container.querySelector("#codex-auto-switch-feedback")).toBeNull();
   });
 
@@ -475,7 +475,7 @@ describe("Codex auto-switch controller interactions", () => {
       await flush();
     });
 
-    await settleAssertion(() => expect(harness.writes).toEqual([0, 95]), testWindow);
+    await settleAssertion(() => expect(harness.writes).toEqual([0, 95]));
     expect(harness.currentInput()?.value).toBe("95");
     expect(harness.currentToggle().getAttribute("aria-pressed")).toBe("true");
     expect(harness.container.textContent).toContain("95% usage or above");

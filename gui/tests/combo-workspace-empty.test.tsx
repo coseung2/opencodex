@@ -106,7 +106,7 @@ test("an empty combo list creates the first combo and shows confirmation", async
       .set!.call(providerSelect, "openai");
     providerSelect.dispatchEvent(new testWindow.Event("change", { bubbles: true }));
   });
-  await settleAssertion(() => expect(idInput.value).toBe("first"), testWindow);
+  await settleAssertion(() => expect(idInput.value).toBe("first"));
   expect(providerSelect.value).toBe("openai");
   expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')?.value).toBe("gpt-5");
 

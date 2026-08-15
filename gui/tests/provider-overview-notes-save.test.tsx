@@ -112,12 +112,11 @@ test("notes save keeps editor open, draft, and error when update is rejected", a
   await setDraft(textarea, "draft that must survive");
   await blurNotes(textarea);
 
-  await settleAssertion(() => expect(calls).toBe(1), testWindow);
+  await settleAssertion(() => expect(calls).toBe(1));
   expect(container.querySelector(".pws-notes-textarea")).toBeTruthy();
   expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.value).toBe("draft that must survive");
   await settleAssertion(
     () => expect(container.querySelector('[role="alert"]')?.textContent).toBe("quota exceeded"),
-    testWindow,
   );
   expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.disabled).toBe(false);
 
@@ -140,11 +139,10 @@ test("notes save closes editor only after an acknowledged success", async () => 
   await setDraft(textarea, "saved note");
   await blurNotes(textarea);
 
-  await settleAssertion(() => expect(calls).toBe(1), testWindow);
+  await settleAssertion(() => expect(calls).toBe(1));
   expect(container.querySelector(".pws-notes-textarea")).toBeTruthy();
   await settleAssertion(
     () => expect(container.querySelector<HTMLTextAreaElement>(".pws-notes-textarea")!.disabled).toBe(true),
-    testWindow,
   );
 
   await act(async () => {

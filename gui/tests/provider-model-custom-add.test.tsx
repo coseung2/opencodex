@@ -108,7 +108,7 @@ test("quick-add submits the trimmed model id for the current provider", async ()
     method: "POST",
     body: { provider: "AiCodeWith", modelId: "claude-opus-5.1" },
   }]);
-  await settleAssertion(() => expect(refreshes).toBe(1), testWindow);
+  await settleAssertion(() => expect(refreshes).toBe(1));
   expect(input.value).toBe("");
   expect(container.querySelector('[role="status"]')?.textContent).toContain("Custom model added");
 
@@ -150,7 +150,6 @@ test("quick-add keeps the model id when the server rejects it", async () => {
   expect(input.value).toBe("claude-opus-5.1");
   await settleAssertion(
     () => expect(container.querySelector('[role="alert"]')?.textContent).toContain("Failed to save custom model"),
-    testWindow,
   );
 
   await act(async () => { root.unmount(); });
@@ -173,7 +172,6 @@ test("quick-add recovers from a network failure", async () => {
   expect(input.disabled).toBe(false);
   await settleAssertion(
     () => expect(container.querySelector('[role="alert"]')?.textContent).toContain("Network error"),
-    testWindow,
   );
 
   await act(async () => { root.unmount(); });
@@ -228,7 +226,7 @@ test("a failed custom-model lookup recovers through retry without a remount", as
 
   // The retry refetched in the same mount and Add is usable again.
   expect(getCalls).toBe(2);
-  await settleAssertion(() => expect(addButton.disabled).toBe(false), testWindow);
+  await settleAssertion(() => expect(addButton.disabled).toBe(false));
 
   await act(async () => { addButton.click(); await Promise.resolve(); await Promise.resolve(); });
   expect(posts).toHaveLength(1);
@@ -253,7 +251,6 @@ test("successful quick-add appears immediately when catalog refresh is unavailab
 
   await settleAssertion(
     () => expect(container.querySelector(".pws-model-id")?.textContent).toBe("claude-opus-5.1-custom"),
-    testWindow,
   );
   await act(async () => { root.unmount(); });
 });

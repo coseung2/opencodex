@@ -145,7 +145,7 @@ test("a query matching nothing names the query, and does not claim the catalog i
     await tick();
 
     // Two models exist; the catalog is not empty, the filter is.
-    await settleAssertion(() => expect(container.textContent).toContain("No models match"), testWindow);
+    await settleAssertion(() => expect(container.textContent).toContain("No models match"));
     expect(container.textContent).toContain("nothing-matches-this");
     expect(container.textContent).not.toContain("No externally callable models are available yet.");
   } finally {

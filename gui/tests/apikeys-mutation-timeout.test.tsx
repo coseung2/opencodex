@@ -178,7 +178,7 @@ test("a delete that never answers gives navigation back instead of locking it", 
 
     // While it is in flight the lock is correct: another key must not receive
     // the result of this one.
-    await settleAssertion(() => expect(backButton(container).disabled).toBe(true), testWindow);
+    await settleAssertion(() => expect(backButton(container).disabled).toBe(true));
 
     // The bound fires and the page is usable again — no reload required.
     await tick(120);

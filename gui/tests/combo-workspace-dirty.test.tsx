@@ -118,7 +118,7 @@ test("Strict Mode: edit, revert, and unsaved navigation keep dirty state coheren
   await act(async () => {
     railButton(container, "combo/beta").click();
   });
-  await settleAssertion(() => expect(container.querySelector("#cwi-unsaved-title")).toBeTruthy(), testWindow);
+  await settleAssertion(() => expect(container.querySelector("#cwi-unsaved-title")).toBeTruthy());
 
   const keepButton = container.querySelector<HTMLButtonElement>('[data-testid="cwi-unsaved-keep"]');
   expect(keepButton).toBeTruthy();
