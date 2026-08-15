@@ -6,6 +6,7 @@ import type { Root } from "react-dom/client";
 import ApiKeysWorkspace, { type ApiKeysWorkspaceProps } from "../src/components/apikeys-workspace/ApiKeysWorkspace";
 import { LanguageProvider } from "../src/i18n/provider";
 import type { ApiEndpointInfo } from "../src/pages/api-keys-utils";
+import { settleAssertion } from "./_settle";
 
 // Phase 4 of the API tab unit: rename, the delete that waits for its own
 // request, and the zero-vs-unavailable attribution distinction.
@@ -172,7 +173,7 @@ test("rename is pessimistic: pending locks, failure keeps the draft, success clo
 
   // In flight: the typed name went out, and the controls lock so a second
   // submit cannot race the first.
-  expect(calls).toEqual([["k1", "renamed"]]);
+  await settleAssertion(() => expect(calls).toEqual([["k1", "renamed"]]), testWindow);
   expect(container.querySelector<HTMLInputElement>("#awi-key-name")!.disabled).toBe(true);
 
   // Rejected: the editor, the draft and a local error all survive.

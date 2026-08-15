@@ -5,6 +5,7 @@ import type { Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import ComboWorkspace from "../src/components/ComboWorkspace";
 import { LanguageProvider } from "../src/i18n/provider";
+import { settleAssertion } from "./_settle";
 
 const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
@@ -105,7 +106,7 @@ test("an empty combo list creates the first combo and shows confirmation", async
       .set!.call(providerSelect, "openai");
     providerSelect.dispatchEvent(new testWindow.Event("change", { bubbles: true }));
   });
-  expect(idInput.value).toBe("first");
+  await settleAssertion(() => expect(idInput.value).toBe("first"), testWindow);
   expect(providerSelect.value).toBe("openai");
   expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')?.value).toBe("gpt-5");
 
