@@ -465,6 +465,29 @@ describe("fetchProviderQuotaReports", () => {
     });
   });
 
+  test("OpenCode Free key rows do not inherit the Go allocation meter", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      throw new Error("Free Zen keys must not call the Go usage endpoint");
+    }) as typeof fetch;
+    const config = {
+      defaultProvider: "opencode-free",
+      providers: {
+        "opencode-free": {
+          adapter: "openai-chat",
+          authMode: "key",
+          baseUrl: "https://opencode.ai/zen/v1",
+          apiKey: "active-secret",
+          apiKeyPool: [{ id: "key-active", key: "active-secret" }],
+        },
+      },
+    } as OcxConfig;
+
+    expect(await opencodeGoKeyQuotaEstimates(config, "opencode-free")).toBeNull();
+    expect(calls).toBe(0);
+  });
+
   test("opencode-go quota fails closed for a lookalike base URL", async () => {
     seedOpencodeGoUsage();
     const config = {

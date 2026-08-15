@@ -277,6 +277,45 @@ pub enum ProviderPresetAction {
     Unsupported,
 }
 
+/// Key-optional presets with a fixed registry-owned endpoint can be created without
+/// a key. A supplied key still represents a distinct account allocation and is stored
+/// in OCX's existing key pool.
+pub fn supports_keyless_add(preset: &ProviderPreset) -> bool {
+    preset.key_optional
+        && !preset.base_url.is_empty()
+        && preset.base_url_choices.is_empty()
+        && !preset.base_url.contains(['{', '}'])
+}
+
+/// Cloudflare Workers AI is a free-tier preset whose endpoint needs the user's
+/// account id substituted before OCX can create the provider row.
+pub fn supports_account_id_base_url(preset: &ProviderPreset) -> bool {
+    preset.id == "cloudflare-workers-ai"
+        && preset.base_url_choices.is_empty()
+        && preset.base_url.contains("{account_id}")
+}
+
+pub fn resolve_provider_base_url(
+    preset: &ProviderPreset,
+    account_id: Option<&str>,
+) -> Result<String, &'static str> {
+    if !supports_account_id_base_url(preset) {
+        return Ok(preset.base_url.clone());
+    }
+    let account_id = account_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Cloudflare account ID is required")?;
+    if account_id.len() > 128
+        || !account_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Cloudflare account ID contains invalid characters");
+    }
+    Ok(preset.base_url.replace("{account_id}", account_id))
+}
+
 pub fn provider_preset_action(preset: &ProviderPreset) -> ProviderPresetAction {
     if preset.id == "openai"
         && preset.auth.eq_ignore_ascii_case("forward")
@@ -292,10 +331,13 @@ pub fn provider_preset_action(preset: &ProviderPreset) -> ProviderPresetAction {
                 .unwrap_or_else(|| preset.id.clone()),
         );
     }
-    if preset.auth.eq_ignore_ascii_case("key")
-        && !preset.key_optional
+    let is_key = preset.auth.eq_ignore_ascii_case("key");
+    let is_local = preset.auth.eq_ignore_ascii_case("local");
+    if (is_key || is_local)
+        && (!is_key || !preset.key_optional || supports_keyless_add(preset))
+        && !preset.base_url.is_empty()
         && preset.base_url_choices.is_empty()
-        && !preset.base_url.contains(['{', '}'])
+        && (!preset.base_url.contains(['{', '}']) || supports_account_id_base_url(preset))
     {
         return ProviderPresetAction::ApiKey;
     }
@@ -347,25 +389,48 @@ pub struct ProviderCreateConfig<'a> {
     pub responses_path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<&'a str>,
-    pub api_key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<&'a str>,
 }
 
 pub fn provider_create_body<'a>(
     preset: &'a ProviderPreset,
     api_key: &'a str,
 ) -> Result<ProviderCreateBody<'a>, &'static str> {
+    provider_create_body_with_api_key(preset, Some(api_key))
+}
+
+pub fn provider_create_body_with_api_key<'a>(
+    preset: &'a ProviderPreset,
+    api_key: Option<&'a str>,
+) -> Result<ProviderCreateBody<'a>, &'static str> {
+    provider_create_body_with_base_url(preset, api_key, &preset.base_url)
+}
+
+pub fn provider_create_body_with_base_url<'a>(
+    preset: &'a ProviderPreset,
+    api_key: Option<&'a str>,
+    base_url: &'a str,
+) -> Result<ProviderCreateBody<'a>, &'static str> {
     if provider_preset_action(preset) != ProviderPresetAction::ApiKey {
-        return Err("This provider preset is not a supported API-key preset");
+        return Err("This provider preset is not a supported key/local preset");
     }
-    if preset.id.is_empty() || preset.adapter.is_empty() || preset.base_url.is_empty() {
+    if preset.id.is_empty() || preset.adapter.is_empty() || base_url.is_empty() {
         return Err("This provider preset is incomplete");
+    }
+    if base_url.contains(['{', '}']) {
+        return Err("This provider preset needs an endpoint value before creation");
     }
     Ok(ProviderCreateBody {
         name: &preset.id,
         provider: ProviderCreateConfig {
             adapter: &preset.adapter,
-            base_url: &preset.base_url,
-            auth_mode: "key",
+            base_url,
+            auth_mode: if preset.auth.eq_ignore_ascii_case("local") {
+                "local"
+            } else {
+                "key"
+            },
             responses_path: preset.responses_path.as_deref(),
             default_model: preset.default_model.as_deref(),
             api_key,
@@ -891,6 +956,104 @@ mod tests {
                 ProviderPresetAction::Unsupported
             );
         }
+    }
+
+    #[test]
+    fn opencode_free_supports_keyless_creation_and_key_pool_accounts() {
+        let preset = ProviderPreset {
+            id: "opencode-free".into(),
+            auth: "key".into(),
+            key_optional: true,
+            adapter: "openai-chat".into(),
+            base_url: "https://opencode.ai/zen/v1".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            provider_preset_action(&preset),
+            ProviderPresetAction::ApiKey
+        );
+
+        let keyless =
+            serde_json::to_value(provider_create_body_with_api_key(&preset, None).unwrap())
+                .unwrap();
+        assert!(keyless["provider"].get("apiKey").is_none());
+
+        let keyed = serde_json::to_value(provider_create_body(&preset, "secret").unwrap()).unwrap();
+        assert_eq!(keyed["provider"]["apiKey"], "secret");
+    }
+
+    #[test]
+    fn fixed_key_optional_presets_support_keyless_creation() {
+        for (id, adapter, base_url) in [
+            ("litellm", "openai-chat", "http://localhost:4000/v1"),
+            (
+                "mimo-free",
+                "mimo-free",
+                "https://api.xiaomimimo.com/api/free-ai/openai/chat",
+            ),
+        ] {
+            let preset = ProviderPreset {
+                id: id.into(),
+                auth: "key".into(),
+                key_optional: true,
+                adapter: adapter.into(),
+                base_url: base_url.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                provider_preset_action(&preset),
+                ProviderPresetAction::ApiKey
+            );
+            let payload =
+                serde_json::to_value(provider_create_body_with_api_key(&preset, None).unwrap())
+                    .unwrap();
+            assert!(payload["provider"].get("apiKey").is_none());
+        }
+    }
+
+    #[test]
+    fn local_presets_use_local_auth_without_a_key() {
+        let preset = ProviderPreset {
+            id: "ollama".into(),
+            auth: "local".into(),
+            adapter: "openai-chat".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            ..Default::default()
+        };
+        assert_eq!(provider_preset_action(&preset), ProviderPresetAction::ApiKey);
+        let payload = serde_json::to_value(
+            provider_create_body_with_api_key(&preset, None).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["provider"]["authMode"], "local");
+        assert!(payload["provider"].get("apiKey").is_none());
+    }
+
+    #[test]
+    fn cloudflare_free_preset_resolves_account_id_before_creation() {
+        let preset = ProviderPreset {
+            id: "cloudflare-workers-ai".into(),
+            auth: "key".into(),
+            free_tier: true,
+            adapter: "openai-chat".into(),
+            base_url: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            provider_preset_action(&preset),
+            ProviderPresetAction::ApiKey
+        );
+        let base_url = resolve_provider_base_url(&preset, Some("abc_123")).unwrap();
+        assert_eq!(
+            base_url,
+            "https://api.cloudflare.com/client/v4/accounts/abc_123/ai/v1"
+        );
+        let payload = serde_json::to_value(
+            provider_create_body_with_base_url(&preset, Some("secret"), &base_url).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["provider"]["baseUrl"], base_url);
     }
 
     #[test]

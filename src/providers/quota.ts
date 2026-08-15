@@ -947,6 +947,10 @@ async function fetchOpencodeGoQuota(name: string, config: OcxProviderConfig): Pr
 export async function opencodeGoKeyQuotaEstimates(config: OcxConfig, name: string): Promise<Record<string, ProviderQuota> | null> {
   const provider = config.providers[name];
   if (!provider) return null;
+  // Key-pool listing is shared by every provider. Only an actual Zen Go
+  // provider may receive Go allocation data; free Zen keys must never inherit
+  // the Go subscription meter merely because they use the same key API.
+  if (!isCanonicalOpencodeGoBaseUrl(provider.baseUrl)) return null;
   const now = Date.now();
   const out: Record<string, ProviderQuota> = {};
   const pool = provider.apiKeyPool ?? [];

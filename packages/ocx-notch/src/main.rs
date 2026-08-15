@@ -40,6 +40,7 @@ const MENU_THRESHOLD_UP: usize = 4;
 const MENU_PROVIDER_ADD: usize = 5;
 const MENU_THRESHOLD_BASE: usize = 1_000;
 const API_KEY_EDIT_ID: i32 = 30_001;
+const ACCOUNT_ID_EDIT_ID: i32 = 30_002;
 const DEFAULT_WIDTH: i32 = 640;
 const MIN_WIDTH: i32 = 320;
 const MAX_WIDTH: i32 = 1_200;
@@ -276,6 +277,7 @@ struct App {
     provider_modal: Option<ProviderModal>,
     modal_generation: u64,
     api_key_edit: Option<isize>,
+    account_id_edit: Option<isize>,
     context_menu_open: bool,
     pause_overrides: HashMap<String, bool>,
     show_usage_only: bool,
@@ -661,6 +663,7 @@ fn run() -> windows::core::Result<()> {
             provider_modal: None,
             modal_generation: 0,
             api_key_edit: None,
+            account_id_edit: None,
             context_menu_open: false,
             pause_overrides: HashMap::new(),
             show_usage_only: false,
@@ -1326,7 +1329,8 @@ fn launch_reauth(hwnd: HWND, control: ReauthControl) {
 }
 
 fn configured_preset(preset: &ProviderPreset, configs: &[ProviderConfig]) -> bool {
-    provider_preset_action(preset) == ProviderPresetAction::ApiKey
+    preset.auth.eq_ignore_ascii_case("key")
+        && provider_preset_action(preset) == ProviderPresetAction::ApiKey
         && configs.iter().any(|config| config.name == preset.id)
 }
 
@@ -1342,7 +1346,11 @@ fn provider_catalog_tab(preset: &ProviderPreset) -> ProviderCatalogTab {
         ProviderPresetAction::CodexAccount | ProviderPresetAction::OAuth(_) => {
             ProviderCatalogTab::Accounts
         }
-        ProviderPresetAction::ApiKey if preset.free_tier => ProviderCatalogTab::Free,
+        ProviderPresetAction::ApiKey
+            if preset.free_tier || preset.key_optional || preset.auth.eq_ignore_ascii_case("local") =>
+        {
+            ProviderCatalogTab::Free
+        }
         ProviderPresetAction::ApiKey | ProviderPresetAction::Unsupported => {
             ProviderCatalogTab::Paid
         }
@@ -1380,6 +1388,11 @@ fn auth_detail_lines(details: &AuthFlowResponse) -> Vec<String> {
 
 unsafe fn destroy_api_key_edit(app: &mut App) {
     if let Some(edit) = app.api_key_edit.take() {
+        let edit = HWND(edit as *mut _);
+        let _ = SetWindowTextW(edit, w!(""));
+        let _ = DestroyWindow(edit);
+    }
+    if let Some(edit) = app.account_id_edit.take() {
         let edit = HWND(edit as *mut _);
         let _ = SetWindowTextW(edit, w!(""));
         let _ = DestroyWindow(edit);
@@ -1708,6 +1721,8 @@ fn begin_codex_account(hwnd: HWND) {
 unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset, add_key: bool) {
     with_app(|app| {
         destroy_api_key_edit(app);
+        let needs_account_id = !add_key && supports_account_id_base_url(&preset);
+        let local_auth = preset.auth.eq_ignore_ascii_case("local");
         app.modal_generation = app.modal_generation.wrapping_add(1);
         app.provider_modal = Some(ProviderModal::ApiKey {
             preset,
@@ -1716,6 +1731,25 @@ unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset, add_key: bool)
             add_key,
         });
         if let Ok(instance) = GetModuleHandleW(None) {
+            if needs_account_id {
+                if let Ok(edit) = CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    w!("EDIT"),
+                    w!(""),
+                    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32),
+                    60,
+                    254,
+                    (app.width - 120).max(180),
+                    30,
+                    hwnd,
+                    HMENU(ACCOUNT_ID_EDIT_ID as *mut _),
+                    instance,
+                    None,
+                ) {
+                    app.account_id_edit = Some(edit.0 as isize);
+                }
+            }
+            let key_top = if needs_account_id { 318 } else { 238 };
             if let Ok(edit) = CreateWindowExW(
                 WS_EX_CLIENTEDGE,
                 w!("EDIT"),
@@ -1725,10 +1759,14 @@ unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset, add_key: bool)
                         | WS_VISIBLE.0
                         | WS_TABSTOP.0
                         | ES_AUTOHSCROLL as u32
-                        | ES_PASSWORD as u32,
+                        | if local_auth {
+                            0
+                        } else {
+                            ES_PASSWORD as u32
+                        },
                 ),
                 60,
-                238,
+                key_top,
                 (app.width - 120).max(180),
                 30,
                 hwnd,
@@ -1737,8 +1775,14 @@ unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset, add_key: bool)
                 None,
             ) {
                 let _ = SendMessageW(edit, 0x00CC, WPARAM('•' as usize), LPARAM(0));
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(edit);
                 app.api_key_edit = Some(edit.0 as isize);
+            }
+            let focus = app
+                .account_id_edit
+                .or(app.api_key_edit)
+                .map(|edit| HWND(edit as *mut _));
+            if let Some(focus) = focus {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(focus);
             }
         }
     });
@@ -1759,7 +1803,25 @@ unsafe fn submit_api_key(hwnd: HWND) {
         let key = String::from_utf16_lossy(&buffer[..read]);
         buffer.fill(0);
         let _ = SetWindowTextW(edit, w!(""));
-        if key.trim().is_empty() {
+        let account_id = if let Some(edit) = app.account_id_edit {
+            let edit = HWND(edit as *mut _);
+            let length = GetWindowTextLengthW(edit).max(0) as usize;
+            let mut buffer = vec![0u16; length + 1];
+            let read = GetWindowTextW(edit, &mut buffer) as usize;
+            let account_id = String::from_utf16_lossy(&buffer[..read]);
+            buffer.fill(0);
+            let _ = SetWindowTextW(edit, w!(""));
+            account_id
+        } else {
+            String::new()
+        };
+        let allow_empty_key = match &app.provider_modal {
+            Some(ProviderModal::ApiKey {
+                preset, add_key, ..
+            }) => (preset.key_optional || preset.auth.eq_ignore_ascii_case("local")) && !*add_key,
+            _ => false,
+        };
+        if key.trim().is_empty() && !allow_empty_key {
             if let Some(ProviderModal::ApiKey { error, .. }) = &mut app.provider_modal {
                 *error = Some("Enter an API key".into());
             }
@@ -1775,20 +1837,60 @@ unsafe fn submit_api_key(hwnd: HWND) {
             if !*submitting {
                 *submitting = true;
                 *error = None;
-                submission = Some((preset.clone(), key, app.modal_generation, *add_key));
+                submission = Some((
+                    preset.clone(),
+                    key,
+                    account_id,
+                    app.modal_generation,
+                    *add_key,
+                ));
             }
         }
     });
-    let Some((preset, mut key, generation, add_key)) = submission else {
+    let Some((preset, mut key, mut account_id, generation, add_key)) = submission else {
         return;
     };
     let payload = if add_key {
         serde_json::json!({ "name": preset.id, "key": key })
     } else {
-        let create = match provider_create_body(&preset, &key) {
+        let base_url = match resolve_provider_base_url(
+            &preset,
+            (!account_id.trim().is_empty()).then_some(account_id.as_str()),
+        ) {
+            Ok(base_url) => base_url,
+            Err(error) => {
+                key.as_bytes_mut().fill(0);
+                account_id.clear();
+                with_app(|app| {
+                    if let Some(ProviderModal::ApiKey {
+                        submitting,
+                        error: modal_error,
+                        ..
+                    }) = &mut app.provider_modal
+                    {
+                        *submitting = false;
+                        *modal_error = Some(error.into());
+                    }
+                });
+                return;
+            }
+        };
+        let api_key = (!key.trim().is_empty()).then_some(key.as_str());
+        let create = match api_key {
+            Some(api_key) if supports_account_id_base_url(&preset) => {
+                provider_create_body_with_base_url(&preset, Some(api_key), &base_url)
+            }
+            Some(api_key) => provider_create_body(&preset, api_key),
+            None if supports_account_id_base_url(&preset) => {
+                provider_create_body_with_base_url(&preset, None, &base_url)
+            }
+            None => provider_create_body_with_api_key(&preset, None),
+        };
+        let create = match create {
             Ok(payload) => payload,
             Err(error) => {
                 key.as_bytes_mut().fill(0);
+                account_id.clear();
                 with_app(|app| {
                     if let Some(ProviderModal::ApiKey {
                         submitting,
@@ -1807,6 +1909,7 @@ unsafe fn submit_api_key(hwnd: HWND) {
             Ok(payload) => payload,
             Err(error) => {
                 key.as_bytes_mut().fill(0);
+                account_id.clear();
                 with_app(|app| {
                     if let Some(ProviderModal::ApiKey {
                         submitting,
@@ -1826,6 +1929,7 @@ unsafe fn submit_api_key(hwnd: HWND) {
         Ok(body) => body,
         Err(error) => {
             key.as_bytes_mut().fill(0);
+            account_id.clear();
             with_app(|app| {
                 if let Some(ProviderModal::ApiKey {
                     submitting,
@@ -1841,6 +1945,7 @@ unsafe fn submit_api_key(hwnd: HWND) {
         }
     };
     key.as_bytes_mut().fill(0);
+    account_id.clear();
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
         let mut body = body;
@@ -3838,6 +3943,12 @@ unsafe fn draw_provider_modal(
                 dc,
                 if *add_key {
                     "기존 프로바이더에 키가 추가되며 새 키가 활성 계정이 됩니다."
+                } else if supports_account_id_base_url(preset) {
+                    "Cloudflare Account ID와 API key를 입력하세요. Workers AI 무료 tier를 사용합니다."
+                } else if preset.auth.eq_ignore_ascii_case("local") {
+                    "로컬 endpoint입니다. API key 없이 현재 PC의 provider를 추가합니다."
+                } else if preset.key_optional {
+                    "키를 입력하면 계정별 슬롯으로 저장됩니다. 비워두면 provider의 keyless 방식으로 추가합니다."
                 } else {
                     "키는 OCX로 직접 전송되며 사용 후 입력란에서 지워집니다."
                 },
@@ -3849,11 +3960,38 @@ unsafe fn draw_provider_modal(
                 },
                 DT_LEFT | DT_WORDBREAK,
             );
+            let needs_account_id = !*add_key && supports_account_id_base_url(preset);
+            if needs_account_id {
+                set_text_color(dc, 0x009da3ad);
+                draw_text(
+                    dc,
+                    "Cloudflare Account ID",
+                    RECT {
+                        left: 60,
+                        top: 232,
+                        right: width - 60,
+                        bottom: 252,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                draw_text(
+                    dc,
+                    "API key",
+                    RECT {
+                        left: 60,
+                        top: 296,
+                        right: width - 60,
+                        bottom: 316,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+            }
+            let add_top = if needs_account_id { 370 } else { 286 };
             let add = RECT {
                 left: width - 154,
-                top: 286,
+                top: add_top,
                 right: width - 60,
-                bottom: 320,
+                bottom: add_top + 34,
             };
             draw_native_button(
                 dc,
@@ -3871,9 +4009,9 @@ unsafe fn draw_provider_modal(
                     error,
                     RECT {
                         left: 60,
-                        top: 332,
+                        top: add_top + 46,
                         right: width - 60,
-                        bottom: 380,
+                        bottom: add_top + 94,
                     },
                     DT_LEFT | DT_WORDBREAK,
                 );
@@ -4418,6 +4556,27 @@ mod account_control_tests {
         let free = ProviderPreset {
             auth: "key".into(),
             free_tier: true,
+            base_url: "https://example.test/v1".into(),
+            ..Default::default()
+        };
+        let opencode_free = ProviderPreset {
+            id: "opencode-free".into(),
+            auth: "key".into(),
+            key_optional: true,
+            base_url: "https://opencode.ai/zen/v1".into(),
+            ..Default::default()
+        };
+        let cloudflare_free = ProviderPreset {
+            id: "cloudflare-workers-ai".into(),
+            auth: "key".into(),
+            free_tier: true,
+            base_url: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1".into(),
+            ..Default::default()
+        };
+        let ollama_local = ProviderPreset {
+            id: "ollama".into(),
+            auth: "local".into(),
+            base_url: "http://localhost:11434/v1".into(),
             ..Default::default()
         };
         let paid = ProviderPreset {
@@ -4431,6 +4590,15 @@ mod account_control_tests {
         );
         assert_eq!(provider_catalog_tab(&kiro), ProviderCatalogTab::Accounts);
         assert_eq!(provider_catalog_tab(&free), ProviderCatalogTab::Free);
+        assert_eq!(
+            provider_catalog_tab(&opencode_free),
+            ProviderCatalogTab::Free
+        );
+        assert_eq!(
+            provider_catalog_tab(&cloudflare_free),
+            ProviderCatalogTab::Free
+        );
+        assert_eq!(provider_catalog_tab(&ollama_local), ProviderCatalogTab::Free);
         assert_eq!(provider_catalog_tab(&paid), ProviderCatalogTab::Paid);
     }
 
