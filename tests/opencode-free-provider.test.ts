@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
 import { providerConfigSeed, deriveKeyLoginMap, deriveFeaturedProviderIds } from "../src/providers/derive";
 import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
-import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
+import { routeModel } from "../src/router";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
 
 function minimalRequest(model = "kimi-k2.7-code"): OcxParsedRequest {
   return {
@@ -27,17 +28,39 @@ describe("opencode-free provider", () => {
     expect(entry?.models).toBeUndefined();
   });
 
-  test("static headers include only the public client marker", () => {
+  test("static headers include the desktop client identity without auth", () => {
     expect(entry?.staticHeaders?.["Authorization"]).toBeUndefined();
     expect(entry?.staticHeaders?.["x-opencode-client"]).toBe("desktop");
+    expect(entry?.staticHeaders?.["User-Agent"]).toBe("opencode/1.18.18");
   });
 
   test("providerConfigSeed propagates static headers", () => {
     const seed = providerConfigSeed(entry!);
     expect(seed.headers?.["Authorization"]).toBeUndefined();
     expect(seed.headers?.["x-opencode-client"]).toBe("desktop");
+    expect(seed.headers?.["User-Agent"]).toBe("opencode/1.18.18");
     expect(seed.keyOptional).toBe(true);
     expect(seed.liveModels).toBe(true);
+  });
+
+  test("request-time routing restores static headers for legacy persisted rows", () => {
+    const config = {
+      defaultProvider: "opencode-free",
+      providers: {
+        "opencode-free": {
+          adapter: "openai-chat",
+          baseUrl: "https://opencode.ai/zen/v1",
+          apiKey: "user-secret-key",
+        },
+      },
+    } as OcxConfig;
+
+    const routed = routeModel(config, "opencode-free/deepseek-v4-flash-free").provider;
+    expect(routed.baseUrl).toBe("https://opencode.ai/zen/v1");
+    expect(routed.headers).toEqual({
+      "x-opencode-client": "desktop",
+      "User-Agent": "opencode/1.18.18",
+    });
   });
 
   test("is included in the key-login map (keyOptional = true)", () => {
@@ -56,6 +79,7 @@ describe("opencode-free provider", () => {
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBeUndefined();
     expect(headers["x-opencode-client"]).toBe("desktop");
+    expect(headers["User-Agent"]).toBe("opencode/1.18.18");
     expect(req.url).toBe("https://opencode.ai/zen/v1/chat/completions");
   });
 
@@ -69,6 +93,7 @@ describe("opencode-free provider", () => {
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer user-secret-key");
     expect(headers["x-opencode-client"]).toBe("desktop");
+    expect(headers["User-Agent"]).toBe("opencode/1.18.18");
   });
 
   test("the provider client marker still applies when a user apiKey is present", () => {
@@ -81,6 +106,7 @@ describe("opencode-free provider", () => {
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer user-secret-key");
     expect(headers["x-opencode-client"]).toBe("desktop");
+    expect(headers["User-Agent"]).toBe("opencode/1.18.18");
     expect(Object.keys(headers)).toContain("Authorization");
   });
 

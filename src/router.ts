@@ -272,6 +272,12 @@ function routedProviderConfig(providerName: string, provider: OcxProviderConfig)
     ...(provider.escapeBuiltinToolNames === undefined && registryEntry.escapeBuiltinToolNames !== undefined ? { escapeBuiltinToolNames: registryEntry.escapeBuiltinToolNames } : {}),
     ...(provider.keyOptional === undefined && registryEntry.keyOptional !== undefined ? { keyOptional: registryEntry.keyOptional } : {}),
     ...(provider.modelSuffixBracketStrip === undefined && registryEntry.modelSuffixBracketStrip !== undefined ? { modelSuffixBracketStrip: registryEntry.modelSuffixBracketStrip } : {}),
+    // Registry static headers are transport metadata, not user configuration. Re-apply them at
+    // request time so providers created before a header was introduced (or stripped from disk by
+    // management persistence) still make the same request as a freshly seeded provider.
+    ...(registryEntry.staticHeaders
+      ? { headers: { ...registryEntry.staticHeaders, ...(provider.headers ?? {}) } }
+      : {}),
     // Scalar backfill: a persisted config created before the flag shipped inherits the registry
     // opt-in, while an explicit user `false` keeps overriding registry `true`.
     ...(provider.parallelToolCalls === undefined && registryEntry.parallelToolCalls !== undefined ? { parallelToolCalls: registryEntry.parallelToolCalls } : {}),

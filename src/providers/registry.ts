@@ -1423,6 +1423,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     dashboardUrl: "https://opencode.ai",
     staticHeaders: {
       "x-opencode-client": "desktop",
+      // Zen's free tier identifies the OpenCode desktop client from this header. Without it,
+      // otherwise identical requests can be classified as an exhausted free request and return
+      // FreeUsageLimitError. Keep this in the registry so it also reaches legacy persisted rows.
+      "User-Agent": "opencode/1.18.18",
     },
     modelReasoningEfforts: Object.fromEntries(OPENCODE_FREE_DEEPSEEK_MODELS.map(id => [id, DEEPSEEK_THINKING_EFFORTS])),
     modelReasoningEffortMap: Object.fromEntries(OPENCODE_FREE_DEEPSEEK_MODELS.map(id => [id, DEEPSEEK_THINKING_REASONING_MAP])),
