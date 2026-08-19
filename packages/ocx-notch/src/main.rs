@@ -47,11 +47,6 @@ const MAX_WIDTH: i32 = 1_200;
 const RESIZE_EDGE: i32 = 7;
 const COLLAPSED_HEIGHT: i32 = 58;
 const CONTENT_TOP: i32 = 101;
-// Compact row: 28px keeps the space below the toggle text equal to the
-// provider-row bottom spacing, so the collapsed and expanded states look the same.
-const USAGE_TOGGLE_HEIGHT: i32 = 28;
-const USAGE_TOGGLE_VERSION_WIDTH: i32 = 140;
-const USAGE_TOGGLE_VERSION_GAP: i32 = 4;
 const LOG_ROW_HEIGHT: i32 = 44;
 const EMPTY_LOG_HEIGHT: i32 = 84;
 const POWER_PROBE_INTERVAL: Duration = Duration::from_millis(75);
@@ -67,17 +62,6 @@ const ACCOUNT_ACTION_GAP: i32 = 4;
 const REAUTH_ACTION_WIDTH: i32 = 142;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 512 * 1024;
-
-fn ocx_version_label() -> &'static str {
-    static LABEL: OnceLock<String> = OnceLock::new();
-    LABEL
-        .get_or_init(|| {
-            let version =
-                std::env::var("OCX_PACKAGE_VERSION").unwrap_or_else(|_| "unknown".to_string());
-            format!("OCX v{version}")
-        })
-        .as_str()
-}
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
 static LUCIDE_FONT_BYTES: &[u8] = include_bytes!("../assets/lucide-subset.ttf");
@@ -280,8 +264,6 @@ struct App {
     account_id_edit: Option<isize>,
     context_menu_open: bool,
     pause_overrides: HashMap<String, bool>,
-    show_usage_only: bool,
-    usage_toggle_hit: Option<RECT>,
     width: i32,
     drag_origin: Option<(POINT, RECT)>,
     resize_origin: Option<(POINT, RECT, ResizeEdge)>,
@@ -445,45 +427,13 @@ impl App {
             };
         }
         let mut height = 0;
-        // Layout: quota providers first, then the usage-only toggle, then the
-        // usage-only providers. The toggle therefore sits on the boundary between
-        // the two groups and stays pinned above the expanded content.
-        for provider in self
-            .state
-            .providers
-            .iter()
-            .filter(|provider| provider_has_quota(provider))
-        {
+        for provider in &self.state.providers {
             height += provider_height(provider);
             if self.expanded_providers.contains(&provider.name) {
                 height += provider.accounts.iter().map(account_height).sum::<i32>();
             }
         }
-        if self.usage_only_count() > 0 {
-            height += USAGE_TOGGLE_HEIGHT;
-        }
-        if self.show_usage_only {
-            for provider in self
-                .state
-                .providers
-                .iter()
-                .filter(|provider| !provider_has_quota(provider))
-            {
-                height += provider_height(provider);
-                if self.expanded_providers.contains(&provider.name) {
-                    height += provider.accounts.iter().map(account_height).sum::<i32>();
-                }
-            }
-        }
         height
-    }
-
-    fn usage_only_count(&self) -> usize {
-        self.state
-            .providers
-            .iter()
-            .filter(|provider| !provider_has_quota(provider))
-            .count()
     }
 
     fn clamp_scroll(&mut self, window_height: i32) {
@@ -550,6 +500,12 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
 
 fn provider_has_quota(provider: &ProviderView) -> bool {
     !quota_rows(provider.quota.as_ref()).is_empty()
+}
+
+fn ordered_provider_views(providers: &[ProviderView]) -> Vec<ProviderView> {
+    let mut ordered = providers.to_vec();
+    ordered.sort_by_key(|provider| !provider_has_quota(provider));
+    ordered
 }
 
 fn provider_height(provider: &ProviderView) -> i32 {
@@ -666,8 +622,6 @@ fn run() -> windows::core::Result<()> {
             account_id_edit: None,
             context_menu_open: false,
             pause_overrides: HashMap::new(),
-            show_usage_only: false,
-            usage_toggle_hit: None,
             width: initial_width,
             drag_origin: None,
             resize_origin: None,
@@ -2500,13 +2454,6 @@ unsafe extern "system" fn window_proc(
                         }
                         changed = true;
                     }
-                } else if app
-                    .usage_toggle_hit
-                    .as_ref()
-                    .is_some_and(|rect| point_in(rect, x, y))
-                {
-                    app.show_usage_only = !app.show_usage_only;
-                    changed = true;
                 } else if let Some((_, name)) = app
                     .provider_hits
                     .iter()
@@ -2782,7 +2729,6 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.account_switch_hits.clear();
     app.account_reauth_hits.clear();
     app.modal_hits.clear();
-    app.usage_toggle_hit = None;
     let body_font = make_font(14, 500);
     let small_font = make_font(12, 400);
     let old_font = SelectObject(dc, body_font);
@@ -2972,20 +2918,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             return;
         }
 
-        let usage_only_count = app.usage_only_count();
-        let mut providers = app.state.providers.clone();
-        providers.sort_by_key(|provider| !provider_has_quota(provider));
-        providers.retain(|provider| provider_has_quota(provider) || app.show_usage_only);
-        // The toggle sits on the boundary between the two groups: after the quota
-        // providers and BEFORE the usage-only providers, so expanding the section
-        // never pushes the toggle itself down.
-        let mut toggle_drawn = false;
+        let providers = ordered_provider_views(&app.state.providers);
         for provider in providers {
-            if !toggle_drawn && !provider_has_quota(&provider) {
-                draw_usage_toggle(dc, width, height, y, app, small_font);
-                y += USAGE_TOGGLE_HEIGHT;
-                toggle_drawn = true;
-            }
             let provider_height = provider_height(&provider);
             let row = RECT {
                 left: 10,
@@ -3226,9 +3160,6 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     y += account_height;
                 }
             }
-        }
-        if !toggle_drawn && usage_only_count > 0 {
-            draw_usage_toggle(dc, width, height, y, app, small_font);
         }
         let _ = SelectClipRgn(dc, None);
     }
@@ -3570,58 +3501,6 @@ unsafe fn draw_account_pause_control(
             bottom: cy + 6,
         },
         color,
-    );
-}
-
-unsafe fn draw_usage_toggle(
-    dc: HDC,
-    width: i32,
-    height: i32,
-    y: i32,
-    app: &mut App,
-    small_font: HFONT,
-) {
-    let usage_only_count = app.usage_only_count();
-    if usage_only_count == 0 {
-        return;
-    }
-    let toggle = RECT {
-        left: 10,
-        top: y,
-        right: width - 10,
-        bottom: y + USAGE_TOGGLE_HEIGHT,
-    };
-    if toggle.bottom > 101 && toggle.top < height {
-        app.usage_toggle_hit = Some(toggle);
-    }
-    let _ = SelectObject(dc, small_font);
-    set_text_color(dc, 0x00a6a6a6);
-    draw_text(
-        dc,
-        &if app.show_usage_only {
-            format!("▾ 사용량만 있는 프로바이더 {usage_only_count}개 접기")
-        } else {
-            format!("▸ 사용량만 있는 프로바이더 {usage_only_count}개 보기")
-        },
-        RECT {
-            left: 18,
-            top: y,
-            right: width - 18 - USAGE_TOGGLE_VERSION_WIDTH - USAGE_TOGGLE_VERSION_GAP,
-            bottom: y + USAGE_TOGGLE_HEIGHT,
-        },
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-    );
-    set_text_color(dc, 0x007a7a7a);
-    draw_text(
-        dc,
-        ocx_version_label(),
-        RECT {
-            left: width - 18 - USAGE_TOGGLE_VERSION_WIDTH,
-            top: y,
-            right: width - 18,
-            bottom: y + USAGE_TOGGLE_HEIGHT,
-        },
-        DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
 }
 
@@ -4774,6 +4653,42 @@ mod account_control_tests {
         assert_eq!(format_log_age_at(now - 42_000, now), "42초 전");
         assert_eq!(format_log_age_at(now - 180_000, now), "3분 전");
         assert_eq!(format_log_age_at(now - 7_200_000, now), "2시간 전");
+    }
+
+    #[test]
+    fn provider_display_keeps_no_quota_views_and_orders_quota_first() {
+        let providers = vec![
+            ProviderView {
+                name: "usage-only".into(),
+                accounts: vec![AccountView {
+                    id: "oauth-account".into(),
+                    kind: "oauth".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ProviderView {
+                name: "with-quota".into(),
+                quota: Some(Quota {
+                    weekly_percent: Some(50.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ProviderView {
+                name: "no-report".into(),
+                ..Default::default()
+            },
+        ];
+
+        let ordered = ordered_provider_views(&providers);
+        let names: Vec<&str> = ordered
+            .iter()
+            .map(|provider| provider.name.as_str())
+            .collect();
+
+        assert_eq!(names, vec!["with-quota", "usage-only", "no-report"]);
+        assert_eq!(ordered[1].accounts[0].id, "oauth-account");
     }
 
     #[test]

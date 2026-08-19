@@ -717,6 +717,14 @@ mod tests {
             ..Default::default()
         }];
         let merged = merge_providers(&configs, &reports, &usage, &[]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|provider| provider.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai", "kiro"]
+        );
         assert!(merged[0].quota.is_none());
         assert_eq!(merged[1].tokens, 42);
     }

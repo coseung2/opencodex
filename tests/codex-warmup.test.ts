@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { CodexWarmupError, warmCodexAccount } from "../src/codex/warmup";
+import { CodexWarmupError, isCodexWarmupQuotaFailure, warmCodexAccount } from "../src/codex/warmup";
 
 const originalFetch = globalThis.fetch;
 
@@ -79,5 +79,20 @@ describe("codex warmup", () => {
       expect((err as Error).message).not.toContain("sensitive-account-id");
       expect((err as Error).message).not.toContain("revoked");
     }
+  });
+
+  test("classifies quota rejection from structured status and never from 401 detail alone", () => {
+    expect(isCodexWarmupQuotaFailure(new CodexWarmupError("http_status", "rejected", {
+      status: 429,
+      upstreamDetail: "rate limit reached",
+    }))).toBe(true);
+    expect(isCodexWarmupQuotaFailure(new CodexWarmupError("http_status", "rejected", {
+      status: 403,
+      upstreamDetail: "usage quota exhausted",
+    }))).toBe(true);
+    expect(isCodexWarmupQuotaFailure(new CodexWarmupError("http_status", "rejected", {
+      status: 401,
+      upstreamDetail: "quota exhausted",
+    }))).toBe(false);
   });
 });

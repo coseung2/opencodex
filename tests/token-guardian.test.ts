@@ -4,9 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCredential } from "../src/oauth/store";
 import { getConfigPath } from "../src/config";
-import { markCodexAccountValidated, readCodexAccountRecord, saveCodexAccountCredential } from "../src/codex/account-store";
-import { __resetGuardianState, guardianSweep } from "../src/oauth/token-guardian";
+import {
+  markCodexAccountQuotaValidationPending,
+  markCodexAccountValidated,
+  readCodexAccountRecord,
+  saveCodexAccountCredential,
+} from "../src/codex/account-store";
+import {
+  __resetGuardianState,
+  guardianSweep,
+  requestCodexQuotaWarmupRetry,
+  startTokenGuardian,
+} from "../src/oauth/token-guardian";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
+import { isAccountNeedsReauth } from "../src/codex/account-runtime-state";
 
 const origHome = process.env.HOME;
 const origOcxHome = process.env.OPENCODEX_HOME;
@@ -189,6 +200,130 @@ describe("token guardian", () => {
     expect(mock.body()).toMatchObject({ model: "gpt-5.4-mini", input: WARMUP_INPUT, stream: true, store: false });
     expect(readCodexAccountRecord("acct-warm")?.lastCodexValidationStatus).toBe("ok");
     expect(readCodexAccountRecord("acct-warm")?.lastCodexValidatedAt).toBeGreaterThan(Date.now() - 30_000);
+  });
+
+  test("quota-deferred registration retries after reset without Token Guardian opt-in", async () => {
+    const now = Date.now();
+    const resetAt = now + 60_000;
+    writeConfig({
+      codexAccounts: [{ id: "acct-quota-pending", email: "pending@example.test", plan: "pro", isMain: false }],
+      pausedCodexAccountIds: ["acct-quota-pending"],
+      providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "pool" } },
+    });
+    saveCodexAccountCredential("acct-quota-pending", {
+      accessToken: "old", refreshToken: "rt", expiresAt: now + 3600_000, chatgptAccountId: "cg-pending",
+    });
+    markCodexAccountQuotaValidationPending("acct-quota-pending", "http_status:429", resetAt);
+    const mock = mockWarmupFetch();
+
+    const beforeReset = await guardianSweep(resetAt - 1);
+    expect(beforeReset.enabled).toBe(false);
+    expect(beforeReset.warmed).toEqual([]);
+    expect(mock.calls()).toBe(0);
+    expect(readCodexAccountRecord("acct-quota-pending")?.lastCodexValidationStatus).toBe("quota_pending");
+
+    const afterReset = await guardianSweep(resetAt);
+
+    expect(afterReset.enabled).toBe(false);
+    expect(afterReset.warmed).toEqual(["codex:acct-quota-pending"]);
+    expect(mock.calls()).toBe(1);
+    expect(readCodexAccountRecord("acct-quota-pending")?.lastCodexValidationStatus).toBe("ok");
+    const persisted = JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig;
+    expect(persisted.pausedCodexAccountIds ?? []).not.toContain("acct-quota-pending");
+  });
+
+  test("background loop schedules the pending reset and registration can wake an older timer", () => {
+    const now = Date.now();
+    const resetAt = now + 60_000;
+    writeConfig({
+      codexAccounts: [{ id: "acct-scheduled", email: "scheduled@example.test", plan: "pro", isMain: false }],
+      pausedCodexAccountIds: ["acct-scheduled"],
+      providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "pool" } },
+    });
+    saveCodexAccountCredential("acct-scheduled", {
+      accessToken: "old", refreshToken: "rt", expiresAt: now + 3600_000, chatgptAccountId: "cg-scheduled",
+    });
+    markCodexAccountQuotaValidationPending("acct-scheduled", "http_status:429", resetAt);
+
+    const delays: number[] = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = ((_: TimerHandler, delay?: number) => {
+      delays.push(delay ?? 0);
+      return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+
+    let handle: ReturnType<typeof startTokenGuardian> | undefined;
+    try {
+      handle = startTokenGuardian();
+      expect(delays[0]).toBeGreaterThanOrEqual(59_000);
+      expect(delays[0]).toBeLessThanOrEqual(60_000);
+
+      requestCodexQuotaWarmupRetry();
+      expect(delays.at(-1)).toBe(0);
+    } finally {
+      handle?.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
+  test("background loop uses the regular interval when pending work is not routable", () => {
+    const now = Date.now();
+    writeConfig({
+      tokenGuardian: { enabled: true, tickSeconds: 60, jitterSeconds: 0 },
+      codexAccounts: [{ id: "acct-direct-pending", email: "pending@example.test", plan: "pro", isMain: false }],
+      pausedCodexAccountIds: ["acct-direct-pending"],
+      providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "direct" } },
+    });
+    saveCodexAccountCredential("acct-direct-pending", {
+      accessToken: "old", refreshToken: "rt", expiresAt: now + 3600_000, chatgptAccountId: "cg-direct",
+    });
+    markCodexAccountQuotaValidationPending("acct-direct-pending", "http_status:429", now - 1);
+
+    const delays: number[] = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = ((_: TimerHandler, delay?: number) => {
+      delays.push(delay ?? 0);
+      return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+
+    let handle: ReturnType<typeof startTokenGuardian> | undefined;
+    try {
+      handle = startTokenGuardian();
+      expect(delays[0]).toBe(60_000);
+    } finally {
+      handle?.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
+  test("terminal quota retry failure requires reauthentication without losing pause ownership", async () => {
+    const now = Date.now();
+    writeConfig({
+      codexAccounts: [{ id: "acct-terminal", email: "terminal@example.test", plan: "pro", isMain: false }],
+      pausedCodexAccountIds: ["acct-terminal"],
+      providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "pool" } },
+    });
+    saveCodexAccountCredential("acct-terminal", {
+      accessToken: "old", refreshToken: "rt", expiresAt: now + 3600_000, chatgptAccountId: "cg-terminal",
+    });
+    markCodexAccountQuotaValidationPending("acct-terminal", "http_status:429", now - 1);
+    globalThis.fetch = (async () => new Response("unauthorized", { status: 401 })) as typeof fetch;
+
+    const result = await guardianSweep(now);
+
+    expect(result.failed).toContain("codex:acct-terminal");
+    expect(isAccountNeedsReauth("acct-terminal")).toBe(true);
+    expect(readCodexAccountRecord("acct-terminal")).toMatchObject({
+      lastCodexValidationStatus: "failed",
+      codexQuotaPauseOwned: true,
+    });
+    expect(readCodexAccountRecord("acct-terminal")).not.toHaveProperty("codexQuotaRetryAt");
   });
 
   test("direct mode warms main only and never enumerates the added-account store", async () => {

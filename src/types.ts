@@ -1241,6 +1241,10 @@ export interface CodexAccountCredentialRecord {
   deletedAt?: number;
   replacedAt?: number;
   lastCodexValidatedAt?: number;
-  lastCodexValidationStatus?: "ok" | "failed";
+  lastCodexValidationStatus?: "ok" | "failed" | "quota_pending";
   lastCodexValidationError?: string;
+  /** Earliest sweep time for a registration deferred by freshly confirmed quota exhaustion. */
+  codexQuotaRetryAt?: number;
+  /** The registration flow, rather than the user, added the persisted pause. */
+  codexQuotaPauseOwned?: boolean;
 }

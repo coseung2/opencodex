@@ -200,7 +200,7 @@ ocx service install    # persistent: auto-starts on login and respawns on crash
 
 ## Codex アカウントのウォームアップ
 
-ChatGPT アカウントが Codex アカウント プールに追加されると、opencodex は、Codex Response バックエンドへの小さなストリーミング リクエストで永続化する前にそれを検証します。リクエストは実際の応答項目配列 (`input: [{ type: "message", ... }]`) を使用し、`response.completed` を待機し、デフォルトは `gpt-5.4-mini` になります。そのモデルが HTTP 400 を返した場合、`gpt-5.5` で再試行します。構造化されたアップストリーム エラーの詳細は、生の応答本体を公開することなく表示されます。バックグラウンドの再検証は個別に行われ、デフォルトではオフになっています。これは、トークン ガーディアンが有効で、`chatgpt` 更新ポリシーが `proactive` で、`tokenGuardian.codexWarmupEnabled` が true の場合にのみ実行されます。
+ChatGPT アカウントが Codex アカウント プールに追加されると、opencodex は、Codex Response バックエンドへの小さなストリーミング リクエストで永続化する前にそれを検証します。リクエストは実際の応答項目配列 (`input: [{ type: "message", ... }]`) を使用し、`response.completed` を待機し、デフォルトは `gpt-5.4-mini` になります。そのモデルが HTTP 400 を返した場合、`gpt-5.5` で再試行します。構造化されたアップストリーム エラーの詳細は、生の応答本体を公開することなく表示されます。バックグラウンドの再検証は個別に行われ、デフォルトではオフになっています。これは、トークン ガーディアンが有効で、`chatgpt` 更新ポリシーが `proactive` で、`tokenGuardian.codexWarmupEnabled` が true の場合にのみ実行されます。ただし、最新の使用量応答でクォータ枯渇が確認されたアカウントは例外です。この場合は一時停止したウォームアップ待機状態で保存し、報告されたリセット時刻の後に自動でウォームアップを再試行します。認証失敗やその他のウォームアップ失敗では、引き続きアカウント追加を拒否します。
 
 ## ネイティブ Codexの復元
 

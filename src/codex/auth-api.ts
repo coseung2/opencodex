@@ -1,12 +1,15 @@
-import { ConfigMutationLockError, loadConfig, mutatePersistedConfig, saveConfigPreservingClaudeCode } from "../config";
+import { ConfigMutationLockError, loadConfig, mutatePersistedConfig, reconcileLiveConfigFromDisk, saveConfigPreservingClaudeCode } from "../config";
 import { withCodexAccountLogLabel } from "./account-label";
 import {
   getCodexAccountCredential,
   getValidCodexToken,
   isCodexAccountGenerationLive,
+  clearCodexAccountQuotaPauseOwnership,
+  markCodexAccountQuotaValidationPending,
   markCodexAccountValidated,
   readCodexAccountRecord,
   saveCodexAccountCredential,
+  tombstoneCodexAccountIfGeneration,
   CodexCredentialGenerationConflictError,
   CodexCredentialRefreshLockTimeoutError,
   CodexCredentialRefreshBusyError,
@@ -63,7 +66,7 @@ import {
 } from "./main-account-cache";
 export { clearMainAccountInfoCache } from "./main-account-cache";
 import { maskEmail } from "../lib/privacy";
-import { CodexWarmupError, codexWarmupFailureReason, warmCodexAccount } from "./warmup";
+import { CodexWarmupError, codexWarmupFailureReason, isCodexWarmupQuotaFailure, warmCodexAccount } from "./warmup";
 export { maskEmail } from "../lib/privacy";
 import type { CodexAccount, OcxConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
@@ -83,6 +86,7 @@ import {
 } from "./account-id";
 import { codexAccountIdNamespaceCollisionError } from "./account-namespace-match";
 import { ResourceAdmissionError } from "../lib/admission";
+import { requestCodexQuotaWarmupRetry } from "../oauth/token-guardian";
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -248,7 +252,7 @@ async function verifyCodexAccountWarmup(
   accountId: string,
   accessToken: string,
   chatgptAccountId: string,
-): Promise<{ ok: true; validatedAt: number } | { ok: false; response: Response }> {
+): Promise<{ ok: true; validatedAt: number } | { ok: false; response: Response; error: unknown }> {
   try {
     await warmCodexAccount({ accessToken, chatgptAccountId });
     return { ok: true, validatedAt: Date.now() };
@@ -257,6 +261,7 @@ async function verifyCodexAccountWarmup(
     const upstream = err instanceof CodexWarmupError ? err.upstreamDetail : undefined;
     return {
       ok: false,
+      error: err,
       response: jsonResponse({
         error: upstream
           ? `Codex account warmup failed: ${upstream}`
@@ -267,6 +272,64 @@ async function verifyCodexAccountWarmup(
       }, 401),
     };
   }
+}
+
+interface FreshRegistrationQuota {
+  quota: Omit<StoredAccountQuota, "updatedAt">;
+  plan?: string;
+  email?: string;
+}
+
+async function fetchFreshRegistrationQuota(
+  accessToken: string,
+  chatgptAccountId: string,
+  configuredPlan?: string,
+): Promise<FreshRegistrationQuota | null> {
+  try {
+    const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+      headers: { Authorization: `Bearer ${accessToken}`, "ChatGPT-Account-Id": chatgptAccountId },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as WhamUsageResponse;
+    const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(configuredPlan) ?? undefined;
+    const quota = parseUsageQuota({ ...data, ...(plan ? { plan_type: plan } : {}) });
+    if (!quota) return null;
+    return {
+      quota,
+      ...(plan ? { plan } : {}),
+      ...(typeof data.email === "string" && data.email.trim() ? { email: data.email } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function exhaustedQuotaRetryAt(
+  quota: Omit<StoredAccountQuota, "updatedAt">,
+  plan?: string | null,
+  nowMs: number = Date.now(),
+): number | undefined {
+  const monthlyOnly = isThirtyDayOnlyPlan(plan);
+  const resetSeconds: number[] = [];
+  if (!monthlyOnly && quota.weeklyPercent !== undefined && quota.weeklyPercent >= 100
+    && quota.weeklyResetAt !== undefined) resetSeconds.push(quota.weeklyResetAt);
+  if (quota.monthlyPercent !== undefined && quota.monthlyPercent >= 100
+    && quota.monthlyResetAt !== undefined) resetSeconds.push(quota.monthlyResetAt);
+  const retryAtMs = resetSeconds.length > 0 ? Math.max(...resetSeconds) * 1000 : undefined;
+  return retryAtMs !== undefined && Number.isFinite(retryAtMs) && retryAtMs > nowMs
+    ? retryAtMs
+    : undefined;
+}
+
+function mayDeferQuotaWarmup(
+  warmup: { ok: false; error: unknown },
+  fresh: FreshRegistrationQuota | null,
+): fresh is FreshRegistrationQuota {
+  return isCodexWarmupQuotaFailure(warmup.error)
+    && fresh !== null
+    && isCodexQuotaExhausted(fresh.quota, fresh.plan)
+    && exhaustedQuotaRetryAt(fresh.quota, fresh.plan) !== undefined;
 }
 
 function expireCodexAuthFlow(flowId: string | null, error = "Login cancelled"): void {
@@ -309,6 +372,64 @@ function saveRuntimeConfig(sourceConfig: OcxConfig, nextConfig: OcxConfig): void
     delete sourceConfig[key];
   }
   Object.assign(sourceConfig, nextConfig);
+}
+
+type CodexAccountConfigCommit = { ok: true } | { ok: false; error: string };
+
+function commitCodexAccountConfig(
+  sourceConfig: OcxConfig,
+  account: CodexAccount,
+  mode: "create" | "reauth",
+  credentialGeneration: number,
+  quotaPause: "add" | "release" | "preserve",
+): CodexAccountConfigCommit {
+  const liveBaseline = structuredClone(sourceConfig);
+  const applyMutation = (persisted: OcxConfig) => {
+    if (!isCodexAccountGenerationLive(account.id, credentialGeneration)) {
+      return { changed: false, value: { ok: false, error: "Codex account changed while login was being saved" } as CodexAccountConfigCommit };
+    }
+    const conflict = mode === "create"
+      ? codexAccountIdNamespaceCollisionError(persisted.codexAccountNamespaces, account.id)
+        ?? ((persisted.codexAccounts ?? []).some(candidate => candidate.id === account.id)
+          ? `Account id already exists: ${account.id}`
+          : undefined)
+      : (configuredPoolAccount(persisted, account.id)
+        ? undefined
+        : "Pool account was removed while login was in progress. Add it again as a new account.");
+    if (conflict) {
+      return { changed: false, value: { ok: false, error: conflict } as CodexAccountConfigCommit };
+    }
+
+    const accounts = persisted.codexAccounts ?? [];
+    const existingIdx = accounts.findIndex(candidate => candidate.id === account.id);
+    if (existingIdx >= 0) {
+      accounts[existingIdx] = withCodexAccountLogLabel({
+        ...accounts[existingIdx],
+        ...account,
+        isMain: false,
+      }, accounts);
+    } else {
+      accounts.push(withCodexAccountLogLabel({ ...account, isMain: false }, accounts));
+    }
+    persisted.codexAccounts = accounts;
+    if (quotaPause === "add") setCodexAccountPaused(persisted, account.id, true);
+    else if (quotaPause === "release") setCodexAccountPaused(persisted, account.id, false);
+    return { changed: true, value: { ok: true } as CodexAccountConfigCommit };
+  };
+  const outcome = mutatePersistedConfig(applyMutation);
+  if (outcome.status === "unavailable") {
+    if (outcome.reason === "missing") {
+      const fallback = structuredClone(sourceConfig);
+      const applied = applyMutation(fallback);
+      if (!applied.value.ok) return applied.value;
+      saveRuntimeConfig(sourceConfig, fallback);
+      return { ok: true };
+    }
+    return { ok: false, error: `Configuration could not be updated (${outcome.reason})` };
+  }
+  if (!outcome.value.ok) return outcome.value;
+  reconcileLiveConfigFromDisk(sourceConfig, liveBaseline);
+  return { ok: true };
 }
 
 async function mapWithConcurrency<T, R>(
@@ -937,24 +1058,52 @@ export async function handleCodexAuthAPI(
     const payload = decodeJwtPayload(body.accessToken);
     const exp = typeof payload?.exp === "number" ? payload.exp * 1000 : Date.now() + 3600_000;
     const warmup = await verifyCodexAccountWarmup(body.id, body.accessToken, derivedAccountId);
-    if (!warmup.ok) return warmup.response;
+    const freshQuota = !warmup.ok && isCodexWarmupQuotaFailure(warmup.error)
+      ? await fetchFreshRegistrationQuota(body.accessToken, derivedAccountId, body.plan)
+      : null;
+    const quotaDeferred = !warmup.ok && mayDeferQuotaWarmup(warmup, freshQuota);
+    if (!warmup.ok && !quotaDeferred) return warmup.response;
     const latestConfig = getRuntimeConfig(config);
     const commitConflict = codexAccountPersistenceConflict(latestConfig, body.id, "create");
     if (commitConflict) return jsonResponse({ error: commitConflict }, 400);
-    saveCodexAccountCredential(body.id, {
+    const credentialGeneration = saveCodexAccountCredential(body.id, {
       accessToken: body.accessToken,
       refreshToken: body.refreshToken,
       expiresAt: exp,
       chatgptAccountId: derivedAccountId,
     });
-    markCodexAccountValidated(body.id, warmup.validatedAt);
+    const commit = commitCodexAccountConfig(
+      config,
+      {
+        id: body.id,
+        email: body.email,
+        plan: freshQuota?.plan ?? body.plan,
+        isMain: false,
+      },
+      "create",
+      credentialGeneration,
+      quotaDeferred ? "add" : "preserve",
+    );
+    if (!commit.ok) {
+      tombstoneCodexAccountIfGeneration(body.id, credentialGeneration);
+      return jsonResponse({ error: commit.error }, 409);
+    }
+    if (quotaDeferred) {
+      markCodexAccountQuotaValidationPending(
+        body.id,
+        codexWarmupFailureReason(warmup.error),
+        exhaustedQuotaRetryAt(freshQuota.quota, freshQuota.plan),
+      );
+    } else if (warmup.ok) {
+      markCodexAccountValidated(body.id, warmup.validatedAt, credentialGeneration);
+    }
     clearAccountNeedsReauth(body.id);
-    const accounts = latestConfig.codexAccounts ?? [];
-    accounts.push(withCodexAccountLogLabel({ id: body.id, email: body.email, plan: body.plan, isMain: false }, accounts));
-    latestConfig.codexAccounts = accounts;
-    saveRuntimeConfig(config, latestConfig);
     reconcileLiveStateStores();
-    return jsonResponse({ ok: true });
+    if (quotaDeferred) {
+      setAccountQuotaFromParsed(body.id, freshQuota.quota);
+      requestCodexQuotaWarmupRetry();
+    }
+    return jsonResponse({ ok: true, ...(quotaDeferred ? { validation: "pending_quota_reset" } : {}) });
   }
 
   if (url.pathname === "/api/codex-auth/accounts" && req.method === "DELETE") {
@@ -1002,6 +1151,13 @@ export async function handleCodexAuthAPI(
     const exists = id === MAIN_CODEX_ACCOUNT_ID
       || (runtimeConfig.codexAccounts ?? []).some(account => isSelectableCodexPoolAccount(account) && account.id === id);
     if (!exists) return jsonResponse({ error: "Account not found" }, 404);
+    const record = id === MAIN_CODEX_ACCOUNT_ID ? null : readCodexAccountRecord(id);
+    if (body.paused === false && record?.lastCodexValidationStatus === "quota_pending") {
+      return jsonResponse({ error: "Account validation is waiting for its quota reset" }, 409);
+    }
+    if (body.paused === true && record?.codexQuotaPauseOwned === true) {
+      clearCodexAccountQuotaPauseOwnership(id);
+    }
 
     setCodexAccountPaused(runtimeConfig, id, body.paused);
     if (body.paused) {
@@ -1377,7 +1533,11 @@ export async function handleCodexAuthAPI(
                 }
 
                 const warmup = await verifyCodexAccountWarmup(accountId, cred.access, oauthAccountId);
-                if (!warmup.ok) {
+                const freshRegistrationQuota = quota ? { quota, ...(plan ? { plan } : {}) } : null;
+                const quotaDeferred = !reauth
+                  && !warmup.ok
+                  && mayDeferQuotaWarmup(warmup, freshRegistrationQuota);
+                if (!warmup.ok && !quotaDeferred) {
                   const body = await warmup.response.json().catch(() => ({})) as { error?: string; reason?: string };
                   setCodexLoginState(flowId, {
                     status: "error",
@@ -1391,6 +1551,7 @@ export async function handleCodexAuthAPI(
                 const latestConfig = getRuntimeConfig(config);
                 const accounts = latestConfig.codexAccounts ?? [];
                 const existingIdx = accounts.findIndex(account => account.id === accountId);
+                const existingAccount = existingIdx >= 0 ? accounts[existingIdx] : undefined;
                 const commitConflict = codexAccountPersistenceConflict(
                   latestConfig,
                   accountId,
@@ -1406,37 +1567,52 @@ export async function handleCodexAuthAPI(
                   break;
                 }
 
-                saveCodexAccountCredential(accountId, {
+                const releaseOwnedQuotaPause = reauth
+                  && readCodexAccountRecord(accountId)?.codexQuotaPauseOwned === true;
+                const credentialGeneration = saveCodexAccountCredential(accountId, {
                   accessToken: cred.access,
                   refreshToken: cred.refresh,
                   expiresAt: cred.expires,
                   chatgptAccountId: oauthAccountId,
                 });
+                const configCommit = commitCodexAccountConfig(
+                  config,
+                  {
+                    id: accountId,
+                    email,
+                    plan: plan ?? existingAccount?.plan,
+                    isMain: false,
+                  },
+                  reauth ? "reauth" : "create",
+                  credentialGeneration,
+                  quotaDeferred ? "add" : releaseOwnedQuotaPause ? "release" : "preserve",
+                );
+                if (!configCommit.ok) {
+                  if (!reauth) tombstoneCodexAccountIfGeneration(accountId, credentialGeneration);
+                  setCodexLoginState(flowId, {
+                    status: "error",
+                    error: configCommit.error,
+                    doneAt: Date.now(),
+                  });
+                  completed = true;
+                  break;
+                }
                 // A successful reauthentication replaces the credential generation. Do not let a
                 // failed optional WHAM probe make the replacement inherit quota from the old record.
                 if (reauth) clearAccountQuota(accountId);
-                markCodexAccountValidated(accountId, warmup.validatedAt);
+                if (quotaDeferred) {
+                  markCodexAccountQuotaValidationPending(
+                    accountId,
+                    codexWarmupFailureReason(warmup.error),
+                    exhaustedQuotaRetryAt(freshRegistrationQuota.quota, freshRegistrationQuota.plan),
+                  );
+                } else if (warmup.ok) {
+                  markCodexAccountValidated(accountId, warmup.validatedAt, credentialGeneration);
+                }
                 clearAccountNeedsReauth(accountId);
-                if (quota) {
-                  setAccountQuotaFromParsed(accountId, quota);
-                }
-
-                if (existingIdx >= 0) {
-                  // Keep the pool id stable; refresh display metadata after a successful login/reauth.
-                  accounts[existingIdx] = withCodexAccountLogLabel({
-                    ...accounts[existingIdx],
-                    email,
-                    plan: plan ?? accounts[existingIdx].plan,
-                    isMain: false,
-                  }, accounts);
-                  latestConfig.codexAccounts = accounts;
-                  saveRuntimeConfig(config, latestConfig);
-                } else {
-                  accounts.push(withCodexAccountLogLabel({ id: accountId, email, plan, isMain: false }, accounts));
-                  latestConfig.codexAccounts = accounts;
-                  saveRuntimeConfig(config, latestConfig);
-                }
                 reconcileLiveStateStores();
+                if (quota) setAccountQuotaFromParsed(accountId, quota);
+                if (quotaDeferred) requestCodexQuotaWarmupRetry();
                 setCodexLoginState(flowId, { status: "done", accountId, email, doneAt: Date.now() });
                 completed = true;
               }

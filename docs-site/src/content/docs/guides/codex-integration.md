@@ -305,7 +305,10 @@ item array (`input: [{ type: "message", ... }]`), waits for `response.completed`
 `gpt-5.4-mini`. If that model returns HTTP 400, it retries with `gpt-5.5`; structured upstream error
 details are surfaced without exposing raw response bodies. Background revalidation is separate and
 off by default; it runs only when Token Guardian is enabled, the `chatgpt` refresh policy is
-`proactive`, and `tokenGuardian.codexWarmupEnabled` is true.
+`proactive`, and `tokenGuardian.codexWarmupEnabled` is true. One exception is an account whose
+fresh usage report confirms that its quota is exhausted: opencodex saves it in a paused,
+quota-pending state and automatically retries warmup after the reported reset. Authentication and
+other warmup failures still reject the account.
 
 ## Restoring native Codex
 

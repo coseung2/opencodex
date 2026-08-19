@@ -11,12 +11,13 @@
  * "proactive", and the global switch (config.tokenGuardian.enabled) defaults OFF, so a default
  * install adds zero ToS-detection surface. See devlog 260703_oauth-multi-account-refresh-and-tos.
  */
-import { loadConfig } from "../config";
+import { loadConfig, mutatePersistedConfig } from "../config";
 import type { OcxConfig, OcxTokenGuardianConfig } from "../types";
 import { listAccounts } from "./store";
 import { getValidAccessTokenForAccount, listOAuthProviders, OAuthLoginRequiredError, resolveRefreshPolicy } from "./index";
 import {
   getValidCodexToken,
+  isCodexAccountGenerationLive,
   listCodexAccountIds,
   markCodexAccountValidated,
   markCodexAccountValidationFailed,
@@ -25,11 +26,14 @@ import {
   CodexCredentialRefreshBusyError,
   CodexCredentialRefreshStaleError,
 } from "../codex/account-store";
-import { codexWarmupFailureReason, warmCodexAccount } from "../codex/warmup";
+import { CodexWarmupError, codexWarmupFailureReason, isCodexWarmupQuotaFailure, warmCodexAccount } from "../codex/warmup";
 import { getMainAccountToken, MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
 import { captureConfigGeneration, type GenerationContext } from "../lib/state-store-sweeper";
+import { setCodexAccountPaused } from "../codex/account-pause";
+import { reconcileLiveStateStores } from "../lib/state-store-registrations";
+import { markAccountNeedsReauth } from "../codex/account-runtime-state";
 
 export interface TokenGuardianHandle {
   stop(): void;
@@ -63,10 +67,42 @@ interface BackoffEntry {
 const backoff = new Map<string, BackoffEntry>();
 let lastReconciledGeneration = 0;
 let liveBackoffKeys = new Set<string>();
+let wakeQuotaRetryLoop: (() => void) | null = null;
+const MIN_QUOTA_RETRY_TIMER_MS = 1_000;
 
 /** Test hook: clear backoff state between cases. */
 export function __resetGuardianState(): void {
   backoff.clear();
+}
+
+function quotaPendingSweepEligible(config: OcxConfig): boolean {
+  const openai = config.providers[OPENAI_CODEX_PROVIDER_ID];
+  return openai?.disabled !== true
+    && openai !== undefined
+    && isCanonicalOpenAiForwardProvider(openai)
+    && (providerCodexAccountMode(OPENAI_CODEX_PROVIDER_ID, openai) ?? "pool") === "pool";
+}
+
+function nextPendingQuotaRetryDelayMs(config: OcxConfig, nowMs = Date.now()): number | undefined {
+  if (!quotaPendingSweepEligible(config)) return undefined;
+  let earliest: number | undefined;
+  for (const id of listCodexAccountIds()) {
+    const record = readCodexAccountRecord(id);
+    if (record?.lastCodexValidationStatus !== "quota_pending" || !record.credential) continue;
+    const retryAt = Math.max(
+      record.codexQuotaRetryAt ?? nowMs,
+      backoff.get(`codex:${id}`)?.retryAfterMs ?? nowMs,
+    );
+    if (earliest === undefined || retryAt < earliest) earliest = retryAt;
+  }
+  return earliest === undefined
+    ? undefined
+    : Math.max(MIN_QUOTA_RETRY_TIMER_MS, earliest - nowMs);
+}
+
+/** Wake the background loop after registration creates a new quota-pending account. */
+export function requestCodexQuotaWarmupRetry(): void {
+  wakeQuotaRetryLoop?.();
 }
 
 function num(value: number | undefined, fallback: number, min: number): number {
@@ -133,11 +169,76 @@ export async function guardianSweep(nowMs: number = Date.now()): Promise<Guardia
   const config: OcxConfig = loadConfig();
   const g = config.tokenGuardian;
   const result: GuardianSweepResult = { enabled: !!g?.enabled, refreshed: [], warmed: [], failed: [], skippedBackoff: [] };
-  if (!g?.enabled) return result;
-
   const opts = resolved(g);
   const horizonMs = (opts.tickSeconds + opts.leadSeconds) * 1000;
   const tasks: Array<() => Promise<void>> = [];
+
+  // Registration-time quota deferrals are a safety invariant, not an optional keep-alive
+  // feature. Retry them after their freshly observed WHAM reset even when Token Guardian's
+  // user-facing refresh/warmup switches are off.
+  const openai = config.providers[OPENAI_CODEX_PROVIDER_ID];
+  if (quotaPendingSweepEligible(config)) {
+    for (const id of listCodexAccountIds()) {
+      const record = readCodexAccountRecord(id);
+      if (record?.lastCodexValidationStatus !== "quota_pending" || !record.credential) continue;
+      if (record.codexQuotaRetryAt !== undefined && record.codexQuotaRetryAt > nowMs) continue;
+      const key = `codex:${id}`;
+      if (inBackoff(key, nowMs)) { result.skippedBackoff.push(key); continue; }
+      tasks.push(async () => {
+        let attemptedGeneration = record.generation;
+        try {
+          const token = await getValidCodexToken(id);
+          attemptedGeneration = token.generation;
+          await warmCodexAccount({
+            accessToken: token.accessToken,
+            chatgptAccountId: token.chatgptAccountId,
+            model: opts.codexWarmupModel,
+          });
+          if (!isCodexAccountGenerationLive(id, token.generation)) return;
+          if (readCodexAccountRecord(id)?.codexQuotaPauseOwned === true) {
+            const outcome = mutatePersistedConfig(persisted => {
+              const current = readCodexAccountRecord(id);
+              if (!current || current.generation !== token.generation || current.codexQuotaPauseOwned !== true) {
+                return { changed: false, value: false };
+              }
+              const wasPaused = persisted.pausedCodexAccountIds?.includes(id) ?? false;
+              setCodexAccountPaused(persisted, id, false);
+              return { changed: wasPaused, value: true };
+            });
+            if (outcome.status === "unavailable" || outcome.value !== true) {
+              throw new Error("Codex quota-deferred pause could not be released");
+            }
+          }
+          if (!markCodexAccountValidated(id, Date.now(), token.generation)) {
+            throw new Error("Codex account changed while quota validation completed");
+          }
+          reconcileLiveStateStores();
+          backoff.delete(key);
+          result.warmed.push(key);
+        } catch (err) {
+          const terminalWarmupFailure = err instanceof CodexWarmupError
+            && err.code === "http_status"
+            && (err.status === 401 || err.status === 403)
+            && !isCodexWarmupQuotaFailure(err);
+          const terminalTokenFailure = err instanceof TokenRefreshError
+            && (err.reason === "revoked" || err.reason === "expired");
+          if (terminalWarmupFailure || terminalTokenFailure) {
+            if (markCodexAccountValidationFailed(id, codexWarmupFailureReason(err), attemptedGeneration)) {
+              markAccountNeedsReauth(id, writerGeneration);
+            }
+          }
+          const permanent = terminalWarmupFailure || terminalTokenFailure;
+          recordFailure(key, nowMs, opts.backoffBaseSeconds, opts.backoffMaxSeconds, permanent, writerGeneration);
+          result.failed.push(key);
+        }
+      });
+    }
+  }
+
+  if (!g?.enabled) {
+    await runWithConcurrency(tasks, opts.concurrency);
+    return result;
+  }
 
   // A) OAuth providers — every account in each provider's set (multiauth keep-alive),
   // skipping accounts already marked needsReauth (terminal; only a re-login fixes them).
@@ -166,14 +267,13 @@ export async function guardianSweep(nowMs: number = Date.now()): Promise<Guardia
 
   // B) canonical OpenAI Codex login. Direct warms main only; pool additionally maintains every
   // added account. The direct branch returns before the managed account store is enumerated.
-  const openai = config.providers[OPENAI_CODEX_PROVIDER_ID];
   if (
     openai
     && openai.disabled !== true
     && isCanonicalOpenAiForwardProvider(openai)
     && resolveRefreshPolicy(OPENAI_CODEX_PROVIDER_ID, config) === "proactive"
   ) {
-    const mode = providerCodexAccountMode(OPENAI_CODEX_PROVIDER_ID, openai) ?? "pool";
+    const configuredMode = providerCodexAccountMode(OPENAI_CODEX_PROVIDER_ID, openai) ?? "pool";
     if (opts.codexWarmupEnabled) {
       const mainToken = getMainAccountToken();
       const key = `codex:${MAIN_CODEX_ACCOUNT_ID}`;
@@ -197,10 +297,11 @@ export async function guardianSweep(nowMs: number = Date.now()): Promise<Guardia
       }
     }
 
-    const addedAccountIds = mode === "pool" ? listCodexAccountIds() : [];
+    const addedAccountIds = configuredMode === "pool" ? listCodexAccountIds() : [];
     for (const id of addedAccountIds) {
       const record = readCodexAccountRecord(id);
       if (!record || record.deletedAt != null) continue;
+      if (record.lastCodexValidationStatus === "quota_pending") continue;
       const cred = record.credential;
       if (!cred) continue;
       const needsRefresh = cred.expiresAt <= nowMs + horizonMs;
@@ -273,16 +374,24 @@ export function reconcileGuardianBackoff(context: GenerationContext): number {
 export function startTokenGuardian(): TokenGuardianHandle {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let sweepRunning = false;
 
   const scheduleNext = () => {
     if (stopped) return;
     const opts = resolved(loadConfig().tokenGuardian);
-    const delayMs = (opts.tickSeconds + Math.random() * opts.jitterSeconds) * 1000;
+    const regularDelayMs = (opts.tickSeconds + Math.random() * opts.jitterSeconds) * 1000;
+    const pendingDelayMs = nextPendingQuotaRetryDelayMs(loadConfig());
+    const delayMs = pendingDelayMs === undefined
+      ? regularDelayMs
+      : Math.min(regularDelayMs, pendingDelayMs);
     timer = setTimeout(runSweep, delayMs);
     if (typeof timer.unref === "function") timer.unref(); // never keep the process alive for a sweep
   };
 
   const runSweep = () => {
+    timer = undefined;
+    if (stopped || sweepRunning) return;
+    sweepRunning = true;
     void guardianSweep()
       .then(r => {
         if (r.enabled && (r.refreshed.length || r.warmed.length || r.failed.length)) {
@@ -290,14 +399,26 @@ export function startTokenGuardian(): TokenGuardianHandle {
         }
       })
       .catch(err => console.log(`token-guardian sweep error: ${err instanceof Error ? err.message : String(err)}`))
-      .finally(scheduleNext);
+      .finally(() => {
+        sweepRunning = false;
+        scheduleNext();
+      });
   };
 
+  const wake = () => {
+    if (stopped || sweepRunning) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(runSweep, 0);
+    if (typeof timer.unref === "function") timer.unref();
+  };
+
+  wakeQuotaRetryLoop = wake;
   scheduleNext();
   return {
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
+      if (wakeQuotaRetryLoop === wake) wakeQuotaRetryLoop = null;
     },
   };
 }

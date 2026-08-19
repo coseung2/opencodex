@@ -281,7 +281,9 @@ fallback 行为，参见 [Sub-agent Surface](/guides/sub-agent-surface/)。
 （`input: [{ type: "message", ... }]`），等待 `response.completed`，并默认使用 `gpt-5.4-mini`。
 如果该模型返回 HTTP 400，则会改用 `gpt-5.5` 重试；结构化的上游错误详情会被展示给用户，但不会暴露
 原始响应正文。后台重新验证是独立功能，默认关闭；只有在启用 Token Guardian、将 `chatgpt` 刷新策略设为
-`proactive`，并且 `tokenGuardian.codexWarmupEnabled` 为 true 时才会运行。
+`proactive`，并且 `tokenGuardian.codexWarmupEnabled` 为 true 时才会运行。唯一的例外是最新用量响应已确认
+配额耗尽的账号：opencodex 会将其保存为暂停的预热等待状态，并在所报告的重置时间后自动重试预热。
+身份验证失败和其他预热失败仍会拒绝添加账号。
 
 ## 恢复原生 Codex
 

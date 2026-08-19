@@ -184,7 +184,7 @@ catalog sync는 선택된 서브에이전트 모델을 Codex가 쓸 수 있게 �
 
 ## Codex 계정 워밍업
 
-ChatGPT 계정을 Codex account pool에 추가하면, opencodex는 이를 저장하기 전에 Codex Responses backend로 작은 streaming request를 보내 확인합니다. 요청은 실제 Responses item array(`input: [{ type: "message", ... }]`)를 사용하고, `response.completed`를 기다리며, 기본값은 `gpt-5.4-mini`입니다. 그 모델이 HTTP 400을 반환하면 `gpt-5.5`로 다시 시도합니다. 구조화된 upstream error detail은 보여 주되 raw response body는 노출하지 않습니다. background revalidation은 별도 기능이며 기본값은 꺼져 있습니다. Token Guardian이 활성화되고, `chatgpt` refresh policy가 `proactive`이며, `tokenGuardian.codexWarmupEnabled`가 true일 때만 실행됩니다.
+ChatGPT 계정을 Codex account pool에 추가하면, opencodex는 이를 저장하기 전에 Codex Responses backend로 작은 streaming request를 보내 확인합니다. 요청은 실제 Responses item array(`input: [{ type: "message", ... }]`)를 사용하고, `response.completed`를 기다리며, 기본값은 `gpt-5.4-mini`입니다. 그 모델이 HTTP 400을 반환하면 `gpt-5.5`로 다시 시도합니다. 구조화된 upstream error detail은 보여 주되 raw response body는 노출하지 않습니다. background revalidation은 별도 기능이며 기본값은 꺼져 있습니다. Token Guardian이 활성화되고, `chatgpt` refresh policy가 `proactive`이며, `tokenGuardian.codexWarmupEnabled`가 true일 때만 실행됩니다. 단, 최신 사용량 응답에서 할당량 소진이 확인된 계정은 예외입니다. 이 경우 계정을 일시정지된 웜업 대기 상태로 저장하고, 표시된 리셋 시각 이후 자동으로 웜업을 다시 시도합니다. 인증 실패나 그 밖의 웜업 실패는 여전히 계정 등록을 거부합니다.
 
 ## 네이티브 Codex 복원
 

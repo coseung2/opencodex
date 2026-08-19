@@ -15,6 +15,7 @@ import {
 import {
   getCodexAccountCredential,
   listCodexAccountIds,
+  markCodexAccountQuotaValidationPending,
   readCodexAccountRecord,
   saveCodexAccountCredential,
 } from "../src/codex/account-store";
@@ -112,6 +113,7 @@ async function completeMockCodexOAuth(options: {
   email: string;
   onWarmup: () => void;
   usageResponse?: () => Response;
+  warmupResponse?: () => Response;
 }): Promise<{ startStatus: number; state: { status: string; error?: string } }> {
   const oauth = await import("../src/oauth");
   const oauthStore = await import("../src/oauth/store");
@@ -147,7 +149,7 @@ async function completeMockCodexOAuth(options: {
     }
     if (target === "https://chatgpt.com/backend-api/codex/responses") {
       options.onWarmup();
-      return new Response('event: response.completed\ndata: {"type":"response.completed"}\n\n', {
+      return options.warmupResponse?.() ?? new Response('event: response.completed\ndata: {"type":"response.completed"}\n\n', {
         status: 200,
         headers: { "Content-Type": "text/event-stream" },
       });
@@ -1955,6 +1957,50 @@ describe("codex-auth API", () => {
     expect(getCodexAccountCredential("manual-main-match")?.chatgptAccountId).toBe("acct-main-login");
   });
 
+  test("manual registration rebases an unrelated persisted config edit", async () => {
+    enableManualImport();
+    mockCodexWarmupSuccess();
+    const config = makeConfig();
+    saveConfig(config);
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      const latest = loadConfig();
+      latest.fastMode = true;
+      saveConfig(latest);
+    });
+    const req = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manualImportBody({ id: "manual-rebase" })),
+    });
+
+    const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+
+    expect(resp!.status).toBe(200);
+    expect(loadConfig().fastMode).toBe(true);
+    expect(loadConfig().codexAccounts?.map(account => account.id)).toEqual(["manual-rebase"]);
+  });
+
+  test("manual registration rolls back its credential when config commit becomes invalid", async () => {
+    enableManualImport();
+    mockCodexWarmupSuccess();
+    const config = makeConfig();
+    saveConfig(config);
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      writeFileSync(getConfigPath(), "{ malformed");
+    });
+    const req = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manualImportBody({ id: "manual-config-fail" })),
+    });
+
+    const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+
+    expect(resp!.status).toBe(409);
+    expect(getCodexAccountCredential("manual-config-fail")).toBeNull();
+    expect(readFileSync(getConfigPath(), "utf8")).toBe("{ malformed");
+  });
+
   test("POST /api/codex-auth/accounts rejects manual import when Codex warmup fails", async () => {
     enableManualImport();
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -1977,6 +2023,107 @@ describe("codex-auth API", () => {
     expect(JSON.stringify(body)).not.toContain("raw upstream token-like text");
     expect(config.codexAccounts?.map(a => a.id)).toEqual([]);
     expect(getCodexAccountCredential("manual-warmup-fail")).toBeNull();
+  });
+
+  test("POST /api/codex-auth/accounts persists and pauses a freshly quota-exhausted account", async () => {
+    enableManualImport();
+    const resetAt = Math.floor(Date.now() / 1000) + 600;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const target = String(input);
+      if (target === "https://chatgpt.com/backend-api/codex/responses") {
+        return new Response(JSON.stringify({ error: { message: "rate limit reached" } }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (target === "https://chatgpt.com/backend-api/wham/usage") {
+        return new Response(JSON.stringify({
+          plan_type: "pro",
+          rate_limit: { primary_window: { used_percent: 100, reset_at: resetAt } },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return previousFetch(input);
+    }) as typeof fetch;
+    const config = makeConfig();
+    const req = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manualImportBody({ id: "manual-quota-full" })),
+    });
+
+    const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+
+    expect(resp!.status).toBe(200);
+    expect(await resp!.json()).toMatchObject({ ok: true, validation: "pending_quota_reset" });
+    expect(config.codexAccounts?.map(account => account.id)).toEqual(["manual-quota-full"]);
+    expect(config.pausedCodexAccountIds).toContain("manual-quota-full");
+    expect(getCodexAccountCredential("manual-quota-full")).toMatchObject({
+      accessToken: "access-manual-test",
+      refreshToken: "refresh-manual-test",
+    });
+    expect(getAccountQuota("manual-quota-full")).toMatchObject({ weeklyPercent: 100, weeklyResetAt: resetAt });
+    expect(readCodexAccountRecord("manual-quota-full")).toMatchObject({
+      lastCodexValidationStatus: "quota_pending",
+      codexQuotaRetryAt: resetAt * 1000,
+      codexQuotaPauseOwned: true,
+    });
+  });
+
+  test("POST /api/codex-auth/accounts rejects exhausted quota without a future reset", async () => {
+    enableManualImport();
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const target = String(input);
+      if (target === "https://chatgpt.com/backend-api/codex/responses") {
+        return new Response(JSON.stringify({ error: { message: "rate limit reached" } }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (target === "https://chatgpt.com/backend-api/wham/usage") {
+        return new Response(JSON.stringify({
+          plan_type: "pro",
+          rate_limit: { primary_window: { used_percent: 100 } },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return previousFetch(input);
+    }) as typeof fetch;
+    const config = makeConfig();
+    const req = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manualImportBody({ id: "manual-quota-no-reset" })),
+    });
+
+    const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+
+    expect(resp!.status).toBe(401);
+    expect(config.codexAccounts).toEqual([]);
+    expect(getCodexAccountCredential("manual-quota-no-reset")).toBeNull();
+  });
+
+  test("quota-looking detail on a 401 still rejects registration without persistence", async () => {
+    enableManualImport();
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input) === "https://chatgpt.com/backend-api/codex/responses") {
+        return new Response(JSON.stringify({ error: { message: "quota exhausted" } }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return previousFetch(input);
+    }) as typeof fetch;
+    const config = makeConfig();
+    const req = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manualImportBody({ id: "manual-quota-text-401" })),
+    });
+
+    const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+
+    expect(resp!.status).toBe(401);
+    expect(config.codexAccounts).toEqual([]);
+    expect(getCodexAccountCredential("manual-quota-text-401")).toBeNull();
   });
 
   test("POST /api/codex-auth/accounts rejects duplicate runtime alias before writing credentials", async () => {
@@ -3084,6 +3231,74 @@ describe("codex-auth API", () => {
     expect(getCodexAccountCredential("oauth-race")).toBeNull();
   });
 
+  test("OAuth creation persists and pauses a freshly quota-exhausted account", async () => {
+    const resetAt = Math.floor(Date.now() / 1000) + 600;
+    const config = makeConfig();
+    const result = await completeMockCodexOAuth({
+      config,
+      requestBody: { id: "oauth-quota-full" },
+      oauthAccountId: "acct-oauth-quota-full",
+      email: "oauth-quota-full@example.test",
+      onWarmup: () => {},
+      usageResponse: () => new Response(JSON.stringify({
+        email: "oauth-quota-full@example.test",
+        plan_type: "pro",
+        rate_limit: { primary_window: { used_percent: 100, reset_at: resetAt } },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      warmupResponse: () => new Response(JSON.stringify({ error: { message: "rate limit reached" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }),
+    });
+
+    expect(result.state).toMatchObject({ status: "done" });
+    expect(config.codexAccounts?.map(account => account.id)).toEqual(["oauth-quota-full"]);
+    expect(config.pausedCodexAccountIds).toContain("oauth-quota-full");
+    expect(getCodexAccountCredential("oauth-quota-full")).toMatchObject({
+      accessToken: "access-oauth-quota-full",
+      refreshToken: "refresh-oauth-quota-full",
+    });
+    expect(getAccountQuota("oauth-quota-full")).toMatchObject({ weeklyPercent: 100, weeklyResetAt: resetAt });
+    expect(readCodexAccountRecord("oauth-quota-full")).toMatchObject({
+      lastCodexValidationStatus: "quota_pending",
+      codexQuotaRetryAt: resetAt * 1000,
+      codexQuotaPauseOwned: true,
+    });
+  });
+
+  test("successful OAuth reauth releases a quota-owned pause", async () => {
+    const config = makeConfig({
+      codexAccounts: [{ id: "reauth-quota-pause", email: "reauth@example.test", plan: "pro", isMain: false }],
+      pausedCodexAccountIds: ["reauth-quota-pause"],
+    });
+    saveCodexAccountCredential("reauth-quota-pause", {
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      expiresAt: Date.now() + 60_000,
+      chatgptAccountId: "acct-reauth-quota-pause",
+    });
+    markCodexAccountQuotaValidationPending(
+      "reauth-quota-pause",
+      "http_status:429",
+      Date.now() + 600_000,
+    );
+
+    const result = await completeMockCodexOAuth({
+      config,
+      requestBody: { id: "reauth-quota-pause", reauth: true },
+      oauthAccountId: "acct-reauth-quota-pause",
+      email: "reauth@example.test",
+      onWarmup: () => {},
+    });
+
+    expect(result.state).toMatchObject({ status: "done" });
+    expect(config.pausedCodexAccountIds ?? []).not.toContain("reauth-quota-pause");
+    expect(readCodexAccountRecord("reauth-quota-pause")).toMatchObject({
+      lastCodexValidationStatus: "ok",
+    });
+    expect(readCodexAccountRecord("reauth-quota-pause")).not.toHaveProperty("codexQuotaPauseOwned");
+  });
+
   test("OAuth reauth cannot recreate an account deleted during warmup", async () => {
     const config = makeConfig({
       codexAccounts: [{ id: "reauth-race", email: "reauth-race@example.test", isMain: false }],
@@ -3189,7 +3404,7 @@ describe("codex-auth API", () => {
 
   test("OAuth pool login stores a privacy log label at the account creation call site", async () => {
     const source = await Bun.file("src/codex/auth-api.ts").text();
-    expect(source).toContain("withCodexAccountLogLabel({ id: accountId, email, plan, isMain: false }, accounts)");
+    expect(source).toContain("withCodexAccountLogLabel({ ...account, isMain: false }, accounts)");
   });
 
   test("GET /api/codex-auth/login-status masks transient flow-state emails at response boundaries", async () => {

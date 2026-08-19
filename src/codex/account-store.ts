@@ -55,8 +55,10 @@ function isCredentialRecord(value: unknown): value is CodexAccountCredentialReco
     && (value.deletedAt === undefined || typeof value.deletedAt === "number")
     && (value.replacedAt === undefined || typeof value.replacedAt === "number")
     && (value.lastCodexValidatedAt === undefined || typeof value.lastCodexValidatedAt === "number")
-    && (value.lastCodexValidationStatus === undefined || value.lastCodexValidationStatus === "ok" || value.lastCodexValidationStatus === "failed")
-    && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string");
+    && (value.lastCodexValidationStatus === undefined || value.lastCodexValidationStatus === "ok" || value.lastCodexValidationStatus === "failed" || value.lastCodexValidationStatus === "quota_pending")
+    && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string")
+    && (value.codexQuotaRetryAt === undefined || typeof value.codexQuotaRetryAt === "number")
+    && (value.codexQuotaPauseOwned === undefined || typeof value.codexQuotaPauseOwned === "boolean");
 }
 
 export function refreshGrantFingerprintForToken(refreshToken: string): string {
@@ -113,12 +115,14 @@ function persist(store: CodexAccountStore): void {
 
 function preservedValidationMetadata(record: CodexAccountCredentialRecord | undefined): Pick<
   CodexAccountCredentialRecord,
-  "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError"
+  "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError" | "codexQuotaRetryAt" | "codexQuotaPauseOwned"
 > {
   return {
     ...(record?.lastCodexValidatedAt !== undefined ? { lastCodexValidatedAt: record.lastCodexValidatedAt } : {}),
     ...(record?.lastCodexValidationStatus !== undefined ? { lastCodexValidationStatus: record.lastCodexValidationStatus } : {}),
     ...(record?.lastCodexValidationError !== undefined ? { lastCodexValidationError: record.lastCodexValidationError } : {}),
+    ...(record?.codexQuotaRetryAt !== undefined ? { codexQuotaRetryAt: record.codexQuotaRetryAt } : {}),
+    ...(record?.codexQuotaPauseOwned !== undefined ? { codexQuotaPauseOwned: record.codexQuotaPauseOwned } : {}),
   };
 }
 
@@ -128,50 +132,97 @@ export function getCodexAccountCredential(id: string): CodexAccountCredentials |
   return record.credential ?? null;
 }
 
-export function saveCodexAccountCredential(id: string, cred: CodexAccountCredentials): void {
-  withCredentialMutationLockSync(() => {
+export function saveCodexAccountCredential(id: string, cred: CodexAccountCredentials): number {
+  return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
     const refreshGrantFingerprint = current?.credential?.refreshToken === cred.refreshToken
       ? current.refreshGrantFingerprint ?? refreshGrantFingerprintForToken(cred.refreshToken)
       : refreshGrantFingerprintForToken(cred.refreshToken);
+    const generation = (current?.generation ?? 0) + 1;
     store[id] = {
       credential: cred,
-      generation: (current?.generation ?? 0) + 1,
+      generation,
       refreshGrantFingerprint,
       replacedAt: current ? Date.now() : undefined,
       ...preservedValidationMetadata(current),
     };
     persist(store);
+    return generation;
   });
 }
 
-export function markCodexAccountValidated(id: string, atMs: number = Date.now()): void {
-  withCredentialMutationLockSync(() => {
+export function markCodexAccountValidated(
+  id: string,
+  atMs: number = Date.now(),
+  expectedGeneration?: number,
+): boolean {
+  return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
-    if (!current || current.deletedAt != null || !current.credential) return;
+    if (!current || current.deletedAt != null || !current.credential
+      || (expectedGeneration !== undefined && current.generation !== expectedGeneration)) return false;
     store[id] = {
       ...current,
       lastCodexValidatedAt: atMs,
       lastCodexValidationStatus: "ok",
       lastCodexValidationError: undefined,
+      codexQuotaRetryAt: undefined,
+      codexQuotaPauseOwned: undefined,
     };
     persist(store);
+    return true;
   });
 }
 
-export function markCodexAccountValidationFailed(id: string, reason: string): void {
+export function markCodexAccountQuotaValidationPending(
+  id: string,
+  reason: string,
+  retryAtMs: number | undefined,
+): void {
   withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
     if (!current || current.deletedAt != null || !current.credential) return;
     store[id] = {
       ...current,
-      lastCodexValidationStatus: "failed",
+      lastCodexValidationStatus: "quota_pending",
       lastCodexValidationError: reason,
+      ...(retryAtMs !== undefined ? { codexQuotaRetryAt: retryAtMs } : {}),
+      codexQuotaPauseOwned: true,
     };
     persist(store);
+  });
+}
+
+export function clearCodexAccountQuotaPauseOwnership(id: string): void {
+  withCredentialMutationLockSync(() => {
+    const store = loadCodexAccountRecordStore();
+    const current = store[id];
+    if (!current || current.codexQuotaPauseOwned === undefined) return;
+    store[id] = { ...current, codexQuotaPauseOwned: undefined };
+    persist(store);
+  });
+}
+
+export function markCodexAccountValidationFailed(
+  id: string,
+  reason: string,
+  expectedGeneration?: number,
+): boolean {
+  return withCredentialMutationLockSync(() => {
+    const store = loadCodexAccountRecordStore();
+    const current = store[id];
+    if (!current || current.deletedAt != null || !current.credential
+      || (expectedGeneration !== undefined && current.generation !== expectedGeneration)) return false;
+    store[id] = {
+      ...current,
+      lastCodexValidationStatus: "failed",
+      lastCodexValidationError: reason,
+      codexQuotaRetryAt: undefined,
+    };
+    persist(store);
+    return true;
   });
 }
 
@@ -226,6 +277,17 @@ export function tombstoneCodexAccount(id: string): number {
     store[id] = { generation, deletedAt: Date.now() };
     persist(store);
     return generation;
+  });
+}
+
+export function tombstoneCodexAccountIfGeneration(id: string, expectedGeneration: number): boolean {
+  return withCredentialMutationLockSync(() => {
+    const store = loadCodexAccountRecordStore();
+    const current = store[id];
+    if (!current || current.generation !== expectedGeneration || current.deletedAt != null) return false;
+    store[id] = { generation: expectedGeneration + 1, deletedAt: Date.now() };
+    persist(store);
+    return true;
   });
 }
 

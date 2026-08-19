@@ -68,6 +68,20 @@ export function codexWarmupFailureReason(err: unknown): string {
   return safeWarmupReason(err);
 }
 
+/**
+ * A warmup rejection that can be caused by an exhausted account quota.
+ *
+ * The structured HTTP status is authoritative. Detail text only narrows a 403;
+ * arbitrary upstream prose (especially on auth failures) is never enough.
+ */
+export function isCodexWarmupQuotaFailure(err: unknown): boolean {
+  if (!(err instanceof CodexWarmupError) || err.code !== "http_status") return false;
+  if (err.status === 429) return true;
+  return err.status === 403
+    && typeof err.upstreamDetail === "string"
+    && /\b(?:quota|rate[\s_-]*limit|usage[\s_-]*limit)\b/i.test(err.upstreamDetail);
+}
+
 function eventTypeFromData(data: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const record = data as Record<string, unknown>;
