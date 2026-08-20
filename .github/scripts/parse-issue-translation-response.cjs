@@ -86,6 +86,12 @@ function writeOutput(key, value) {
   fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
 }
 
+function writeIncompleteOutputs() {
+  writeOutput("requires_translation", "false");
+  writeOutput("detected_language", "unknown");
+  writeOutput("source_complete", "false");
+}
+
 function writeMultilineOutput(key, value) {
   const delim = `${key.toUpperCase()}_${crypto.randomBytes(16).toString("hex")}`;
   fs.appendFileSync(
@@ -105,15 +111,18 @@ function main() {
     // Still emit outputs so the workflow can persist rate-limit state.
     // Do not mark the source complete — invalid output must remain retryable.
     console.warn("::warning::Issue translation AI response was empty or not valid JSON.");
-    writeOutput("requires_translation", "false");
-    writeOutput("detected_language", "unknown");
-    writeOutput("source_complete", "false");
+    writeIncompleteOutputs();
     return;
   }
 
   // Only boolean false is a completed no-translation decision. Strings/null/numbers
   // must not mark the source complete (remain retryable after cooldown).
   if (parsed.requires_translation === false) {
+    if (typeof parsed.detected_language !== "string") {
+      console.warn("::warning::Issue translation AI response had an invalid detected_language value.");
+      writeIncompleteOutputs();
+      return;
+    }
     const lang = scrubLine(parsed.detected_language || "English", 64) || "English";
     writeOutput("requires_translation", "false");
     writeOutput("detected_language", lang);
@@ -123,15 +132,23 @@ function main() {
 
   if (parsed.requires_translation !== true) {
     console.warn("::warning::Issue translation AI response had an invalid requires_translation value.");
-    writeOutput("requires_translation", "false");
-    writeOutput("detected_language", "unknown");
-    writeOutput("source_complete", "false");
+    writeIncompleteOutputs();
+    return;
+  }
+
+  if (
+    typeof parsed.detected_language !== "string"
+    || typeof parsed.translated_title !== "string"
+    || typeof parsed.translated_body !== "string"
+  ) {
+    console.warn("::warning::Issue translation AI response had invalid translation field types.");
+    writeIncompleteOutputs();
     return;
   }
 
   const lang = scrubLine(parsed.detected_language || "non-English", 64) || "non-English";
   const title = scrubLine(parsed.translated_title, 256);
-  const body = String(parsed.translated_body || "").replace(
+  const body = parsed.translated_body.replace(
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,
     "",
   );

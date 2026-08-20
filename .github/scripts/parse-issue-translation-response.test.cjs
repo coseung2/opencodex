@@ -208,6 +208,39 @@ describe("parse-issue-translation-response process", () => {
     assert.equal(parsed.source_complete, "false");
   });
 
+  it("rejects non-string translation fields as incomplete", () => {
+    const invalidValues = [
+      ["object", {}],
+      ["array", []],
+      ["null", null],
+      ["number", 42],
+      ["boolean", true],
+    ];
+    const fields = ["detected_language", "translated_title", "translated_body"];
+
+    for (const [valueLabel, value] of invalidValues) {
+      for (const field of fields) {
+        const payload = {
+          requires_translation: true,
+          detected_language: "German",
+          translated_title: "Title",
+          translated_body: "Body",
+        };
+        payload[field] = value;
+
+        const label = `${field}:${valueLabel}`;
+        const { status, output } = runParser(JSON.stringify(payload));
+        assert.equal(status, 0, label);
+        const parsed = parseOutputs(output);
+        assert.equal(parsed.requires_translation, "false", label);
+        assert.equal(parsed.detected_language, "unknown", label);
+        assert.equal(parsed.source_complete, "false", label);
+        assert.equal(parsed.translated_title, undefined, label);
+        assert.equal(parsed.translated_body, undefined, label);
+      }
+    }
+  });
+
   it("treats only boolean false as a completed no-translation decision", () => {
     const { status, output } = runParser(JSON.stringify({
       requires_translation: false,
@@ -220,6 +253,31 @@ describe("parse-issue-translation-response process", () => {
     assert.equal(parsed.requires_translation, "false");
     assert.equal(parsed.detected_language, "English");
     assert.equal(parsed.source_complete, "true");
+  });
+
+  it("keeps no-translation decisions incomplete with malformed detected_language", () => {
+    const invalidValues = [
+      ["object", {}],
+      ["array", []],
+      ["null", null],
+      ["number", 42],
+      ["boolean", true],
+    ];
+
+    for (const [valueLabel, detected_language] of invalidValues) {
+      const { status, output } = runParser(JSON.stringify({
+        requires_translation: false,
+        detected_language,
+        translated_title: "",
+        translated_body: "",
+      }));
+      const label = `detected_language:${valueLabel}`;
+      assert.equal(status, 0, label);
+      const parsed = parseOutputs(output);
+      assert.equal(parsed.requires_translation, "false", label);
+      assert.equal(parsed.detected_language, "unknown", label);
+      assert.equal(parsed.source_complete, "false", label);
+    }
   });
 
   it("keeps invalid requires_translation values incomplete and retryable", () => {

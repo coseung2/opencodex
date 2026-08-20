@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::ffi::c_void;
 use std::fs;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Networking::WinHttp::*;
@@ -132,7 +132,9 @@ fn request(
     unsafe {
         let session = InternetHandle(valid_handle(WinHttpOpen(
             w!("OCX Notch/0.1"),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            // OCX is a fixed loopback service. Keep management requests off any
+            // automatically discovered system proxy.
+            WINHTTP_ACCESS_TYPE_NO_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
             0,
@@ -165,7 +167,7 @@ fn request(
             headers.push_str("Content-Type: application/json\r\n");
         }
         if let Some(token) = management_token() {
-            headers.push_str("Authorization: Bearer ");
+            headers.push_str("X-OpenCodex-API-Key: ");
             headers.push_str(&token);
             headers.push_str("\r\n");
         }
@@ -251,26 +253,41 @@ fn http_error(status: u32, body: &[u8]) -> String {
 }
 
 fn management_token() -> Option<String> {
-    for name in ["OPENCODEX_ADMIN_AUTH_TOKEN", "OPENCODEX_API_AUTH_TOKEN"] {
-        if let Ok(token) = std::env::var(name) {
-            let token = token.trim();
-            if !token.is_empty() && !token.contains(['\r', '\n']) {
-                return Some(token.to_string());
-            }
+    // OPENCODEX_API_AUTH_TOKEN protects the data plane and is deliberately not an
+    // admin credential. Treating it as one hides every management-backed Notch
+    // surface whenever that legacy variable is present.
+    if let Ok(token) = std::env::var("OPENCODEX_ADMIN_AUTH_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() && !token.contains(['\r', '\n']) {
+            return Some(token.to_string());
         }
     }
-    let config_dir = std::env::var_os("OPENCODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".opencodex"))
-        })?;
-    let token = fs::read_to_string(config_dir.join("admin-api-token")).ok()?;
-    let token = token.trim();
-    if token.starts_with("ocx_admin_") && !token.contains(['\r', '\n']) {
-        Some(token.to_string())
-    } else {
-        None
+    let explicit = std::env::var_os("OPENCODEX_HOME").map(PathBuf::from);
+    let profile_default = std::env::var_os("USERPROFILE")
+        .map(|home| PathBuf::from(home).join(".opencodex"));
+    management_token_from_dirs(explicit.as_deref(), profile_default.as_deref())
+}
+
+fn management_token_from_dirs(explicit: Option<&Path>, profile_default: Option<&Path>) -> Option<String> {
+    let mut dirs = Vec::with_capacity(2);
+    if let Some(path) = explicit {
+        dirs.push(path);
     }
+    if let Some(path) = profile_default {
+        if !dirs.iter().any(|candidate| candidate == &path) {
+            dirs.push(path);
+        }
+    }
+    for dir in dirs {
+        let Ok(token) = fs::read_to_string(dir.join("admin-api-token")) else {
+            continue;
+        };
+        let token = token.trim().trim_start_matches('\u{feff}');
+        if token.starts_with("ocx_admin_") && !token.contains(['\r', '\n']) {
+            return Some(token.to_string());
+        }
+    }
+    None
 }
 
 fn win_error(error: windows::core::Error) -> String {
@@ -430,6 +447,7 @@ pub fn encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn provider_names_allow_only_single_safe_path_components() {
@@ -488,5 +506,25 @@ mod tests {
         assert_eq!(http_error(500, b"not json"), "OCX returned HTTP 500");
         let long = format!(r#"{{"error":"{}"}}"#, "x".repeat(600));
         assert_eq!(http_error(400, long.as_bytes()).len(), 23 + 512);
+    }
+
+    #[test]
+    fn management_token_falls_back_from_stale_explicit_home_to_profile() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ocx-notch-token-{suffix}"));
+        let stale = root.join("stale");
+        let profile = root.join("profile");
+        fs::create_dir_all(&stale).expect("stale dir");
+        fs::create_dir_all(&profile).expect("profile dir");
+        fs::write(profile.join("admin-api-token"), "\u{feff}ocx_admin_profile-token\n")
+            .expect("token");
+
+        let token = management_token_from_dirs(Some(&stale), Some(&profile));
+
+        assert_eq!(token.as_deref(), Some("ocx_admin_profile-token"));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }

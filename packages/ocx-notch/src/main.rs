@@ -677,6 +677,7 @@ fn start_workers(
         let mut last_slow = refresh_seed(now, Duration::from_secs(600));
         let mut last_details = refresh_seed(now, Duration::from_secs(60));
         let mut last_logs = refresh_seed(now, Duration::from_secs(60));
+        let mut slow_interval = Duration::from_secs(300);
         loop {
             let forced = force_refresh.swap(false, Ordering::Relaxed);
             if forced || last_health.elapsed() >= Duration::from_secs(30) {
@@ -693,9 +694,8 @@ fn start_workers(
                 );
                 last_usage = Instant::now();
             }
-            if want_logs.load(Ordering::Relaxed)
-                && (forced || last_logs.elapsed() >= Duration::from_secs(2))
-            {
+            let logs_interval = logs_refresh_interval(want_logs.load(Ordering::Relaxed));
+            if forced || last_logs.elapsed() >= logs_interval {
                 send_update(
                     hwnd,
                     &api_tx,
@@ -711,8 +711,9 @@ fn start_workers(
                 );
                 last_openai_pool = Instant::now();
             }
-            if forced || last_slow.elapsed() >= Duration::from_secs(300) {
+            if forced || last_slow.elapsed() >= slow_interval {
                 let configs = api::get_json::<Vec<ProviderConfig>>("/api/providers", 20_000);
+                let configs_ok = configs.is_ok();
                 if let Ok(ref values) = configs {
                     let pools = values.iter().map(api::fetch_account_pool).collect();
                     send_update(hwnd, &api_tx, Update::Pools(pools));
@@ -724,6 +725,7 @@ fn start_workers(
                     Update::Quotas(api::get_json("/api/provider-quotas", 30_000)),
                 );
                 last_slow = Instant::now();
+                slow_interval = provider_refresh_interval(configs_ok);
             }
             if forced || last_active.elapsed() >= Duration::from_secs(5) {
                 send_update(
@@ -770,6 +772,14 @@ fn start_workers(
 
 fn refresh_seed(now: Instant, age: Duration) -> Instant {
     now.checked_sub(age).unwrap_or(now)
+}
+
+fn logs_refresh_interval(visible: bool) -> Duration {
+    Duration::from_secs(if visible { 2 } else { 30 })
+}
+
+fn provider_refresh_interval(last_fetch_succeeded: bool) -> Duration {
+    Duration::from_secs(if last_fetch_succeeded { 300 } else { 5 })
 }
 
 fn send_update(hwnd: isize, tx: &Sender<Update>, update: Update) {
@@ -4370,6 +4380,14 @@ mod account_control_tests {
     fn oversized_refresh_age_cannot_underflow_the_monotonic_clock() {
         let now = Instant::now();
         assert_eq!(refresh_seed(now, Duration::MAX), now);
+    }
+
+    #[test]
+    fn background_logs_stay_warm_and_failed_provider_fetches_retry_quickly() {
+        assert_eq!(logs_refresh_interval(false), Duration::from_secs(30));
+        assert_eq!(logs_refresh_interval(true), Duration::from_secs(2));
+        assert_eq!(provider_refresh_interval(false), Duration::from_secs(5));
+        assert_eq!(provider_refresh_interval(true), Duration::from_secs(300));
     }
 
     #[test]

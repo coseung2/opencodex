@@ -2015,6 +2015,9 @@ describe("GitHub Actions hardening", () => {
       .split("- name: Parse AI response")[1]!
       .split("- name: Apply inline comment translation")[0]!;
     expect(commentParse).toContain("parse-issue-translation-response.cjs");
+    expect(commentParse).toContain(
+      "if: steps.prepare.outputs.should_translate == 'true' && steps.ai.outcome == 'success'",
+    );
     const commentRun = commentParse.split(/\n\s*run:\s*/)[1];
     expect(commentRun).toBeDefined();
     expect(commentRun!).not.toContain("${{");
@@ -2134,6 +2137,9 @@ describe("GitHub Actions hardening", () => {
       .split("- name: Parse AI response")[1]!
       .split("- name: Apply inline translation")[0]!;
     expect(parseStep).toContain("parse-issue-translation-response.cjs");
+    expect(parseStep).toContain(
+      "if: steps.prepare.outputs.should_translate == 'true' && steps.ai.outcome == 'success'",
+    );
     expect(parseStep).not.toContain("node -e");
     expect(parseStep).not.toContain("node <<");
     // AI output must stay in env, never interpolated into the shell run script.
@@ -2143,6 +2149,7 @@ describe("GitHub Actions hardening", () => {
       .split("- name: Persist translation control state")[1]!
       .split(/\n {2}[a-zA-Z]/)[0]!;
     expect(persistStep).toContain("always()");
+    expect(persistStep).toContain("steps.ai.outcome == 'success'");
     expect(persistStep).toContain("requires_translation != 'true'");
     expect(persistStep).toContain("persistTranslationControlState");
     expect(persistStep).toContain("SOURCE_COMPLETE");
@@ -2161,6 +2168,7 @@ describe("GitHub Actions hardening", () => {
     const commentPersist = workflow
       .split("- name: Persist comment translation control state")[1]!
       .split(/\n {2}[a-zA-Z]/)[0]!;
+    expect(commentPersist).toContain("steps.ai.outcome == 'success'");
     expect(commentPersist).toContain('const sourceComplete = process.env.SOURCE_COMPLETE === "true"');
     expect(commentPersist).toContain("detectedLanguageForControlPersist");
     expect(commentPersist).toMatch(/sourceComplete,\s*\n\s*\}/);
@@ -2178,6 +2186,14 @@ describe("GitHub Actions hardening", () => {
     expect(commentMissingAt).toBeGreaterThanOrEqual(0);
     expect(commentUpdateAt).toBeGreaterThanOrEqual(0);
     expect(commentMissingAt).toBeLessThan(commentUpdateAt);
+
+    const aiInferenceSteps = workflow
+      .split(/\n      - name: /)
+      .filter((step) => step.includes("uses: actions/ai-inference@"));
+    expect(aiInferenceSteps).toHaveLength(2);
+    for (const aiStep of aiInferenceSteps) {
+      expect(aiStep).toContain("continue-on-error: true");
+    }
 
     // Helper contract: always-visible bookkeeping; sticky oldest upsert; body non-authoritative.
     const helperSrc = await readText(".github/scripts/issue-translation.cjs");

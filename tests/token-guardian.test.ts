@@ -246,24 +246,33 @@ describe("token guardian", () => {
     markCodexAccountQuotaValidationPending("acct-scheduled", "http_status:429", resetAt);
 
     const delays: number[] = [];
+    let firstTimer: ReturnType<typeof setTimeout> | undefined;
+    let clearedTimer: ReturnType<typeof setTimeout> | undefined;
+    const originalDateNow = Date.now;
     const originalSetTimeout = globalThis.setTimeout;
     const originalClearTimeout = globalThis.clearTimeout;
     globalThis.setTimeout = ((_: TimerHandler, delay?: number) => {
+      const timer = { unref() {} } as unknown as ReturnType<typeof setTimeout>;
       delays.push(delay ?? 0);
-      return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      firstTimer ??= timer;
+      return timer;
     }) as typeof setTimeout;
-    globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+    globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+      clearedTimer = timer;
+    }) as typeof clearTimeout;
 
     let handle: ReturnType<typeof startTokenGuardian> | undefined;
     try {
+      Date.now = () => now;
       handle = startTokenGuardian();
-      expect(delays[0]).toBeGreaterThanOrEqual(59_000);
-      expect(delays[0]).toBeLessThanOrEqual(60_000);
+      expect(delays[0]).toBe(resetAt - now);
 
       requestCodexQuotaWarmupRetry();
       expect(delays.at(-1)).toBe(0);
+      expect(clearedTimer).toBe(firstTimer);
     } finally {
       handle?.stop();
+      Date.now = originalDateNow;
       globalThis.setTimeout = originalSetTimeout;
       globalThis.clearTimeout = originalClearTimeout;
     }
