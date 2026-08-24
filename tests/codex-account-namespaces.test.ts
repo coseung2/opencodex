@@ -12,8 +12,10 @@ import {
 } from "../src/codex/account-namespace-match";
 import {
   appendDefaultCodexAccountNamespace,
+  codexAccountPickerEnabled,
   codexAccountNamespaceEntries,
   defaultCodexAccountNamespaces,
+  initializeDefaultCodexAccountNamespaces,
   isMainCodexAccountTarget,
   isValidCodexAccountNamespaceTarget,
 } from "../src/codex/account-namespaces";
@@ -304,6 +306,22 @@ describe("Codex account namespace foundations", () => {
         { id: "desktop-row", email: "third@example.test", logLabel: "p464646", isMain: true },
       ],
     })).toEqual({ "main-2": "@main", p454545: "main" });
+  });
+
+  test("initializes selectors only for explicit picker opt-in and honors visibility override", () => {
+    const config = {
+      providers: {},
+      codexAccounts: [{ id: "pool-a", email: "a@example.test", logLabel: "p123abc", isMain: false }],
+      codexAccountPickerEnabled: true,
+    };
+    expect(initializeDefaultCodexAccountNamespaces(config)).toBe(true);
+    expect(config.codexAccountNamespaces).toEqual({ main: "@main", p123abc: "pool-a" });
+    expect(codexAccountPickerEnabled(config)).toBe(true);
+    expect(initializeDefaultCodexAccountNamespaces(config)).toBe(false);
+
+    config.codexAccountPickerEnabled = false;
+    expect(codexAccountPickerEnabled(config)).toBe(false);
+    expect(codexAccountPickerEnabled({ codexAccountNamespaces: { main: "@main" } })).toBe(true);
   });
 
   test("matches route and account namespaces exactly but provider namespaces case-insensitively", () => {

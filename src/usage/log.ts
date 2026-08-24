@@ -2,13 +2,21 @@ import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readF
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
+import { CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { usageDisplayTotalTokens } from "./totals";
 import type { OcxUsage } from "../types";
+import { sanitizeLogMetadataString } from "../lib/redact";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
+export type CodexUsageAccountLogLabel = "main" | `p${string}`;
+
+export function isCodexUsageAccountLogLabel(value: unknown): value is CodexUsageAccountLogLabel {
+  return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
+}
 
 export type AttemptRecoveryKind =
   | "transient-5xx"
+  | "empty-completion"
   | "connection-reset"
   | "oauth-401"
   | "key-429"
@@ -19,6 +27,8 @@ export interface PersistedUsageAttempt {
   ordinal: number;
   provider: string;
   model: string;
+  /** Stable non-PII Codex Pool account identity for this serving attempt. */
+  accountLogLabel?: CodexUsageAccountLogLabel;
   adapter: string;
   status: number;
   durationMs: number;
@@ -27,6 +37,7 @@ export interface PersistedUsageAttempt {
   sendCount: number;
   recoveryKinds: AttemptRecoveryKind[];
   usageStatus: UsageStatus;
+  streamAborted?: true;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -43,6 +54,8 @@ export interface PersistedUsageEntry {
   timestamp: number;
   provider: string;
   model: string;
+  /** Stable non-PII Codex Pool account identity for the serving account. */
+  accountLogLabel?: CodexUsageAccountLogLabel;
   surface?: "claude" | "claude-desktop" | "grok";
   /** Matched configured key id; absent for environment/loopback admissions and
    *  for every row written before attribution existed. */
@@ -54,6 +67,8 @@ export interface PersistedUsageEntry {
   conversationId?: string;
   resolvedModel?: string;
   requestedModel?: string;
+  /** Original helper model when shadow-call interception rewrote the request. */
+  shadowCallRewrittenFrom?: string;
   /** Reasoning effort / service-tier metadata for GUI Logs after restart. */
   requestedEffort?: string;
   /** Adapter-normalized tier and exact upstream parameter emitted for this request. */
@@ -243,6 +258,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     provider: attempt.provider,
     model: attempt.model,
     adapter: attempt.adapter,
+    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
+      ? { accountLogLabel: attempt.accountLogLabel }
+      : {}),
     status: attempt.status,
     durationMs: attempt.durationMs,
     ...(isNonNegativeFiniteNumber(attempt.firstOutputMs)
@@ -251,6 +269,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
+    ...(attempt.streamAborted === true ? { streamAborted: true as const } : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
       ? { inputTokenEstimate: attempt.inputTokenEstimate }
       : {}),
@@ -294,11 +313,15 @@ export function normalizeUsageEntryForTest(entry: PersistedUsageEntry): Persiste
 
 function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const attempts = normalizedAttempts(entry.attempts);
+  const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
     provider: entry.provider,
     model: entry.model,
+    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+      ? { accountLogLabel: entry.accountLogLabel }
+      : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(typeof entry.apiKeyId === "string" && entry.apiKeyId.trim()
       // Deliberately NOT capped. `capMetadataString` protects free-form metadata
@@ -314,6 +337,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
       ? { requestedEffort: capMetadataString(entry.requestedEffort) }
       : {}),

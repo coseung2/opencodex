@@ -8,7 +8,7 @@ import {
   handleCodexAuthAPI, updateAccountQuota, getAccountQuota,
   checkAccountIdCollision, getMainChatgptAccountId,
   markAccountNeedsReauth, isAccountNeedsReauth, clearAccountNeedsReauth, clearAccountQuota,
-  clearMainAccountInfoCache, maskEmail,
+  clearMainAccountInfoCache, maskEmail, fetchMainAccountInfo,
   clearCodexQuotaPrimeState, primeCodexPoolQuotas, seedCodexAuthAdmissionForTests,
   type CodexAuthAccountDto,
 } from "../src/codex/auth-api";
@@ -457,6 +457,58 @@ describe("codex-auth API", () => {
     expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(false);
   });
 
+  test("a background main refresh does not retract a Responses reauth quarantine (#327)", async () => {
+    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+      tokens: { access_token: "live-main", account_id: "acct-main" },
+    }));
+    markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+    clearMainAccountInfoCache();
+    let usageCalls = 0;
+    globalThis.fetch = (async () => {
+      usageCalls += 1;
+      return Response.json({
+        email: "main@example.test",
+        plan_type: "pro",
+        rate_limit: { primary_window: { used_percent: 10, reset_at: 1783000000 } },
+      });
+    }) as typeof fetch;
+
+    expect((await fetchMainAccountInfo(false)).email).toBe("main@example.test");
+    expect(usageCalls).toBe(1);
+    expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(true);
+
+    clearMainAccountInfoCache();
+    expect((await fetchMainAccountInfo(true)).email).toBe("main@example.test");
+    expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(false);
+  });
+
+  test("an identity-change retry keeps the original background-refresh authority (#327)", async () => {
+    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+      tokens: { access_token: "live-main", account_id: "acct-before" },
+    }));
+    clearMainAccountInfoCache();
+    let usageCalls = 0;
+    globalThis.fetch = (async () => {
+      usageCalls += 1;
+      if (usageCalls === 1) {
+        writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+          tokens: { access_token: "live-main", account_id: "acct-after" },
+        }));
+      } else {
+        markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+      }
+      return Response.json({
+        email: "main@example.test",
+        plan_type: "pro",
+        rate_limit: { primary_window: { used_percent: 10, reset_at: 1783000000 } },
+      });
+    }) as typeof fetch;
+
+    await fetchMainAccountInfo(false);
+    expect(usageCalls).toBeGreaterThan(1);
+    expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(true);
+  });
+
   test("BUG-R327: main account exposes and updates needsReauth from WHAM auth responses", async () => {
     writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
       tokens: {
@@ -697,6 +749,8 @@ describe("codex-auth API", () => {
     const data = await resp!.json() as { activeCodexAccountId: string | null; autoSwitchThreshold: number };
     expect(data).toEqual({
       activeCodexAccountId: "pool-live",
+      pinned: false,
+      pinnedAccountId: null,
       autoSwitchThreshold: 55,
       upstreamFailoverThreshold: 3,
       accountPoolStrategy: "quota",
@@ -2044,7 +2098,7 @@ describe("codex-auth API", () => {
       }
       return previousFetch(input);
     }) as typeof fetch;
-    const config = makeConfig();
+    const config = makeConfig({ codexAccountPickerEnabled: true });
     const req = new Request("http://localhost/api/codex-auth/accounts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2057,6 +2111,7 @@ describe("codex-auth API", () => {
     expect(await resp!.json()).toMatchObject({ ok: true, validation: "pending_quota_reset" });
     expect(config.codexAccounts?.map(account => account.id)).toEqual(["manual-quota-full"]);
     expect(config.pausedCodexAccountIds).toContain("manual-quota-full");
+    expect(Object.values(config.codexAccountNamespaces ?? {})).toContain("manual-quota-full");
     expect(getCodexAccountCredential("manual-quota-full")).toMatchObject({
       accessToken: "access-manual-test",
       refreshToken: "refresh-manual-test",
@@ -2066,6 +2121,14 @@ describe("codex-auth API", () => {
       lastCodexValidationStatus: "quota_pending",
       codexQuotaRetryAt: resetAt * 1000,
       codexQuotaPauseOwned: true,
+    });
+    const listReq = new Request("http://localhost/api/codex-auth/accounts");
+    const listResp = await handleCodexAuthAPI(listReq, new URL(listReq.url), config);
+    const listed = await listResp!.json() as { accounts: Array<Record<string, unknown>> };
+    expect(listed.accounts.find(account => account.id === "manual-quota-full")).toMatchObject({
+      paused: true,
+      priority: 0,
+      hasCredential: true,
     });
   });
 
@@ -2612,6 +2675,29 @@ describe("codex-auth API", () => {
 
     expect(resumeResp!.status).toBe(200);
     expect(config.pausedCodexAccountIds).toEqual([MAIN_CODEX_ACCOUNT_ID]);
+  });
+
+  test("manual activation pins an account and a newer priority write retires the pin", async () => {
+    const config = makeConfig({
+      codexAccounts: [{ id: "work", email: "work@example.test", isMain: false }],
+    });
+    const activate = new Request("http://localhost/api/codex-auth/active", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: "work" }),
+    });
+    expect((await handleCodexAuthAPI(activate, new URL(activate.url), config))?.status).toBe(200);
+    expect(config.activeCodexAccountPinned).toBe("work");
+
+    const prioritize = new Request("http://localhost/api/codex-auth/accounts/priority", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "work", priority: 25 }),
+    });
+    const priorityResp = await handleCodexAuthAPI(prioritize, new URL(prioritize.url), config);
+    expect(await priorityResp!.json()).toMatchObject({ ok: true, id: "work", priority: 25 });
+    expect(config.codexAccountPriorities).toEqual({ work: 25 });
+    expect(config.activeCodexAccountPinned).toBeUndefined();
   });
 
   test("account list exposes persisted pause state for main and added accounts", async () => {

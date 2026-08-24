@@ -51,6 +51,7 @@ pub struct Quota {
     pub weekly_reset_at: Option<f64>,
     pub monthly_percent: Option<f64>,
     pub monthly_reset_at: Option<f64>,
+    pub reset_credits: Option<u32>,
     #[serde(default)]
     pub custom_windows: Vec<QuotaWindow>,
 }
@@ -222,6 +223,28 @@ pub struct AccountQuota {
     pub weekly_reset_at: Option<f64>,
     pub monthly_percent: Option<f64>,
     pub monthly_reset_at: Option<f64>,
+    pub reset_credits: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ResetCreditConsumeResponse {
+    #[serde(default)]
+    pub code: String,
+    pub remaining: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ResetCredit {
+    pub granted_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ResetCreditsResponse {
+    #[serde(default)]
+    pub credits: Vec<ResetCredit>,
+    #[serde(default)]
+    pub available_count: u32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -448,15 +471,20 @@ pub struct ProviderView {
     pub accounts: Vec<AccountView>,
 }
 
-pub fn provider_header_label(provider: &ProviderView) -> String {
+pub fn provider_base_label(provider: &ProviderView) -> String {
     let label = [" (Codex login)", " (AWS CodeWhisperer)"]
         .iter()
         .find_map(|suffix| provider.label.strip_suffix(suffix))
         .unwrap_or(&provider.label);
+    label.to_string()
+}
+
+pub fn provider_header_label(provider: &ProviderView) -> String {
+    let label = provider_base_label(provider);
 
     match provider.accounts.iter().find(|account| account.active) {
         Some(account) => format!("{label} ({})", account.identity),
-        None => label.to_string(),
+        None => label,
     }
 }
 
@@ -499,12 +527,92 @@ pub fn merge_providers(
         .collect()
 }
 
+fn normalized_codex_email(email: Option<&str>) -> Option<String> {
+    email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(|email| email.to_ascii_lowercase())
+}
+
+fn same_codex_account(left: &CodexAccount, right: &CodexAccount) -> bool {
+    match (
+        normalized_codex_email(left.email.as_deref()),
+        normalized_codex_email(right.email.as_deref()),
+    ) {
+        (Some(left_email), Some(right_email)) => left_email == right_email,
+        _ => left.id == right.id,
+    }
+}
+
+fn codex_account_is_main(account: &CodexAccount) -> bool {
+    account.is_main || account.id == "__main__"
+}
+
+fn fill_optional<T>(target: &mut Option<T>, source: Option<T>) {
+    if target.is_none() {
+        *target = source;
+    }
+}
+
+fn merge_account_quota(target: &mut Option<AccountQuota>, source: Option<AccountQuota>) {
+    if target.is_none() {
+        *target = source;
+        return;
+    }
+    let Some(source) = source else {
+        return;
+    };
+    let Some(target) = target.as_mut() else {
+        return;
+    };
+    fill_optional(&mut target.weekly_percent, source.weekly_percent);
+    fill_optional(&mut target.weekly_reset_at, source.weekly_reset_at);
+    fill_optional(&mut target.monthly_percent, source.monthly_percent);
+    fill_optional(&mut target.monthly_reset_at, source.monthly_reset_at);
+    fill_optional(&mut target.reset_credits, source.reset_credits);
+}
+
+fn merge_codex_account(target: &mut CodexAccount, incoming: CodexAccount) {
+    let incoming_is_main = codex_account_is_main(&incoming);
+    let target_is_main = codex_account_is_main(target);
+    let incoming_is_canonical_main = incoming.id == "__main__" && target.id != "__main__";
+    let prefer_incoming = (incoming_is_main && !target_is_main) || incoming_is_canonical_main;
+
+    let mut source = incoming;
+    if prefer_incoming {
+        std::mem::swap(target, &mut source);
+    }
+
+    target.is_main = codex_account_is_main(target) || codex_account_is_main(&source);
+    target.paused |= source.paused;
+    target.needs_reauth |= source.needs_reauth;
+    fill_optional(&mut target.alias, source.alias);
+    fill_optional(&mut target.email, source.email);
+    fill_optional(&mut target.health_label, source.health_label);
+    fill_optional(&mut target.health_summary, source.health_summary);
+    merge_account_quota(&mut target.quota, source.quota);
+}
+
+fn dedupe_codex_accounts(accounts: Vec<CodexAccount>) -> Vec<CodexAccount> {
+    let mut unique = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        if let Some(existing) = unique
+            .iter_mut()
+            .find(|existing| same_codex_account(existing, &account))
+        {
+            merge_codex_account(existing, account);
+        } else {
+            unique.push(account);
+        }
+    }
+    unique
+}
+
 pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> {
-    response
-        .accounts
+    dedupe_codex_accounts(response.accounts)
         .into_iter()
         .map(|account| {
-            let is_main = account.is_main || account.id == "__main__";
+            let is_main = codex_account_is_main(&account);
             let identity = account
                 .alias
                 .or(account.email)
@@ -522,6 +630,7 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
                 weekly_reset_at: q.weekly_reset_at,
                 monthly_percent: q.monthly_percent,
                 monthly_reset_at: q.monthly_reset_at,
+                reset_credits: q.reset_credits,
                 ..Quota::default()
             });
             AccountView {
@@ -801,6 +910,65 @@ mod tests {
             }],
         });
         assert_eq!(views[0].kind, "codex");
+    }
+
+    #[test]
+    fn codex_account_views_collapse_main_and_pool_rows_for_the_same_email() {
+        let response: CodexAccountsResponse = serde_json::from_str(
+            r#"{"accounts":[
+                {"id":"pool-coseung","email":" user@example.com ","alias":"Primary","paused":true,"needsReauth":true,"quota":{"monthlyPercent":25}},
+                {"id":"__main__","email":"USER@EXAMPLE.COM","isMain":true,"quota":{"weeklyPercent":50,"resetCredits":2}},
+                {"id":"other","email":"other@example.com"}
+            ]}"#,
+        )
+        .expect("account response parses");
+
+        let accounts = codex_account_views(response);
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].id, "__main__");
+        assert_eq!(accounts[0].identity, "Primary");
+        assert!(accounts[0].is_main);
+        assert!(accounts[0].paused);
+        assert!(accounts[0].needs_reauth);
+        let quota = accounts[0].quota.as_ref().expect("merged quota");
+        assert_eq!(quota.weekly_percent, Some(50.0));
+        assert_eq!(quota.monthly_percent, Some(25.0));
+        assert_eq!(quota.reset_credits, Some(2));
+    }
+
+    #[test]
+    fn codex_account_views_keep_different_emails_as_separate_accounts() {
+        let accounts = codex_account_views(CodexAccountsResponse {
+            accounts: vec![
+                CodexAccount {
+                    id: "first".into(),
+                    email: Some("first@example.com".into()),
+                    ..Default::default()
+                },
+                CodexAccount {
+                    id: "second".into(),
+                    email: Some("second@example.com".into()),
+                    ..Default::default()
+                },
+            ],
+        });
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].id, "first");
+        assert_eq!(accounts[1].id, "second");
+    }
+
+    #[test]
+    fn codex_account_views_preserve_reset_credits() {
+        let response: CodexAccountsResponse = serde_json::from_str(
+            r#"{"accounts":[{"id":"__main__","quota":{"resetCredits":2}}]}"#,
+        )
+        .expect("account response parses");
+
+        let accounts = codex_account_views(response);
+
+        assert_eq!(accounts[0].quota.as_ref().and_then(|quota| quota.reset_credits), Some(2));
     }
 
     #[test]

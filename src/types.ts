@@ -606,6 +606,8 @@ export interface OcxConfig {
    * See src/lib/bun-stream-caps.ts.
    */
   streamMode?: "auto" | "legacy-tee" | "eager-relay";
+  /** Opt in to one identical-turn retry when a Responses completion has no text or tool call. */
+  emptyCompletionRetry?: boolean;
   /**
    * Custom override for the injected multi-agent guidance body (the text inside the
    * <multi_agent_mode> tags). When set, it replaces the built-in prompt on whichever
@@ -731,12 +733,18 @@ export interface OcxConfig {
    * first non-paused account (or clears the active selection when none remain).
    */
   pausedOauthAccountIds?: Record<string, string[]>;
+  /** Selection order per Codex account id; higher values are considered first. */
+  codexAccountPriorities?: Record<string, number>;
+  /** Account most recently selected manually; released when it drains or becomes unavailable. */
+  activeCodexAccountPinned?: string;
   /**
    * Public model-selector namespaces bound to one Codex account. Values are stored account ids;
    * `"@main"` selects the Codex Desktop/main auth.json account. Account display aliases
    * are intentionally separate from these selectors.
    */
   codexAccountNamespaces?: Record<string, string>;
+  /** Picker visibility override; existing non-empty maps remain enabled when omitted. */
+  codexAccountPickerEnabled?: boolean;
   /** Active pool account id for next session. undefined = main (passthrough as-is). */
   activeCodexAccountId?: string;
   /** Auto-switch threshold (0-100). Default 80. 0 = disabled. */

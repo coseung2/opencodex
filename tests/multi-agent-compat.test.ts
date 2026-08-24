@@ -346,6 +346,39 @@ describe("multiAgentGuidanceText", () => {
     expect(text).toContain('(reasoning_effort high/max/ultra): "gpt-5.6-terra"');
   });
 
+  test("Codex functions namespace flattens built-ins and nested custom exec", () => {
+    const parsed = parseRequest({
+      model: "gpt-test",
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              tools: [
+                { type: "custom", name: "exec", description: "Run code." },
+                { type: "function", name: "wait", parameters: { type: "object", properties: {} } },
+              ],
+            },
+            {
+              type: "namespace",
+              name: "collaboration",
+              tools: [{ type: "function", name: "spawn_agent", parameters: { type: "object", properties: {} } }],
+            },
+          ],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "go" }] },
+      ],
+    });
+
+    expect(parsed.context.tools?.find(tool => tool.name === "exec")).toMatchObject({ freeform: true });
+    expect(parsed.context.tools?.find(tool => tool.name === "exec")?.namespace).toBeUndefined();
+    expect(parsed.context.tools?.find(tool => tool.name === "wait")?.namespace).toBeUndefined();
+    expect(parsed.context.tools?.find(tool => tool.name === "spawn_agent")?.namespace).toBe("collaboration");
+  });
+
   test("v1 wire shape (multi_agent_v1 namespace + send_input) still classifies v1", async () => {
     codexHomeFixture(V2_OFF);
     const v1Tools = [
@@ -755,6 +788,49 @@ describe("sanitizeEncryptedContentInPlace", () => {
   test("non-array input is a no-op", () => {
     expect(sanitizeEncryptedContentInPlace("plain")).toBe(0);
     expect(sanitizeEncryptedContentInPlace(undefined)).toBe(0);
+  });
+
+  test("deep unknown input does not overflow the call stack", () => {
+    const root: Array<Record<string, unknown>> = [{ type: "unknown" }];
+    let cursor = root[0]!;
+    for (let depth = 0; depth < 30_000; depth += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    cursor.content = [{ type: "encrypted_content", encrypted_content: "deep plaintext" }];
+
+    expect(sanitizeEncryptedContentInPlace(root)).toBe(1);
+    expect(cursor.content).toEqual([{ type: "input_text", text: "deep plaintext" }]);
+  });
+
+  test("nested agent messages normalize after child rewrites", () => {
+    const input = [{
+      type: "agent_message",
+      id: "outer",
+      author: "/root",
+      recipient: "/root/outer",
+      content: [{
+        type: "agent_message",
+        id: "inner",
+        author: "/root/outer",
+        recipient: "/root/outer/inner",
+        content: [
+          { type: "encrypted_content", encrypted_content: "first plaintext" },
+          { type: "encrypted_content", encrypted_content: "second plaintext" },
+        ],
+      }],
+    }];
+
+    expect(sanitizeEncryptedContentInPlace(input)).toBe(2);
+    const outer = input[0] as Record<string, unknown>;
+    const inner = (outer.content as Array<Record<string, unknown>>)[0]!;
+    for (const message of [outer, inner]) {
+      expect(message).toMatchObject({ type: "message", role: "user" });
+      expect(message).not.toHaveProperty("id");
+      expect(message).not.toHaveProperty("author");
+      expect(message).not.toHaveProperty("recipient");
+    }
   });
 
   test("mixed slot (hook preamble + embedded Fernet task) splits into text + encrypted parts", () => {

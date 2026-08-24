@@ -187,7 +187,7 @@ describe("request log metadata", () => {
     noteAttemptSend(a, 100);
     noteAttemptSend(a, 120, "transient-5xx");
     noteAttemptSend(a, 120, "transient-5xx");
-    sealRequestAttemptIdentity(a, "chatgpt-pabcdef", "openai-responses");
+    sealRequestAttemptIdentity(a, "chatgpt-pabcdef", "openai-responses", "pabcdef");
     finishRequestAttempt(a, 503, 12);
 
     const b = beginRequestAttempt(2, "prov-b", "model-b", "openai-chat");
@@ -202,6 +202,7 @@ describe("request log metadata", () => {
     expect(a).toMatchObject({
       ordinal: 1,
       provider: "chatgpt-pabcdef",
+      accountLogLabel: "pabcdef",
       adapter: "openai-responses",
       status: 503,
       sendCount: 3,
@@ -530,7 +531,7 @@ describe("request log metadata", () => {
   test("filters logs by provider, status, and tail", () => {
     const logs = [
       log({ requestId: "a", provider: "openai", status: 200 }),
-      log({ requestId: "b", provider: "umans", status: 429 }),
+      log({ requestId: "b", provider: "umans", status: 429, shadowCallRewrittenFrom: "gpt-helper" }),
       log({ requestId: "c", provider: "umans", status: 502, requestedServiceTier: "priority", requestedSpeedLabel: "fast" }),
       log({ requestId: "d", provider: "opencode-go", status: 500 }),
     ];
@@ -539,6 +540,7 @@ describe("request log metadata", () => {
     expect(filterRequestLogs(logs, new URLSearchParams("status=5xx")).map(entry => entry.requestId)).toEqual(["c", "d"]);
     expect(filterRequestLogs(logs, new URLSearchParams("status=429")).map(entry => entry.requestId)).toEqual(["b"]);
     expect(filterRequestLogs(logs, new URLSearchParams("tail=2")).map(entry => entry.requestId)).toEqual(["c", "d"]);
+    expect(filterRequestLogs(logs, new URLSearchParams("helper=intercepted")).map(entry => entry.requestId)).toEqual(["b"]);
 
     const combined = filterRequestLogs(logs, new URLSearchParams("provider=umans&status=5xx&tail=1"));
     expect(combined.map(entry => entry.requestId)).toEqual(["c"]);

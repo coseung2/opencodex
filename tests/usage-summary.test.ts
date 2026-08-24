@@ -15,6 +15,7 @@ function entry(overrides: Partial<PersistedUsageEntry> & { ts: number }): Persis
     durationMs: rest.durationMs ?? 10,
     usageStatus: rest.usageStatus ?? "unreported",
     ...(rest.surface === "claude" ? { surface: rest.surface } : {}),
+    ...(rest.accountLogLabel !== undefined ? { accountLogLabel: rest.accountLogLabel } : {}),
     ...(rest.resolvedModel !== undefined ? { resolvedModel: rest.resolvedModel } : {}),
     ...(rest.usage ? { usage: rest.usage } : {}),
     ...(rest.totalTokens !== undefined ? { totalTokens: rest.totalTokens } : {}),
@@ -603,13 +604,24 @@ describe("summarizeUsage", () => {
     const sum = summarizeUsage(entries, "30d", FIXED_NOW);
     const byModel = Object.fromEntries(sum.models.map(m => [`${m.provider}/${m.model}`, m]));
 
-    expect(byModel["google-antigravity/gemini-3.6-flash"]).toMatchObject({
-      provider: "google-antigravity",
-      model: "gemini-3.6-flash",
-      requests: 3,
-      totalTokens: 1760,
+    // Retired model ids retain historical usage identity even though new routing
+    // transparently maps those selections to Gemini 3.7 Flash.
+    expect(byModel["google-antigravity/gemini-3.5-flash-high"]).toMatchObject({
+      model: "gemini-3.5-flash-high",
+      requests: 1,
+      totalTokens: 1100,
     });
-    expect(byModel["google-antigravity/gemini-3.6-flash"]?.resolvedModel).toBeUndefined();
+    expect(byModel["google-antigravity/gemini-3.5-flash-low"]).toMatchObject({
+      model: "gemini-3.5-flash-low",
+      requests: 1,
+      totalTokens: 550,
+    });
+    expect(byModel["google-antigravity/gemini-3-flash-agent"]).toMatchObject({
+      model: "gemini-3-flash-agent",
+      requests: 1,
+      totalTokens: 110,
+    });
+    expect(byModel["google-antigravity/gemini-3.7-flash"]).toBeUndefined();
 
     expect(byModel["google-antigravity/gemini-3.1-pro"]).toMatchObject({
       provider: "google-antigravity",
@@ -634,11 +646,11 @@ describe("summarizeUsage", () => {
 
     const day = sum.days.find(d => d.requests > 0)!;
     const dayModels = Object.fromEntries(day.models.map(m => [`${m.provider}/${m.model}`, m]));
-    expect(dayModels["google-antigravity/gemini-3.6-flash"]?.requests).toBe(3);
+    expect(dayModels["google-antigravity/gemini-3.5-flash-high"]?.requests).toBe(1);
     expect(dayModels["google-antigravity/gemini-3.1-pro"]?.requests).toBe(2);
   });
 
-  test("collapses antigravity base model + wire resolvedModel into one picker row", () => {
+  test("keeps a retired antigravity model's history under its own id", () => {
     const entries: PersistedUsageEntry[] = [
       entry({
         ts: FIXED_NOW - 1,
@@ -661,12 +673,17 @@ describe("summarizeUsage", () => {
       }),
     ];
     const sum = summarizeUsage(entries, "30d", FIXED_NOW);
-    expect(sum.models).toHaveLength(1);
-    expect(sum.models[0]).toMatchObject({
+    const byModel = Object.fromEntries(sum.models.map(m => [m.model, m]));
+    expect(byModel["gemini-3.6-flash"]).toMatchObject({
       provider: "google-antigravity",
       model: "gemini-3.6-flash",
-      requests: 2,
-      totalTokens: 165,
+      requests: 1,
+      totalTokens: 110,
+    });
+    expect(byModel["gemini-3.6-flash-high"]).toMatchObject({
+      model: "gemini-3.6-flash-high",
+      requests: 1,
+      totalTokens: 55,
     });
     expect(sum.models[0]?.resolvedModel).toBeUndefined();
   });
@@ -702,6 +719,69 @@ describe("summarizeUsage", () => {
       attemptCount: 5,
       totalTokens: 10,
     });
+  });
+
+  test("attributes a quota-failover request to each attempted and serving Codex account", () => {
+    const sum = summarizeUsage([
+      entry({
+        ts: FIXED_NOW - 1,
+        requestId: "quota-failover",
+        provider: "openai-pbbbbbb",
+        usageStatus: "reported",
+        usage: { inputTokens: 10, outputTokens: 5 },
+        totalTokens: 15,
+        attempts: [
+          {
+            ordinal: 1,
+            provider: "openai-paaaaaa",
+            model: "gpt-5.6-sol",
+            adapter: "openai-responses",
+            accountLogLabel: "paaaaaa",
+            status: 429,
+            durationMs: 1,
+            sendCount: 1,
+            recoveryKinds: [],
+            usageStatus: "unreported",
+          },
+          {
+            ordinal: 2,
+            provider: "openai-pbbbbbb",
+            model: "gpt-5.6-sol",
+            adapter: "openai-responses",
+            accountLogLabel: "pbbbbbb",
+            status: 200,
+            durationMs: 2,
+            sendCount: 1,
+            recoveryKinds: [],
+            usageStatus: "reported",
+            usage: { inputTokens: 10, outputTokens: 5 },
+            totalTokens: 15,
+          },
+        ],
+      }),
+      entry({
+        ts: FIXED_NOW - 2,
+        requestId: "legacy-pool-row",
+        provider: "openai",
+        usageStatus: "unreported",
+      }),
+    ], "30d", FIXED_NOW);
+
+    expect(sum.accounts.find(row => row.accountLogLabel === "paaaaaa")).toMatchObject({
+      requests: 1,
+      attemptCount: 1,
+      measuredAttempts: 0,
+      unmeteredAttempts: 1,
+    });
+    expect(sum.accounts.find(row => row.accountLogLabel === "pbbbbbb")).toMatchObject({
+      requests: 1,
+      attemptCount: 1,
+      measuredAttempts: 1,
+      reportedAttempts: 1,
+      totalTokens: 15,
+    });
+    expect(sum.accounts.find(row => row.accountLogLabel === "legacy-ambiguous"))
+      .toMatchObject({ ambiguous: true, requests: 1 });
   });
 
 });

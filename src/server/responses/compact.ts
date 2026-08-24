@@ -54,6 +54,7 @@ import {
   codexProbeQuotaScope,
   type CodexAuthContext,
 } from "../../codex/auth-context";
+import { codexAuthContextLogLabel } from "../../codex/account-label";
 import {
   formatCodexProviderForLog,
   recordCodexUpstreamOutcome,
@@ -184,6 +185,10 @@ export async function handleResponsesCompact(
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
   const selectedModelId = route.modelId;
+  const qualifiedRoute = route as typeof route & {
+    codexAccountId?: string;
+    codexAccountNamespace?: string;
+  };
   logCtx.requestedModel = raw.model;
   logCtx.model = selectedModelId;
   logCtx.provider = route.providerName;
@@ -197,7 +202,7 @@ export async function handleResponsesCompact(
     logCtx.resolvedModel = route.modelId;
   }
 
-  if (route.codexAccountMode === "direct") {
+  if (route.codexAccountMode === "direct" && qualifiedRoute.codexAccountId === undefined) {
     try { validateForwardAdmissionCredential(req.headers, config); }
     catch (err) {
       if (err instanceof ForwardAdmissionCredentialError) return formatErrorResponse(401, "authentication_error", err.message);
@@ -218,7 +223,11 @@ export async function handleResponsesCompact(
     const headers = new Headers({ "content-type": "application/json" });
     try {
       if (route.codexAccountMode) {
-        authCtx = await resolveCodexAuthContext(req.headers, config, route.codexAccountMode, { modelId: selectedModelId });
+        authCtx = await resolveCodexAuthContext(req.headers, config, route.codexAccountMode, {
+          accountId: qualifiedRoute.codexAccountId,
+          modelId: selectedModelId,
+        });
+        logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
         const selected = headersForCodexAuthContext(req.headers, authCtx);
         compactProvider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
         for (const name of FORWARD_HEADERS) {
@@ -233,7 +242,7 @@ export async function handleResponsesCompact(
       }
     } catch (err) {
       if (err instanceof CodexAccountCooldownError) {
-        return cooldownErrorResponse(err);
+        return cooldownErrorResponse(err, Date.now(), qualifiedRoute.codexAccountNamespace);
       }
       if (err instanceof CodexThreadAffinityExpiredError) {
         return formatErrorResponse(409, "invalid_request_error", "Codex thread account affinity expired; start a new session");
@@ -247,7 +256,9 @@ export async function handleResponsesCompact(
       throw err;
     }
     const base = (compactProvider.baseUrl ?? "").replace(/\/$/, "");
-    if (compactProvider.apiKey) headers.set("authorization", `Bearer ${resolveEnvValue(compactProvider.apiKey)}`);
+    if (compactProvider.authMode !== "forward" && compactProvider.apiKey) {
+      headers.set("authorization", `Bearer ${resolveEnvValue(compactProvider.apiKey)}`);
+    }
     const { reasoning: _reasoning, ...compactBodyRaw } = raw as typeof raw & { reasoning?: unknown };
     // The regular /v1/responses path applies sanitizeReasoningInputContent via the adapter's
     // buildRequest, but the compact endpoint forwards directly. Apply the same sanitizer here
@@ -264,6 +275,7 @@ export async function handleResponsesCompact(
       recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
         ...meta,
         threadId: compactThreadId,
+        fixedAccount: authCtx.fixedAccount,
         modelId: selectedModelId,
         probeLeaseId: codexProbeLeaseId(authCtx),
         probeQuotaScope: codexProbeQuotaScope(authCtx),

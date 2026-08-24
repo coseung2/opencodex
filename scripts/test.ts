@@ -2,22 +2,25 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
-export const WINDOWS_BUN_1_3_14_BATCH_SIZE = 48;
-export const WINDOWS_BUN_1_3_14_PARALLELISM = 2;
+export const WINDOWS_BUN_BATCH_SIZE = 48;
+export const WINDOWS_BUN_PARALLELISM = 2;
 
+// Keep fresh-process batching for the bundled 1.4.0 Windows runtime. A measured
+// unbatched run remained active past ten minutes and reached ~1.97 GiB private
+// memory, while the bounded 48-file path is the established release gate.
 export function shouldBatchFullSuite(
   platform: NodeJS.Platform,
   bunVersion: string,
   requestedTests: readonly string[],
 ): boolean {
   return platform === "win32"
-    && /^1\.3\.14(?:$|[-+])/.test(bunVersion)
+    && /^(?:1\.3\.14|1\.4\.0)(?:$|[-+])/.test(bunVersion)
     && requestedTests.length === 0;
 }
 
 export function deterministicTestBatches(
   files: readonly string[],
-  batchSize = WINDOWS_BUN_1_3_14_BATCH_SIZE,
+  batchSize = WINDOWS_BUN_BATCH_SIZE,
 ): string[][] {
   if (!Number.isInteger(batchSize) || batchSize < 1) {
     throw new Error(`test batch size must be a positive integer (got ${batchSize})`);
@@ -171,8 +174,8 @@ if (import.meta.main) {
       if (batches.length === 0) throw new Error("no test files discovered under tests/");
       console.warn(
         `[test] Windows Bun ${Bun.version}: running ${files.length} files in ${batches.length} `
-        + `fresh batches (max ${WINDOWS_BUN_1_3_14_BATCH_SIZE} files, `
-        + `parallel=${WINDOWS_BUN_1_3_14_PARALLELISM}) to bound native runner memory.`,
+        + `fresh batches (max ${WINDOWS_BUN_BATCH_SIZE} files, `
+        + `parallel=${WINDOWS_BUN_PARALLELISM}) to bound native runner memory.`,
       );
       exitCode = 0;
       for (const [index, batch] of batches.entries()) {
@@ -185,7 +188,7 @@ if (import.meta.main) {
             process.execPath,
             "test",
             "--isolate",
-            `--parallel=${WINDOWS_BUN_1_3_14_PARALLELISM}`,
+            `--parallel=${WINDOWS_BUN_PARALLELISM}`,
             ...batch,
           ],
           {

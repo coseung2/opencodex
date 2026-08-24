@@ -84,6 +84,8 @@ describe("Baseten Model APIs provider", () => {
       "moonshotai/Kimi-K3": ["low", "high", "max"],
       "zai-org/GLM-5.2": ["high", "max"],
       "zai-org/GLM-5.2-Fast": ["high", "max"],
+      "zai-org/GLM-5.3": ["low", "high", "max"],
+      "zai-org/GLM-5.3-Fast": ["low", "high", "max"],
     });
     expect(basetenEntry().modelReasoningEffortMap).toEqual({
       "deepseek-ai/DeepSeek-V4-Pro": { none: "none", minimal: "minimal" },
@@ -92,6 +94,8 @@ describe("Baseten Model APIs provider", () => {
       "moonshotai/Kimi-K3": { none: "none" },
       "zai-org/GLM-5.2": { none: "none" },
       "zai-org/GLM-5.2-Fast": { none: "none" },
+      "zai-org/GLM-5.3": { none: "none" },
+      "zai-org/GLM-5.3-Fast": { none: "none" },
     });
     expect(basetenEntry().modelDefaultReasoningEfforts).toEqual({
       "deepseek-ai/DeepSeek-V4-Pro": "medium",

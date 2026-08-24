@@ -4,8 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearAccountQuota } from "../src/codex/quota";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
+import { clearCodexUpstreamHealth } from "../src/codex/routing";
 import { saveCredential } from "../src/oauth/store";
-import { clearProviderQuotaCache, fetchProviderQuotaReports, opencodeGoKeyQuotaEstimates } from "../src/providers/quota";
+import {
+  clearProviderQuotaCache,
+  fetchProviderQuotaReports,
+  opencodeGoKeyQuotaEstimates,
+  QUOTA_RESPONSE_MAX_BYTES,
+  readProviderQuotaJsonForTests,
+} from "../src/providers/quota";
 import type { OcxConfig } from "../src/types";
 
 const originalFetch = globalThis.fetch;
@@ -70,12 +77,14 @@ beforeEach(() => {
     tokens: { access_token: "chatgpt-main-access", account_id: "chatgpt-main-account" },
   }));
   clearAccountQuota();
+  clearCodexUpstreamHealth();
   clearProviderQuotaCache();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   clearAccountQuota();
+  clearCodexUpstreamHealth();
   clearProviderQuotaCache();
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
@@ -86,6 +95,33 @@ afterEach(() => {
 });
 
 describe("fetchProviderQuotaReports", () => {
+  test("provider quota probes have no direct Response.json calls", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/providers/quota.ts"), "utf8");
+    expect(source).not.toMatch(/\.\s*json\s*\(/);
+  });
+
+  test("quota JSON reading cancels a body that stalls before its first byte", async () => {
+    let cancelCalls = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel() { cancelCalls += 1; },
+    }));
+
+    expect(await readProviderQuotaJsonForTests(response, 10)).toBeNull();
+    expect(cancelCalls).toBe(1);
+  });
+
+  test("quota JSON reading rejects a declared oversized body before reading it", async () => {
+    let cancelCalls = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel() { cancelCalls += 1; },
+    }), {
+      headers: { "content-length": String(QUOTA_RESPONSE_MAX_BYTES + 1) },
+    });
+
+    expect(await readProviderQuotaJsonForTests(response, 100)).toBeNull();
+    expect(cancelCalls).toBe(1);
+  });
+
   test("returns active provider quota rows without leaking credentials or raw upstream payloads", async () => {
     await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
     await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
@@ -755,7 +791,7 @@ describe("fetchProviderQuotaReports", () => {
     expect(expired.reports).toEqual([]);
   });
 
-  test("pool mode reports the active added account", async () => {
+  test("pool mode reports weighted capacity across routable accounts", async () => {
     saveCodexAccountCredential("added", {
       accessToken: "added-access",
       refreshToken: "added-refresh",
@@ -763,18 +799,26 @@ describe("fetchProviderQuotaReports", () => {
       chatgptAccountId: "added-chatgpt-id",
     });
     const config = testConfig();
-    config.codexAccounts = [{ id: "added", email: "a@example.test", isMain: false }];
+    config.codexAccounts = [{ id: "added", email: "a@example.test", plan: "pro", isMain: false }];
     config.activeCodexAccountId = "added";
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       const headers = init?.headers as Record<string, string> | undefined;
       const percent = headers?.["ChatGPT-Account-Id"] === "added-chatgpt-id" ? 77 : 11;
       return new Response(JSON.stringify({
+        plan_type: headers?.["ChatGPT-Account-Id"] === "added-chatgpt-id" ? "pro" : "plus",
         rate_limit: { secondary_window: { used_percent: percent, reset_at: 1_789_000_000 } },
       }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
 
     const result = await fetchProviderQuotaReports(config, true);
-    expect(result.reports.find(row => row.provider === "openai")?.quota.weeklyPercent).toBe(77);
+    const report = result.reports.find(row => row.provider === "openai");
+    expect(report?.quota.weeklyPercent).toBeCloseTo((11 + 77 * 20) / 21, 8);
+    expect(report?.aggregation).toMatchObject({
+      kind: "capacity-weighted-v1",
+      presentation: "aggregate",
+      includedAccounts: 2,
+      excludedAccounts: 0,
+    });
   });
 
   test("direct mode reports main without reading or repairing the added-account store", async () => {

@@ -7,6 +7,8 @@ import { clearCodexUpstreamHealthForAccount, clearThreadAccountMapForAccount } f
 import { invalidateCodexWebSocketsForAccount } from "./websocket-registry";
 import { clearMainAccountInfoCache } from "./main-account-cache";
 import { forgetCodexAccountPause } from "./account-pause";
+import { clearCodexAccountPin, forgetCodexAccountPriority } from "./account-priority";
+import { codexAccountNamespaceEntries, codexAccountPickerEnabled } from "./account-namespaces";
 import type { OcxConfig } from "../types";
 
 let observedMainChatgptAccountId: string | undefined;
@@ -44,12 +46,21 @@ export function resetMainCodexAccountIdentityTrackingForTests(): void {
   observedMainChatgptAccountId = undefined;
 }
 
-export function deleteCodexAccount(runtimeConfig: OcxConfig, accountId: string): void {
+/** Delete credentials and runtime state while retaining the account's stable selector binding. */
+export function deleteCodexAccount(runtimeConfig: OcxConfig, accountId: string): boolean {
+  const hadStoredAccount = (runtimeConfig.codexAccounts ?? [])
+    .some(account => !account.isMain && account.id === accountId);
+  const hadVisiblePickerBinding = hadStoredAccount
+    && codexAccountPickerEnabled(runtimeConfig)
+    && codexAccountNamespaceEntries(runtimeConfig).some(([, target]) => target === accountId);
   removeCodexAccountCredential(accountId);
   runtimeConfig.codexAccounts = (runtimeConfig.codexAccounts ?? [])
     .filter(account => account.isMain || account.id !== accountId);
   forgetCodexAccountPause(runtimeConfig, accountId);
+  forgetCodexAccountPriority(runtimeConfig, accountId);
+  clearCodexAccountPin(runtimeConfig, accountId);
   if (runtimeConfig.activeCodexAccountId === accountId) runtimeConfig.activeCodexAccountId = undefined;
   purgeCodexAccountRuntimeState(accountId);
   invalidateCodexWebSocketsForAccount(accountId);
+  return hadVisiblePickerBinding;
 }

@@ -1,4 +1,10 @@
 import type { Server } from "bun";
+import {
+  codexWsUpstreamFetch,
+  currentBunRuntimeIdentity,
+  shouldUseCodexWsUpstream,
+  type BunRuntimeGateInput,
+} from "./ws-upstream";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
   getConfigPath,
@@ -120,8 +126,24 @@ export function safeHostLabel(url: string): string {
 
 
 
-export function providerFetch(provider: OcxProviderConfig): typeof globalThis.fetch {
-  return (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
+export function providerFetch(
+  provider: OcxProviderConfig,
+  runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
+): typeof globalThis.fetch {
+  const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
+  const wrapped = async (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime)) {
+      return codexWsUpstreamFetch(input, init, base, runtime);
+    }
+    return base(input, init);
+  };
+  const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
+    base.preconnect?.(...args);
+  };
+  return Object.assign(wrapped, { preconnect });
 }
 
 
@@ -154,4 +176,3 @@ export async function fetchWithHeaderTimeout(
     clearTimeout(timer);
   }
 }
-

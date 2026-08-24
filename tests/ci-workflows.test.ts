@@ -28,6 +28,23 @@ function count(text: string, fragment: string): number {
 }
 
 describe("GitHub Actions hardening", () => {
+  test("all Bun-enabled workflows use the package runtime pin", async () => {
+    const pkg = JSON.parse(await readText("package.json")) as { dependencies?: { bun?: string } };
+    const expected = pkg.dependencies?.bun;
+    expect(expected).toBe("1.4.0");
+
+    for (const path of [
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      ".github/workflows/service-lifecycle.yml",
+    ]) {
+      const workflow = await readText(path);
+      const pins = [...workflow.matchAll(/bun-version:\s*([^\s#]+)/g)].map(match => match[1]);
+      expect(pins.length).toBeGreaterThan(0);
+      expect(pins.every(version => version === expected)).toBe(true);
+    }
+  });
+
   test("cross-platform CI keeps bounded jobs and immutable action references", async () => {
     const workflow = await readText(".github/workflows/ci.yml");
     const ci = Bun.YAML.parse(workflow) as {

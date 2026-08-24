@@ -35,14 +35,18 @@ import { filterSupportedNativeSlugs } from "./parsing";
 import type { RawEntry } from "./parsing";
 import { readCurrentCatalogOrCache, unique } from "./bundled";
 
+export const NATIVE_DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
+
 export const NATIVE_OPENAI_MODELS = [
   "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+  NATIVE_DAYBREAK_BLUE_MODEL,
 ];
 
 export const DOCUMENTED_NATIVE_OPENAI_ADDITIONS = [
   "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+  NATIVE_DAYBREAK_BLUE_MODEL,
 ];
 
 export const SUPPORTED_NATIVE_OPENAI_SLUGS = new Set(NATIVE_OPENAI_MODELS);
@@ -53,15 +57,18 @@ export function isUnsupportedOpenAiNativeSlug(slug: string): boolean {
   return /^(?:gpt|codex)-/.test(slug);
 }
 
-export const NATIVE_GPT56_CONTEXT_WINDOW = 372_000;
+/** Measured native family contract: 922k input plus up to 128k output. */
+export const NATIVE_GPT56_CONTEXT_WINDOW = 1_050_000;
+export const NATIVE_GPT56_MAX_INPUT_TOKENS = 922_000;
 
-export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: number; maxContextWindow?: number }> = {
+export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: number; maxContextWindow?: number; maxInputTokens?: number }> = {
   "gpt-5.5": { contextWindow: 272_000, maxContextWindow: 272_000 },
   "gpt-5.4": { contextWindow: 1_000_000, maxContextWindow: 1_000_000 },
   "gpt-5.3-codex-spark": { contextWindow: 100_000, maxContextWindow: 100_000 },
-  "gpt-5.6-sol": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW },
-  "gpt-5.6-terra": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW },
-  "gpt-5.6-luna": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW },
+  "gpt-5.6-sol": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  "gpt-5.6-terra": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  "gpt-5.6-luna": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  [NATIVE_DAYBREAK_BLUE_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
 };
 
 export function nativeOpenAiContextWindow(slug: string): number | undefined {
@@ -69,6 +76,10 @@ export function nativeOpenAiContextWindow(slug: string): number | undefined {
     ?? (typeof UPSTREAM_NATIVE_ENTRIES.get(slug)?.context_window === "number"
       ? UPSTREAM_NATIVE_ENTRIES.get(slug)!.context_window as number
       : undefined);
+}
+
+export function nativeOpenAiMaxInputTokens(slug: string): number | undefined {
+  return NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.maxInputTokens;
 }
 
 export function nativeInputModalities(slug: string): string[] {
@@ -144,13 +155,24 @@ export function applyNativeVisibility(entries: RawEntry[], disabledNative: Set<s
   return entries;
 }
 
-export const UPSTREAM_NATIVE_ENTRIES: Map<string, RawEntry> = new Map(
-  ((upstreamModelsSnapshot as unknown as { models?: RawEntry[] }).models ?? [])
-    .filter(m => typeof m.slug === "string"
-      && SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug as string)
-      && (m.slug as string).startsWith("gpt-5.6-"))
-    .map(m => [m.slug as string, m]),
-);
+export const UPSTREAM_NATIVE_ENTRIES: Map<string, RawEntry> = (() => {
+  const entries = new Map(
+    ((upstreamModelsSnapshot as unknown as { models?: RawEntry[] }).models ?? [])
+      .filter(m => typeof m.slug === "string"
+        && SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug as string)
+        && (m.slug as string).startsWith("gpt-5.6-"))
+      .map(m => [m.slug as string, m] as const),
+  );
+  const sol = entries.get("gpt-5.6-sol");
+  if (sol) {
+    entries.set(NATIVE_DAYBREAK_BLUE_MODEL, {
+      ...JSON.parse(JSON.stringify(sol)) as RawEntry,
+      slug: NATIVE_DAYBREAK_BLUE_MODEL,
+      display_name: "GPT Daybreak Blue",
+    });
+  }
+  return entries;
+})();
 
 export function upstreamNativeEntry(slug: string): RawEntry | null {
   const entry = UPSTREAM_NATIVE_ENTRIES.get(slug);

@@ -24,8 +24,11 @@ const CURSOR_MODEL_EFFORT_TIERS: Record<string, readonly string[]> = {
   // against Anthropic's effort ladder docs and Cursor's live model lineup.
   "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-4-7-fast": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-4-8-fast": ["low", "medium", "high", "xhigh", "max"],
   "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-5-fast": ["low", "medium", "high"],
   "claude-sonnet-5": ["low", "medium", "high", "xhigh", "max"],
   "glm-5.2": ["high", "max"],
   // GetUsableModels (2026-07-28) lists kimi-k3 only as effort-suffixed kimi-k3-{low,high,max};

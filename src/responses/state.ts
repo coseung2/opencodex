@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { atomicWriteFileAsync, getConfigDir } from "../config";
@@ -10,6 +10,7 @@ import {
   readResponseSpill,
   recoverOrphanedResponseSpills,
   responseSpillDirectory,
+  responseSpillPayloadCap,
   type ResponseSpillRef,
   writeResponseSpillDurably,
 } from "./spill-store";
@@ -24,6 +25,7 @@ export const MAX_STORED_RESPONSE_BYTES = 64 * 1024 * 1024;
 /** Legacy snapshot selection only. Spill demotion is governed solely by the RAM cap above. */
 const SNAPSHOT_ENTRY_MAX_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
+const SNAPSHOT_FILE_MAX_BYTES = 32 * 1024 * 1024;
 const STALE_TEMP_GRACE_MS = 15 * 60 * 1_000;
 const STALE_TEMP_MAX_ENTRIES = 4_096;
 const STALE_TEMP_MAX_CLEANUPS = 512;
@@ -57,7 +59,7 @@ type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
   code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed";
+  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large";
 };
 
 const states = new Map<string, StoredResponseState>();
@@ -68,6 +70,11 @@ let oldestResidentAt: number | null = null;
 let byteCapOverride: number | null = null;
 let stateRevision = 0;
 const spillCounters = { writes: 0, writeFailures: 0, readFailures: 0 };
+const admissionCounters = { directSpills: 0, oversizedDrops: 0, snapshotOversizedRefusals: 0 };
+
+export function responseAdmissionCountersForTests(): Readonly<typeof admissionCounters> {
+  return admissionCounters;
+}
 // Superseded spill generations awaiting a durable snapshot before unlink
 // (review C1-1: unlinking at swap time races a crash against the debounced
 // snapshot — the reloaded OLD stub would point at a deleted file).
@@ -178,12 +185,25 @@ function deleteEntry(id: string, options: { deleteSpill?: boolean } = {}): void 
   if (options.deleteSpill !== false) deleteOwnedSpills(existing);
 }
 
-function replaceWithSpillFailure(id: string, expected?: StoredResponseState): void {
+function replaceWithSpillFailure(
+  id: string,
+  expected?: StoredResponseState,
+  options: { deferSpillUnlink?: boolean } = {},
+): void {
   const existing = states.get(id);
   if (expected && existing !== expected) return;
   const failed = tombstone(id, expected?.createdAt ?? existing?.createdAt ?? now());
   if (replaceMapEntry(id, failed, expected)) {
-    if (existing) deleteOwnedSpills(existing);
+    if (existing) {
+      if (options.deferSpillUnlink && existing.kind === "spill") {
+        pendingSpillUnlinks.push(existing.spill);
+        while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
+          deleteResponseSpill(pendingSpillUnlinks.shift()!);
+        }
+      } else {
+        deleteOwnedSpills(existing);
+      }
+    }
   }
 }
 
@@ -237,7 +257,7 @@ function replaceSpillEntryAtomically(
     }
   } catch {
     spillCounters.writeFailures += 1;
-    replaceWithSpillFailure(id, expected);
+    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
   }
 }
 
@@ -252,6 +272,11 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
     pruneResponses();
     return;
   }
+  if (candidate.sizeBytes > byteCap()) {
+    admitOversizedCandidate(id, candidate, expected);
+    pruneResponses();
+    return;
+  }
   if (expected?.kind === "spill") {
     replaceSpillEntryAtomically(id, expected, candidate);
     pruneResponses();
@@ -259,6 +284,55 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
   }
   if (!replaceMapEntry(id, candidate, expected)) return;
   pruneResponses();
+}
+
+/** Admit a candidate that can never fit in the resident map directly to spill. */
+function admitOversizedCandidate(
+  id: string,
+  candidate: ResidentResponseState,
+  expected?: StoredResponseState,
+): void {
+  if (candidate.sizeBytes > responseSpillPayloadCap()) {
+    admissionCounters.oversizedDrops += 1;
+    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+    return;
+  }
+  try {
+    const ref = writeResponseSpillDurably(id, {
+      createdAt: candidate.createdAt,
+      items: candidate.items,
+      ...(candidate.providers ? { providers: candidate.providers } : {}),
+    });
+    if (ref.payloadBytes > responseSpillPayloadCap()) {
+      deleteResponseSpill(ref);
+      admissionCounters.oversizedDrops += 1;
+      replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+      return;
+    }
+    const base: Omit<SpilledResponseState, "sizeBytes"> = {
+      kind: "spill",
+      createdAt: candidate.createdAt,
+      ...(candidate.providers ? { providers: candidate.providers } : {}),
+      spill: ref,
+    };
+    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
+    if (!replaceMapEntry(id, next, expected)) {
+      deleteResponseSpill(ref);
+      return;
+    }
+    spillCounters.writes += 1;
+    admissionCounters.directSpills += 1;
+    noteStubSwapForTest();
+    if (expected?.kind === "spill") {
+      pendingSpillUnlinks.push(expected.spill);
+      while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
+        deleteResponseSpill(pendingSpillUnlinks.shift()!);
+      }
+    }
+  } catch {
+    spillCounters.writeFailures += 1;
+    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+  }
 }
 
 // Expansion provenance must stay proxy-private: a WeakMap distinguishes replayed history from the
@@ -335,8 +409,15 @@ function loadSnapshotEntry(id: string, value: unknown): void {
     items: rec.items,
     ...(providers ? { providers } : {}),
   });
-  if (resident) replaceMapEntry(id, resident);
-  else replaceMapEntry(id, tombstone(id, rec.createdAt));
+  if (!resident) {
+    replaceMapEntry(id, tombstone(id, rec.createdAt));
+    return;
+  }
+  if (resident.sizeBytes > byteCap()) {
+    admitOversizedCandidate(id, resident, undefined);
+    return;
+  }
+  replaceMapEntry(id, resident);
 }
 
 export interface ResponseStateTempRecoveryResult {
@@ -462,11 +543,20 @@ function ensureLoaded(): void {
   }
   try {
     if (existsSync(path)) {
-      const raw = JSON.parse(readFileSync(path, "utf-8")) as { version?: unknown; states?: unknown };
-      if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
-        for (const entry of raw.states) {
-          if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
-          loadSnapshotEntry(entry[0], entry[1]);
+      // Follow the target because readFileSync follows it too, but parse only a
+      // bounded regular file (never a FIFO/device or an oversized planted file).
+      const stat = statSync(path);
+      if (!stat.isFile()) {
+        // Unsupported target: start empty.
+      } else if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
+        admissionCounters.snapshotOversizedRefusals += 1;
+      } else {
+        const raw = JSON.parse(readFileSync(path, "utf-8")) as { version?: unknown; states?: unknown };
+        if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
+          for (const entry of raw.states) {
+            if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
+            loadSnapshotEntry(entry[0], entry[1]);
+          }
         }
       }
     }
@@ -505,7 +595,7 @@ async function writeBoundedSnapshot(path: string): Promise<SnapshotWriteOutcome>
           persistable = smallState;
         }
         const persistEntry: [string, unknown] = [id, persistable];
-        const size = JSON.stringify(persistEntry).length;
+        const size = Buffer.byteLength(JSON.stringify(persistEntry), "utf8");
         if (state.kind === "resident" && size > SNAPSHOT_ENTRY_MAX_BYTES) continue;
         if (total + size > SNAPSHOT_TOTAL_MAX_BYTES) break;
         total += size;
@@ -685,7 +775,11 @@ function materializeEntry(
     spillCounters.readFailures += 1;
     const failure: PreviousResponseReplayFailure = {
       code: "previous_response_not_found",
-      reason: result.reason === "missing" ? "spill_missing" : "spill_corrupt",
+      reason: result.reason === "missing"
+        ? "spill_missing"
+        : result.reason === "too_large"
+          ? "spill_too_large"
+          : "spill_corrupt",
     };
     replaceWithSpillFailure(id, entry);
     schedulePersist();

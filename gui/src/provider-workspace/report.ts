@@ -11,6 +11,48 @@ export interface ProviderQuotaReportView {
   source?: string;
   updatedAt?: number;
   quota?: unknown;
+  aggregation?: unknown;
+}
+
+export interface ProviderCapacitySummary {
+  presentation: "aggregate" | "effective-account-fallback" | "coverage-only";
+  includedAccounts: number;
+  excludedAccounts: number;
+  unknownPlanAccounts: number;
+  nextRecoveryAt?: number;
+  nextRecoveryPercent?: number;
+}
+
+/** Strictly narrow the public weighted Codex-pool metadata from /api/provider-quotas. */
+export function capacitySummaryFromReport(report?: ProviderQuotaReportView): ProviderCapacitySummary | null {
+  const raw = report?.aggregation;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  if (row.kind !== "capacity-weighted-v1" || row.scope !== "routable-known") return null;
+  const finite = (value: unknown): number | undefined => (
+    typeof value === "number" && Number.isFinite(value) ? value : undefined
+  );
+  const includedAccounts = finite(row.includedAccounts);
+  const excludedAccounts = finite(row.excludedAccounts);
+  const unknownPlanAccounts = finite(row.unknownPlanAccounts);
+  if (includedAccounts === undefined || excludedAccounts === undefined || unknownPlanAccounts === undefined) return null;
+  const presentation = row.presentation === "effective-account-fallback" || row.presentation === "coverage-only"
+    ? row.presentation
+    : "aggregate";
+  const windows = [row.fiveHour, row.weekly, row.monthly, ...(Array.isArray(row.customWindows) ? row.customWindows : [])]
+    .filter((value): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value));
+  const next = windows
+    .map(window => ({ at: finite(window.nextRecoveryAt), percent: finite(window.nextRecoveryPercent) }))
+    .filter((value): value is { at: number; percent: number | undefined } => value.at !== undefined)
+    .sort((a, b) => a.at - b.at)[0];
+  return {
+    presentation,
+    includedAccounts,
+    excludedAccounts,
+    unknownPlanAccounts,
+    ...(next ? { nextRecoveryAt: next.at } : {}),
+    ...(next?.percent !== undefined ? { nextRecoveryPercent: next.percent } : {}),
+  };
 }
 
 /** Narrow an unknown quota payload into the AccountQuota display shape (null when unusable). */

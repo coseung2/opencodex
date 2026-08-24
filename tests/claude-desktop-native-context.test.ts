@@ -10,7 +10,7 @@ import type { OcxConfig } from "../src/types";
 /**
  * D1b: native Desktop models carry their real context window, and the DTO and the
  * desktop-3p writer resolve the SAME window for a native model. Before the fix the
- * DTO omitted context entirely, so Sol's 372k rendered as blank.
+ * DTO omitted context entirely, so Sol's measured context rendered as blank.
  */
 
 function tempHome(): string {
@@ -32,7 +32,7 @@ test("buildClaudeDesktopState gives native rows their real context window", asyn
     const sol = state.models.find(m => m.route === "native/gpt-5.6-sol");
     expect(sol).toBeDefined();
     expect(sol!.contextWindow).toBe(nativeOpenAiContextWindow("gpt-5.6-sol"));
-    expect(sol!.contextWindow).toBe(372_000);
+    expect(sol!.contextWindow).toBe(1_050_000);
 
     // Every native row that the catalog knows a window for must carry it.
     for (const slug of visibleNativeSlugs(config)) {
@@ -51,9 +51,9 @@ test("the desktop-3p writer resolves the same native window as the DTO", () => {
   const slug = "gpt-5.6-sol";
   const expected = nativeOpenAiContextWindow(slug)!;
   const models = generateDesktop3pModels([slug], []);
-  // The native candidate must resolve the same window the DTO reports, so a 1M/372k
+  // The native candidate must resolve the same window the DTO reports, so a measured
   // capability is not lost between the dashboard and the written config.
   const sol = models.find(m => m.labelOverride.toLowerCase().includes("sol"));
   expect(sol).toBeDefined();
-  expect(expected).toBe(372_000);
+  expect(expected).toBe(1_050_000);
 });

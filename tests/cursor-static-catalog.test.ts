@@ -113,3 +113,32 @@ describe("Cursor static Codex catalog", () => {
       .toMatchObject([{ effort: "high" }, { effort: "max" }, { effort: "ultra" }]);
   });
 });
+
+describe("Opus Fast catalog families", () => {
+  test("all fast families are present with the verified effort ladders", async () => {
+    const { CURSOR_STATIC_MODELS } = await import("../src/adapters/cursor/discovery");
+    const { cursorModelEffortLadder } = await import("../src/adapters/cursor/effort-map");
+
+    for (const id of ["claude-opus-4-7-fast", "claude-opus-4-8-fast", "claude-opus-5-fast"]) {
+      const entry = CURSOR_STATIC_MODELS.find(model => model.id === id);
+      expect(entry, `${id} missing from static catalog`).toBeDefined();
+      expect(entry?.supportsReasoningEffort, `${id} must expose its required effort suffix`).toBe(true);
+    }
+
+    expect(cursorModelEffortLadder("claude-opus-4-7-fast")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(cursorModelEffortLadder("claude-opus-4-8-fast")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(cursorModelEffortLadder("claude-opus-5-fast")).toEqual(["low", "medium", "high"]);
+  });
+
+  test("wire ids insert effort before the fast suffix and never stay bare", async () => {
+    const { cursorWireModelIdWithEffort, cursorEffortSuffix } = await import("../src/adapters/cursor/effort-map");
+
+    expect(cursorWireModelIdWithEffort("claude-opus-4-8-fast", "high")).toBe("claude-opus-4-8-high-fast");
+    expect(cursorWireModelIdWithEffort("claude-opus-5-fast", "medium")).toBe("claude-opus-5-medium-fast");
+    expect(cursorWireModelIdWithEffort("claude-opus-4-7-fast", "max")).toBe("claude-opus-4-7-max-fast");
+    for (const id of ["claude-opus-4-7-fast", "claude-opus-4-8-fast", "claude-opus-5-fast"]) {
+      expect(cursorEffortSuffix(id, undefined), `${id} must not use a bare wire id`).toBeTruthy();
+    }
+    expect(cursorEffortSuffix("claude-opus-5-fast", "xhigh")).toBe("high");
+  });
+});

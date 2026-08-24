@@ -24,6 +24,7 @@ import { readSessionListCache, writeSessionListCache } from "../../session-list-
 import { countAvailableModels, parseAvailableModels, parseLiveModelCounts, parseSelectedModels, type ProviderAvailableModels, type ProviderLiveModelCounts, type ProviderModelCounts, type ProviderSelectedModels } from "../../provider-workspace/usage";
 import type { ProviderQuotaReportView } from "../../provider-workspace/report";
 import { formatProviderDisplayName } from "../../provider-icons";
+import { createBoundedFetch, type BoundedFetch } from "../../bounded-fetch";
 import { RailRow } from "./ProviderRail";
 import type { PricingFilter, ProviderModelUsageRow, ProviderUsageTotals, StatusFilter, TypeFilter } from "./types";
 import ProviderOverviewDashboard from "./ProviderOverviewDashboard";
@@ -167,12 +168,15 @@ export default function ProviderWorkspaceShell({
 
   useEffect(() => {
     let cancelled = false;
+    let active: BoundedFetch | null = null;
     const timeout = window.setTimeout(() => {
       // Keep last-good paint when sessionStorage already seeded — don't flash loading skeletons.
       // Read inside the effect (keyed by usageCacheKey) so the seed check stays correct without
       // closing over an unstable cachedUsage render value.
       if (!readSessionListCache(usageCacheKey)) setUsageLoading(true);
-      void fetch(`${apiBase}/api/usage?range=30d`)
+      const bounded = createBoundedFetch(60_000);
+      active = bounded;
+      void fetch(`${apiBase}/api/usage?range=30d`, { signal: bounded.signal })
         .then(r => readJsonIfOk<{
           providers?: Array<{ provider: string; requests: number; totalTokens?: number }>;
           models?: Array<{ provider: string; model: string; resolvedModel?: string; requests: number; totalTokens: number; inputTokens: number; outputTokens: number; shareRatio: number; estimatedCostUsd?: number }>;
@@ -202,11 +206,17 @@ export default function ProviderWorkspaceShell({
           writeSessionListCache(usageCacheKey, { totals: byProvider, models: byProviderModels });
         })
         .catch(() => {})
-        .finally(() => { if (!cancelled) setUsageLoading(false); });
+        .finally(() => {
+          bounded.clear();
+          if (active === bounded) active = null;
+          if (!cancelled) setUsageLoading(false);
+        });
     }, 0);
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
+      active?.controller.abort();
+      active?.clear();
     };
   }, [apiBase, usageCacheKey]);
 

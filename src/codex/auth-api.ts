@@ -17,19 +17,36 @@ import {
   TokenRefreshError,
 } from "./account-store";
 import { deleteCodexAccount, reconcileMainCodexAccountRuntimeState } from "./account-lifecycle";
+import {
+  appendDefaultCodexAccountNamespace,
+  initializeDefaultCodexAccountNamespaces,
+} from "./account-namespaces";
 import { isCodexAccountPaused, setCodexAccountPaused } from "./account-pause";
+import {
+  clearCodexAccountPin,
+  getCodexAccountPriority,
+  isCodexAccountPriorityKey,
+  pinnedCodexAccountId,
+  setCodexAccountPin,
+  setCodexAccountPriority,
+} from "./account-priority";
 import {
   clearCodexAccountCooldown,
   clearThreadAccountMapForAccount,
   getEffectiveActiveCodexAccountId,
+  isEffectiveCodexAccountPinned,
   reconcileCodexActiveAfterExclusion,
   resetCodexRoutingForManualSelection,
 } from "./routing";
 import {
+  DEFAULT_ACCOUNT_PRIORITY,
+  MAX_ACCOUNT_PRIORITY,
+  MIN_ACCOUNT_PRIORITY,
   normalizeAccountPoolStickyLimit,
   normalizeAccountPoolStrategy,
   parseAccountPoolStickyLimit,
   parseAccountPoolStrategy,
+  parseAccountPriority,
 } from "./pool-rotation";
 import { checkAccountIdCollision, getMainChatgptAccountId, readCodexTokens, readCodexTokensResult } from "./auth-collision";
 export { checkAccountIdCollision, getMainChatgptAccountId } from "./auth-collision";
@@ -66,7 +83,7 @@ import {
 } from "./main-account-cache";
 export { clearMainAccountInfoCache } from "./main-account-cache";
 import { maskEmail } from "../lib/privacy";
-import { CodexWarmupError, codexWarmupFailureReason, isCodexWarmupQuotaFailure, warmCodexAccount } from "./warmup";
+import { codexWarmupFailureReason, isCodexWarmupQuotaFailure, warmCodexAccount } from "./warmup";
 export { maskEmail } from "../lib/privacy";
 import type { CodexAccount, OcxConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
@@ -169,6 +186,7 @@ function poolAccountDto(
   quotaResult: PoolQuotaResult,
   hasCredential: boolean,
   paused: boolean,
+  priority: number,
 ): CodexAuthAccountDto {
   const quota = quotaForPlan(quotaResult.quota, account.plan);
   const needsReauth = !hasCredential || quotaResult.needsReauth || isAccountNeedsReauth(account.id);
@@ -181,6 +199,7 @@ function poolAccountDto(
     ...(account.logLabel !== undefined ? { logLabel: account.logLabel } : {}),
     isMain: false,
     paused,
+    priority,
     quota: quota ? { ...quota } : null,
     needsReauth,
     hasCredential,
@@ -258,14 +277,11 @@ async function verifyCodexAccountWarmup(
     return { ok: true, validatedAt: Date.now() };
   } catch (err) {
     const reason = codexWarmupFailureReason(err);
-    const upstream = err instanceof CodexWarmupError ? err.upstreamDetail : undefined;
     return {
       ok: false,
       error: err,
       response: jsonResponse({
-        error: upstream
-          ? `Codex account warmup failed: ${upstream}`
-          : "Codex account warmup failed. Reauthenticate the account and try again.",
+        error: "Codex account warmup failed. Reauthenticate the account and try again.",
         code: "codex_warmup_failed",
         reason,
         accountId,
@@ -402,16 +418,23 @@ function commitCodexAccountConfig(
 
     const accounts = persisted.codexAccounts ?? [];
     const existingIdx = accounts.findIndex(candidate => candidate.id === account.id);
+    let committedAccount: CodexAccount;
     if (existingIdx >= 0) {
-      accounts[existingIdx] = withCodexAccountLogLabel({
+      committedAccount = withCodexAccountLogLabel({
         ...accounts[existingIdx],
         ...account,
         isMain: false,
       }, accounts);
+      accounts[existingIdx] = committedAccount;
     } else {
-      accounts.push(withCodexAccountLogLabel({ ...account, isMain: false }, accounts));
+      committedAccount = withCodexAccountLogLabel({ ...account, isMain: false }, accounts);
+      accounts.push(committedAccount);
     }
     persisted.codexAccounts = accounts;
+    if (mode === "create" && persisted.codexAccountPickerEnabled !== undefined) {
+      initializeDefaultCodexAccountNamespaces(persisted);
+      appendDefaultCodexAccountNamespace(persisted, committedAccount);
+    }
     if (quotaPause === "add") setCodexAccountPaused(persisted, account.id, true);
     else if (quotaPause === "release") setCodexAccountPaused(persisted, account.id, false);
     return { changed: true, value: { ok: true } as CodexAccountConfigCommit };
@@ -485,7 +508,7 @@ interface MainAccountInfoFetchResult {
 }
 
 export async function fetchMainAccountInfo(forceRefresh = false): Promise<MainAccountInfo> {
-  const { info } = await fetchMainAccountInfoAttempt(forceRefresh, 1);
+  const { info } = await fetchMainAccountInfoAttempt(forceRefresh, 1, forceRefresh);
   return info;
 }
 
@@ -494,16 +517,21 @@ const EMPTY_MAIN_ACCOUNT_INFO: MainAccountInfo = { email: null, plan: null, quot
 async function retryMainAccountInfoIfIdentityChanged(
   requestAccountId: string | null,
   retriesRemaining: number,
+  explicitRefresh: boolean,
 ): Promise<MainAccountInfoFetchResult | null> {
   const currentAccountId = getMainChatgptAccountId();
   if (currentAccountId === null || currentAccountId === requestAccountId) return null;
   reconcileMainCodexAccountRuntimeState();
   return retriesRemaining > 0
-    ? fetchMainAccountInfoAttempt(true, retriesRemaining - 1)
+    ? fetchMainAccountInfoAttempt(true, retriesRemaining - 1, explicitRefresh)
     : { info: EMPTY_MAIN_ACCOUNT_INFO };
 }
 
-async function fetchMainAccountInfoAttempt(forceRefresh: boolean, retriesRemaining: number): Promise<MainAccountInfoFetchResult> {
+async function fetchMainAccountInfoAttempt(
+  forceRefresh: boolean,
+  retriesRemaining: number,
+  explicitRefresh = forceRefresh,
+): Promise<MainAccountInfoFetchResult> {
   const writerGeneration = captureConfigGeneration();
   reconcileMainCodexAccountRuntimeState();
   const tokenRead = readCodexTokensResult();
@@ -530,7 +558,7 @@ async function fetchMainAccountInfoAttempt(forceRefresh: boolean, retriesRemaini
     });
     if (!resp.ok) {
       const terminalAuthFailure = await isTerminalMainAuthResponse(resp);
-      const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining);
+      const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, explicitRefresh);
       if (retried) return retried;
       if (terminalAuthFailure) {
         clearMainAccountInfoCache();
@@ -539,7 +567,7 @@ async function fetchMainAccountInfoAttempt(forceRefresh: boolean, retriesRemaini
       return { info: EMPTY_MAIN_ACCOUNT_INFO };
     }
     const data = (await resp.json()) as WhamUsageResponse;
-    const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining);
+    const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, explicitRefresh);
     if (retried) return retried;
     const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(cached?.plan) ?? nonEmptyPlan(getMainAccountPlan());
     const quota = parseUsageQuota({ ...data, ...(plan ? { plan_type: plan } : {}) });
@@ -551,7 +579,9 @@ async function fetchMainAccountInfoAttempt(forceRefresh: boolean, retriesRemaini
       ts: Date.now(),
     };
     setMainAccountInfoCache(result);
-    clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+    // A successful quota probe only proves /wham/usage accepted the token. Only an
+    // operator-requested refresh may retract a quarantine raised by Responses traffic.
+    if (explicitRefresh) clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
     // Mirror main quota + plan into the shared stores so the rotation engine can
     // score and auto-switch the main account exactly like a pool account (Option A).
     setMainAccountPlan(result.plan);
@@ -564,7 +594,7 @@ async function fetchMainAccountInfoAttempt(forceRefresh: boolean, retriesRemaini
       ...(freshResetCredits !== undefined ? { freshResetCredits } : {}),
     };
   } catch {
-    const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining);
+    const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, explicitRefresh);
     return retried ?? { info: EMPTY_MAIN_ACCOUNT_INFO };
   }
 }
@@ -635,6 +665,8 @@ export interface CodexAuthAccountDto {
   logLabel?: string;
   isMain: boolean;
   paused: boolean;
+  /** Selection order; higher is considered first. */
+  priority: number;
   quota: (StoredAccountQuota | (Omit<StoredAccountQuota, "updatedAt"> & { updatedAt: number })) | null;
   needsReauth?: boolean;
   hasCredential: boolean;
@@ -871,6 +903,10 @@ export function clearCodexQuotaPrimeState(): void {
   primeInFlight = null;
 }
 
+export function effectiveCodexAuthAccountId(config: OcxConfig): string {
+  return getEffectiveActiveCodexAccountId(config) ?? MAIN_CODEX_ACCOUNT_ID;
+}
+
 export async function listCodexAuthAccounts(config: OcxConfig, forceRefresh = false): Promise<CodexAuthAccountDto[]> {
   const runtimeConfig = getRuntimeConfig(config);
   const poolAccounts = (runtimeConfig.codexAccounts ?? []).filter(isSelectableCodexPoolAccount);
@@ -917,6 +953,7 @@ export async function listCodexAuthAccounts(config: OcxConfig, forceRefresh = fa
         { quota: null, needsReauth: true },
         false,
         isCodexAccountPaused(runtimeConfig, accountId),
+        getCodexAccountPriority(runtimeConfig, accountId),
       )];
     }
     const resultGeneration = quotaResult.credentialGeneration ?? quotaResult.freshCredentialGeneration;
@@ -935,6 +972,7 @@ export async function listCodexAuthAccounts(config: OcxConfig, forceRefresh = fa
       effectiveQuotaResult,
       true,
       isCodexAccountPaused(runtimeConfig, accountId),
+      getCodexAccountPriority(runtimeConfig, accountId),
     )];
   });
   const hasMainCredential = readCodexTokens() !== null;
@@ -949,9 +987,15 @@ export async function listCodexAuthAccounts(config: OcxConfig, forceRefresh = fa
     plan: mainInfo.plan,
     isMain: true,
     paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+    priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
     hasCredential: hasMainCredential,
     needsReauth: mainNeedsReauth,
-    quota: mainInfo.quota ? { ...quotaForPlan({ ...mainInfo.quota, updatedAt: Date.now() }, mainInfo.plan) } : null,
+    quota: mainInfo.quota ? {
+      ...quotaForPlan({
+        ...mainInfo.quota,
+        updatedAt: getAccountQuota(MAIN_CODEX_ACCOUNT_ID)?.updatedAt ?? Date.now(),
+      }, mainInfo.plan),
+    } : null,
     ...oauthAccountHealthFields("codex", MAIN_CODEX_ACCOUNT_ID, mainHealth),
   };
   return [main, ...withQuota];
@@ -1174,6 +1218,42 @@ export async function handleCodexAuthAPI(
     });
   }
 
+  if (url.pathname === "/api/codex-auth/accounts/priority" && req.method === "PUT") {
+    let parsedBody: unknown;
+    try { parsedBody = await req.json(); } catch { return jsonResponse({ error: "Invalid JSON" }, 400); }
+    if (typeof parsedBody !== "object" || parsedBody === null || Array.isArray(parsedBody)) {
+      return jsonResponse({ error: "body must be an object" }, 400);
+    }
+    const body = parsedBody as { id?: unknown; priority?: unknown };
+    const id = typeof body.id === "string" ? body.id.trim() : "";
+    if (!isCodexAccountPriorityKey(id)) return jsonResponse({ error: "Invalid account id format" }, 400);
+
+    let priority = DEFAULT_ACCOUNT_PRIORITY;
+    if (body.priority !== null) {
+      const parsed = parseAccountPriority(body.priority);
+      if (parsed === null) {
+        return jsonResponse({
+          error: `priority must be null or an integer ${MIN_ACCOUNT_PRIORITY}-${MAX_ACCOUNT_PRIORITY}`,
+        }, 400);
+      }
+      priority = parsed;
+    }
+
+    const runtimeConfig = getRuntimeConfig(config);
+    const exists = id === MAIN_CODEX_ACCOUNT_ID
+      || (runtimeConfig.codexAccounts ?? []).some(account => isSelectableCodexPoolAccount(account) && account.id === id);
+    if (!exists) return jsonResponse({ error: "Account not found" }, 404);
+    setCodexAccountPriority(runtimeConfig, id, priority);
+    clearCodexAccountPin(runtimeConfig);
+    saveRuntimeConfig(config, runtimeConfig);
+    return jsonResponse({
+      ok: true,
+      id,
+      priority,
+      activeCodexAccountId: getEffectiveActiveCodexAccountId(runtimeConfig) ?? null,
+    });
+  }
+
   if (url.pathname === "/api/codex-auth/accounts/pause-exhausted" && req.method === "PUT") {
     const runtimeConfig = getRuntimeConfig(config);
     const result = await pauseExhaustedCodexAccounts(runtimeConfig);
@@ -1234,6 +1314,8 @@ export async function handleCodexAuthAPI(
       if (!exists) return jsonResponse({ error: "Account not found" }, 400);
     }
     runtimeConfig.activeCodexAccountId = body.accountId ?? undefined;
+    if (body.accountId == null) clearCodexAccountPin(runtimeConfig);
+    else setCodexAccountPin(runtimeConfig, targetAccountId);
     resetCodexRoutingForManualSelection(targetAccountId);
     saveRuntimeConfig(config, runtimeConfig);
     return jsonResponse({ ok: true, activeCodexAccountId: body.accountId, appliesImmediately: true });
@@ -1243,6 +1325,8 @@ export async function handleCodexAuthAPI(
     const runtimeConfig = getRuntimeConfig(config);
     return jsonResponse({
       activeCodexAccountId: getEffectiveActiveCodexAccountId(runtimeConfig) ?? null,
+      pinned: isEffectiveCodexAccountPinned(runtimeConfig),
+      pinnedAccountId: pinnedCodexAccountId(runtimeConfig) ?? null,
       autoSwitchThreshold: runtimeConfig.autoSwitchThreshold ?? 80,
       upstreamFailoverThreshold: runtimeConfig.upstreamFailoverThreshold ?? 3,
       accountPoolStrategy: normalizeAccountPoolStrategy(runtimeConfig.accountPoolStrategy),

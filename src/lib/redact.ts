@@ -38,6 +38,19 @@ export function redactSecretString(value: string): string {
   return redacted;
 }
 
+/** Shared bounded single-line representation for caller-controlled log metadata. */
+export function sanitizeLogMetadataString(value: unknown, maxLength = 64): string | undefined {
+  if (typeof value !== "string" || !Number.isInteger(maxLength) || maxLength < 1) return undefined;
+  // Replace record separators with spaces so two adjacent fragments cannot be
+  // concatenated into a token that evades boundary-aware secret redaction.
+  const filtered = value.trim()
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ");
+  if (!filtered) return undefined;
+  const redacted = redactSecretString(filtered).trim();
+  return redacted ? redacted.slice(0, maxLength) : undefined;
+}
+
 export function redactSecrets(value: unknown): unknown {
   if (typeof value === "string") return redactSecretString(value);
   if (Array.isArray(value)) return value.map(item => redactSecrets(item));

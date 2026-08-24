@@ -88,6 +88,7 @@ export default function AddProviderModal({
       for (const row of data.providers ?? []) rank[row.provider] = row.requests;
       return rank;
     },
+    { deadlineMs: 60_000 },
   );
 
   const oauthSupported = oauthPoll.data ?? [];

@@ -84,15 +84,71 @@ describe("codex warmup", () => {
   test("classifies quota rejection from structured status and never from 401 detail alone", () => {
     expect(isCodexWarmupQuotaFailure(new CodexWarmupError("http_status", "rejected", {
       status: 429,
-      upstreamDetail: "rate limit reached",
     }))).toBe(true);
     expect(isCodexWarmupQuotaFailure(new CodexWarmupError("http_status", "rejected", {
       status: 403,
-      upstreamDetail: "usage quota exhausted",
+      quotaLike: true,
     }))).toBe(true);
     expect(isCodexWarmupQuotaFailure(new CodexWarmupError("http_status", "rejected", {
       status: 401,
-      upstreamDetail: "quota exhausted",
+      quotaLike: true,
     }))).toBe(false);
+  });
+
+  test("classifies a bounded structured 403 quota body without retaining its text", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ detail: "usage quota exhausted" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+
+    try {
+      await warmCodexAccount({ accessToken: "a", chatgptAccountId: "c" });
+      throw new Error("expected warmup to reject");
+    } catch (error) {
+      expect(isCodexWarmupQuotaFailure(error)).toBe(true);
+      expect(JSON.stringify(error)).not.toContain("usage quota exhausted");
+    }
+  });
+
+  test("rejects an oversized unterminated SSE stream", async () => {
+    let cancelled = false;
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const chunk = new Uint8Array(256 * 1024).fill(65);
+        for (let index = 0; index < 5; index += 1) controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = (async () => new Response(oversizedBody, { status: 200 })) as typeof fetch;
+
+    await expect(warmCodexAccount({ accessToken: "a", chatgptAccountId: "c" }))
+      .rejects.toMatchObject({ name: "CodexWarmupError", code: "stream_too_large" });
+    expect(cancelled).toBe(true);
+  });
+
+  test("aborts a silent SSE body at the warmup deadline", async () => {
+    let cancelled = false;
+    const silentBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        return new Promise<void>(() => {});
+      },
+    });
+    globalThis.fetch = (async () => new Response(silentBody, { status: 200 })) as typeof fetch;
+
+    const startedAt = performance.now();
+    await expect(warmCodexAccount({ accessToken: "a", chatgptAccountId: "c", timeoutMs: 20 }))
+      .rejects.toMatchObject({ name: "CodexWarmupError", code: "transport" });
+    expect(cancelled).toBe(true);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  test("classifies invalid timeout options as transport failures", async () => {
+    for (const timeoutMs of [-1, 0x8000_0000]) {
+      await expect(warmCodexAccount({ accessToken: "a", chatgptAccountId: "c", timeoutMs }))
+        .rejects.toMatchObject({ name: "CodexWarmupError", code: "transport" });
+    }
   });
 });

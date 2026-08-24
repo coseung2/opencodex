@@ -50,9 +50,9 @@ describe("OAuth provider reconciliation", () => {
 
     expect(reconcileOAuthProviders(config)).toBe(true);
     const provider = config.providers["google-antigravity"];
-    expect(provider.defaultModel).toBe("gemini-3.6-flash");
+    expect(provider.defaultModel).toBe("gemini-3.7-flash");
     expect(provider.models).toEqual([
-      "gemini-3.6-flash",
+      "gemini-3.7-flash",
       "gemini-3.1-pro",
       "gemini-3.1-flash-image",
       "claude-sonnet-4-6",
@@ -60,10 +60,11 @@ describe("OAuth provider reconciliation", () => {
       "gpt-oss-120b-medium",
     ]);
     expect(provider.models).not.toContain("gemini-3.5-flash-low");
+    expect(provider.models).not.toContain("gemini-3.6-flash");
     expect(provider.models).not.toContain("gemini-3.6-flash-low");
     expect(provider.models).not.toContain("gemini-3.6-flash-medium");
     expect(provider.models).not.toContain("gemini-3.6-flash-high");
-    expect(provider.modelContextWindows?.["gemini-3.6-flash"]).toBe(1_048_576);
+    expect(provider.modelContextWindows?.["gemini-3.7-flash"]).toBe(1_048_576);
     expect(provider.liveModels).toBe(false);
     expect(config.googleAntigravityStaticCatalogVersion).toBe(1);
     expect(provider.project).toBe("config-project-sentinel");
@@ -75,7 +76,7 @@ describe("OAuth provider reconciliation", () => {
     });
 
     const persisted = loadConfig();
-    expect(persisted.providers["google-antigravity"]?.defaultModel).toBe("gemini-3.6-flash");
+    expect(persisted.providers["google-antigravity"]?.defaultModel).toBe("gemini-3.7-flash");
     expect(persisted.providers["google-antigravity"]?.liveModels).toBe(false);
     expect(persisted.googleAntigravityStaticCatalogVersion).toBe(1);
     expect(reconcileOAuthProviders(config)).toBe(false);

@@ -34,6 +34,7 @@ import {
   recoverStaleResponseStateTemps,
   rememberResponseState,
   responseStateMetrics,
+  responseAdmissionCountersForTests,
   responseStatePersistPendingForTests,
   responseContinuationRetainedStoreSnapshot,
   runPendingResponseStatePersistForTests,
@@ -46,6 +47,7 @@ import {
   deleteResponseSpill,
   recoverOrphanedResponseSpills,
   responseSpillDirectory,
+  setResponseSpillPayloadCapForTests,
   setSpillIoForTest,
   writeResponseSpillDurably,
 } from "../src/responses/spill-store";
@@ -117,6 +119,7 @@ describe("Responses previous_response_id state", () => {
     setPlatformForTests(null);
     resetHardenedStateForTests();
     setResponseStateByteCapForTests(null);
+    setResponseSpillPayloadCapForTests(null);
     clearResponseStateForTests();
     rmSync(home, { recursive: true, force: true });
     if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
@@ -631,6 +634,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   test("spills the only oversized continuation and leaves resident bytes at or below cap", () => {
+    const directBefore = responseAdmissionCountersForTests().directSpills;
     setResponseStateByteCapForTests(1_024);
     rememberLarge("resp_only_oversized", "x".repeat(8_000));
     const metrics = responseStateMetrics();
@@ -639,6 +643,24 @@ describe("Responses previous_response_id state", () => {
     expect((expandPreviousResponseInput({
       previous_response_id: "resp_only_oversized", input: "next",
     }) as { input: unknown[] }).input).toHaveLength(3);
+    expect(responseAdmissionCountersForTests().directSpills).toBe(directBefore + 1);
+  });
+
+  test("drops a continuation above the spill replay ceiling instead of writing an unreadable spill", () => {
+    const dropsBefore = responseAdmissionCountersForTests().oversizedDrops;
+    setResponseStateByteCapForTests(1_024);
+    setResponseSpillPayloadCapForTests(2_048);
+
+    rememberLarge("resp_above_spill_cap", "x".repeat(8_000));
+
+    expect(responseStateMetrics()).toMatchObject({ count: 1, residentCount: 0, spillStubCount: 0, tombstoneCount: 1 });
+    const request = { previous_response_id: "resp_above_spill_cap", input: "next" };
+    expandPreviousResponseInput(request);
+    expect(previousResponseReplayFailure(request)).toEqual({
+      code: "previous_response_not_found",
+      reason: "spill_failed",
+    });
+    expect(responseAdmissionCountersForTests().oversizedDrops).toBe(dropsBefore + 1);
   });
 
   test("does not swap a resident row to a stub before fsync and no-replace publication succeed", () => {

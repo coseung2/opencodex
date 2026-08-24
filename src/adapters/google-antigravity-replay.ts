@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
 
 /**
@@ -48,6 +49,7 @@ const DEFAULT_REPLAY_LIMITS: ReplayLimits = {
 };
 
 const replayCache = new Map<string, ReplayEntry>();
+const replayIsolationKey = randomBytes(32);
 const utf8 = new TextEncoder();
 let replayLimits = { ...DEFAULT_REPLAY_LIMITS };
 let replayBytes = 0;
@@ -56,6 +58,28 @@ let replayOldestAt: number | null = null;
 
 function replayKey(model: string, sessionId: string): string {
   return `${model}::session:${sessionId}`;
+}
+
+/**
+ * Process-local replay namespace isolated by both destination and credential.
+ * Raw credentials never become cache keys; the HMAC output is non-reversible and
+ * intentionally changes after restart because this replay cache is memory-only.
+ */
+export function scopedAntigravityReplaySessionId(
+  sessionId: string,
+  baseUrl: string | undefined,
+  credential: string | undefined,
+  headers?: Record<string, string>,
+): string | undefined {
+  const session = sessionId.trim();
+  const destination = baseUrl?.trim().replace(/\/+$/, "");
+  const secret = credential?.trim();
+  if (!session || !destination || !secret) return undefined;
+  const headerEntries = Object.entries(headers ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const scope = createHmac("sha256", replayIsolationKey)
+    .update(JSON.stringify([destination, secret, headerEntries]))
+    .digest("hex");
+  return `${scope}:${session}`;
 }
 
 /** Recursively canonicalize a JSON value: object keys sorted, arrays preserved. */

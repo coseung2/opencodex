@@ -53,7 +53,7 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
     expect(rows.find(r => r.slug === "gpt-5.6-sol")?.disabled).toBe(true);
     expect(rows.find(r => r.slug === "gpt-5.5")?.disabled).toBe(false);
     // Known context metadata rides along for the dashboard.
-    expect(rows.find(r => r.slug === "gpt-5.6-sol")?.contextWindow).toBe(372_000);
+    expect(rows.find(r => r.slug === "gpt-5.6-sol")?.contextWindow).toBe(1_050_000);
   });
 
   test("catalog sync flips supported natives to visibility hide and restores list on re-enable", () => {

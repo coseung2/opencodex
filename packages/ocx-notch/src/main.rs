@@ -59,6 +59,7 @@ const ACCOUNT_IDENTITY_LEFT: i32 = 42;
 const ACCOUNT_ACTION_WIDTH: i32 = 26;
 const ACCOUNT_ACTION_HEIGHT: i32 = 30;
 const ACCOUNT_ACTION_GAP: i32 = 4;
+const RESET_CREDIT_ACTION_WIDTH: i32 = 34;
 const REAUTH_ACTION_WIDTH: i32 = 142;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DIAGNOSTIC_LOG_MAX_BYTES: u64 = 512 * 1024;
@@ -99,6 +100,13 @@ struct ReauthControl {
     id: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ResetCreditControl {
+    id: String,
+    identity: String,
+    available: u32,
+}
+
 #[derive(Default)]
 struct AuthCancellation {
     requested: AtomicBool,
@@ -135,6 +143,9 @@ enum ModalHit {
     Preset(usize),
     Tab(ProviderCatalogTab),
     AddKey,
+    ResetCreditUse,
+    ResetCreditConfirm,
+    ResetCreditConfirmCancel,
     Cancel,
 }
 
@@ -164,6 +175,14 @@ enum ProviderModal {
         /// True when the provider already exists: submitting adds the key to its
         /// multi-key pool (POST /api/providers/keys) instead of replacing the row.
         add_key: bool,
+    },
+    ResetCredits {
+        control: ResetCreditControl,
+        credits: Vec<ResetCredit>,
+        loading: bool,
+        confirming: bool,
+        submitting: bool,
+        error: Option<String>,
     },
 }
 
@@ -246,18 +265,22 @@ struct App {
     account_pause_hits: Vec<(RECT, AccountControl)>,
     account_switch_hits: Vec<(RECT, AccountSwitchControl)>,
     account_reauth_hits: Vec<(RECT, ReauthControl)>,
+    account_reset_credit_hits: Vec<(RECT, ResetCreditControl)>,
     modal_hits: Vec<(RECT, ModalHit)>,
     hot_account_control: Option<AccountControl>,
     hot_account_switch: Option<AccountSwitchControl>,
     hot_reauth_control: Option<ReauthControl>,
+    hot_reset_credit_control: Option<ResetCreditControl>,
     pressed_account_control: Option<AccountControl>,
     pressed_account_switch: Option<AccountSwitchControl>,
     pressed_reauth_control: Option<ReauthControl>,
+    pressed_reset_credit_control: Option<ResetCreditControl>,
     pressed_modal_hit: Option<ModalHit>,
     account_mutations: HashSet<String>,
     account_switch_mutations: HashSet<String>,
     switch_previous_active: HashMap<String, Option<String>>,
     reauth_mutations: HashMap<String, Arc<AuthCancellation>>,
+    reset_credit_mutations: HashSet<String>,
     provider_modal: Option<ProviderModal>,
     modal_generation: u64,
     api_key_edit: Option<isize>,
@@ -526,6 +549,26 @@ fn account_height(account: &AccountView) -> i32 {
     }
 }
 
+fn reset_credit_count(account: &AccountView) -> Option<u32> {
+    account
+        .quota
+        .as_ref()
+        .and_then(|quota| quota.reset_credits)
+        .filter(|count| *count > 0)
+}
+
+fn format_credit_timestamp(value: &str) -> String {
+    let Some((date, rest)) = value.split_once('T') else {
+        return value.chars().take(24).collect();
+    };
+    let time: String = rest.chars().take(5).collect();
+    if date.len() == 10 && time.len() == 5 {
+        format!("{}.{:}.{:} {time} UTC", &date[0..4], &date[5..7], &date[8..10])
+    } else {
+        value.chars().take(24).collect()
+    }
+}
+
 fn main() {
     install_panic_logger();
     if let Err(error) = run() {
@@ -604,18 +647,22 @@ fn run() -> windows::core::Result<()> {
             account_pause_hits: Vec::new(),
             account_switch_hits: Vec::new(),
             account_reauth_hits: Vec::new(),
+            account_reset_credit_hits: Vec::new(),
             modal_hits: Vec::new(),
             hot_account_control: None,
             hot_account_switch: None,
             hot_reauth_control: None,
+            hot_reset_credit_control: None,
             pressed_account_control: None,
             pressed_account_switch: None,
             pressed_reauth_control: None,
+            pressed_reset_credit_control: None,
             pressed_modal_hit: None,
             account_mutations: HashSet::new(),
             account_switch_mutations: HashSet::new(),
             switch_previous_active: HashMap::new(),
             reauth_mutations: HashMap::new(),
+            reset_credit_mutations: HashSet::new(),
             provider_modal: None,
             modal_generation: 0,
             api_key_edit: None,
@@ -855,9 +902,19 @@ fn launch_power_action(hwnd: HWND, action: &'static str) {
     });
 }
 
-fn account_action_rect(width: i32, top: i32, identity_width: i32) -> RECT {
+fn account_action_rect(width: i32, top: i32, identity_width: i32, has_reset_credit: bool) -> RECT {
     let min_left = ACCOUNT_IDENTITY_LEFT + 58;
-    let max_left = (width - 244 - ACCOUNT_ACTION_GAP - ACCOUNT_ACTION_WIDTH).max(min_left);
+    let reset_credit_width = if has_reset_credit {
+        ACCOUNT_ACTION_GAP + RESET_CREDIT_ACTION_WIDTH
+    } else {
+        0
+    };
+    let max_left = (width
+        - 244
+        - ACCOUNT_ACTION_GAP
+        - ACCOUNT_ACTION_WIDTH
+        - reset_credit_width)
+        .max(min_left);
     let left = (ACCOUNT_IDENTITY_LEFT + identity_width.max(0) + ACCOUNT_ACTION_GAP)
         .min(max_left)
         .max(min_left);
@@ -866,6 +923,15 @@ fn account_action_rect(width: i32, top: i32, identity_width: i32) -> RECT {
         top,
         right: left + ACCOUNT_ACTION_WIDTH,
         bottom: top + ACCOUNT_ACTION_HEIGHT,
+    }
+}
+
+fn reset_credit_action_rect(account_action: RECT) -> RECT {
+    RECT {
+        left: account_action.right + ACCOUNT_ACTION_GAP,
+        top: account_action.top,
+        right: account_action.right + ACCOUNT_ACTION_GAP + RESET_CREDIT_ACTION_WIDTH,
+        bottom: account_action.bottom,
     }
 }
 
@@ -885,6 +951,138 @@ fn reauth_eligible(provider: &str, account: &AccountView) -> bool {
 
 fn reauth_text_color(_waiting: bool) -> u32 {
     0x0024bffb
+}
+
+fn open_reset_credit_modal(hwnd: HWND, control: ResetCreditControl) {
+    let mut generation = 0;
+    let mut opened = false;
+    with_app(|app| {
+        if app.reset_credit_mutations.contains(&control.id) {
+            return;
+        }
+        app.expanded = true;
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        generation = app.modal_generation;
+        app.provider_modal = Some(ProviderModal::ResetCredits {
+            control: control.clone(),
+            credits: Vec::new(),
+            loading: true,
+            confirming: false,
+            submitting: false,
+            error: None,
+        });
+        opened = true;
+    });
+    if !opened {
+        return;
+    }
+    unsafe {
+        resize_for_state(hwnd);
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::fetch_reset_credits(&control.id);
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            if let Some(ProviderModal::ResetCredits {
+                control,
+                credits,
+                loading,
+                error,
+                ..
+            }) = &mut app.provider_modal
+            {
+                *loading = false;
+                match result {
+                    Ok(response) => {
+                        control.available = response.available_count;
+                        *credits = response.credits;
+                    }
+                    Err(message) => *error = Some(message),
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn submit_reset_credit(hwnd: HWND) {
+    let mut account_id = None;
+    with_app(|app| {
+        let Some(ProviderModal::ResetCredits {
+            control,
+            loading,
+            submitting,
+            error,
+            ..
+        }) = &mut app.provider_modal
+        else {
+            return;
+        };
+        if *loading || *submitting || control.available == 0 {
+            return;
+        }
+        *submitting = true;
+        *error = None;
+        account_id = Some(control.id.clone());
+        app.reset_credit_mutations.insert(control.id.clone());
+        app.state.status = "초기화권을 사용하는 중…".into();
+    });
+    let Some(account_id) = account_id else {
+        return;
+    };
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::consume_reset_credit(&account_id);
+        with_app(|app| {
+            app.reset_credit_mutations.remove(&account_id);
+            match result {
+                Ok(response) if matches!(response.code.as_str(), "reset" | "already_redeemed") => {
+                    app.state.status = response.remaining.map_or_else(
+                        || "초기화 완료".into(),
+                        |remaining| format!("초기화 완료 · 남은 초기화권 {remaining}개"),
+                    );
+                    app.modal_generation = app.modal_generation.wrapping_add(1);
+                    app.provider_modal = None;
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Ok(response) => {
+                    if let Some(ProviderModal::ResetCredits {
+                        submitting, error, ..
+                    }) = &mut app.provider_modal
+                    {
+                        *submitting = false;
+                        *error = Some(match response.code.as_str() {
+                            "nothing_to_reset" => "현재 초기화할 사용량 제한이 없습니다".into(),
+                            "no_credit" => "사용 가능한 초기화권이 없습니다".into(),
+                            code => format!("초기화권 사용 실패: {code}"),
+                        });
+                    }
+                }
+                Err(message) => {
+                    if let Some(ProviderModal::ResetCredits {
+                        submitting, error, ..
+                    }) = &mut app.provider_modal
+                    {
+                        *submitting = false;
+                        *error = Some(message);
+                    }
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 fn set_pool_account_paused(pools: &mut [AccountPool], provider: &str, id: &str, paused: bool) -> bool {
@@ -2115,6 +2313,10 @@ unsafe extern "system" fn window_proc(
                     app.account_reauth_hits
                         .iter()
                         .any(|(hit, _)| point_in(hit, point.x, point.y))
+                        || app
+                            .account_reset_credit_hits
+                            .iter()
+                            .any(|(hit, _)| point_in(hit, point.x, point.y))
                 }) {
                     IDC_HAND
                 } else if point.x < RESIZE_EDGE || point.x >= rect.right - RESIZE_EDGE {
@@ -2166,6 +2368,11 @@ unsafe extern "system" fn window_proc(
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
+                let reset_credit_control = app
+                    .account_reset_credit_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
                 let resize_edge = if x < RESIZE_EDGE {
                     Some(ResizeEdge::Left)
                 } else if x >= app.width - RESIZE_EDGE {
@@ -2205,6 +2412,17 @@ unsafe extern "system" fn window_proc(
                     app.pressed_account_control = None;
                     app.pressed_account_switch = None;
                     app.pressed_reauth_control = Some(control);
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
+                } else if let Some(control) = reset_credit_control {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
+                    app.pressed_reauth_control = None;
+                    app.pressed_reset_credit_control = Some(control);
                     app.button_inside = false;
                     app.drag_origin = None;
                     app.drag_moved = false;
@@ -2270,6 +2488,11 @@ unsafe extern "system" fn window_proc(
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
+                let hot_reset_credit_control = app
+                    .account_reset_credit_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
                 let hot_tab = app
                     .expanded
                     .then(|| content_tab_at(app.width, x, y))
@@ -2279,6 +2502,7 @@ unsafe extern "system" fn window_proc(
                     || app.hot_account_control != hot_account_control
                     || app.hot_account_switch != hot_account_switch
                     || app.hot_reauth_control != hot_reauth_control
+                    || app.hot_reset_credit_control != hot_reset_credit_control
                     || app.hot_tab != hot_tab
                 {
                     changed = true;
@@ -2288,6 +2512,7 @@ unsafe extern "system" fn window_proc(
                 app.hot_account_control = hot_account_control;
                 app.hot_account_switch = hot_account_switch;
                 app.hot_reauth_control = hot_reauth_control;
+                app.hot_reset_credit_control = hot_reset_credit_control;
                 app.hot_tab = hot_tab;
                 if let Some(button) = app.pressed_button {
                     let inside = match button {
@@ -2301,6 +2526,7 @@ unsafe extern "system" fn window_proc(
                 } else if app.pressed_account_control.is_some()
                     || app.pressed_account_switch.is_some()
                     || app.pressed_reauth_control.is_some()
+                    || app.pressed_reset_credit_control.is_some()
                 {
                     // Account controls never initiate a window drag.
                 } else if let Some((origin, window, edge)) = app.resize_origin {
@@ -2351,6 +2577,7 @@ unsafe extern "system" fn window_proc(
             let mut pause_action = None;
             let mut switch_action = None;
             let mut reauth_action = None;
+            let mut reset_credit_action = None;
             let mut modal_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
@@ -2358,6 +2585,7 @@ unsafe extern "system" fn window_proc(
                 let pressed_account_control = app.pressed_account_control.take();
                 let pressed_account_switch = app.pressed_account_switch.take();
                 let pressed_reauth_control = app.pressed_reauth_control.take();
+                let pressed_reset_credit_control = app.pressed_reset_credit_control.take();
                 let pressed_modal_hit = app.pressed_modal_hit.take();
                 let button_inside = app.button_inside;
                 app.button_inside = false;
@@ -2384,6 +2612,17 @@ unsafe extern "system" fn window_proc(
                         .any(|(rect, hit)| *hit == control && point_in(rect, x, y))
                     {
                         reauth_action = Some(control);
+                    }
+                    handled_button = true;
+                    return;
+                }
+                if let Some(control) = pressed_reset_credit_control {
+                    if app
+                        .account_reset_credit_hits
+                        .iter()
+                        .any(|(rect, hit)| *hit == control && point_in(rect, x, y))
+                    {
+                        reset_credit_action = Some(control);
                     }
                     handled_button = true;
                     return;
@@ -2492,10 +2731,35 @@ unsafe extern "system" fn window_proc(
             if let Some(control) = reauth_action {
                 launch_reauth(hwnd, control);
             }
+            if let Some(control) = reset_credit_action {
+                open_reset_credit_modal(hwnd, control);
+            }
             if let Some(action) = modal_action {
                 match action {
                     ModalHit::Cancel => with_app(|app| unsafe { close_provider_modal(app, true) }),
                     ModalHit::AddKey => unsafe { submit_api_key(hwnd) },
+                    ModalHit::ResetCreditUse => with_app(|app| {
+                        if let Some(ProviderModal::ResetCredits {
+                            loading,
+                            confirming,
+                            submitting,
+                            control,
+                            ..
+                        }) = &mut app.provider_modal
+                        {
+                            if !*loading && !*submitting && control.available > 0 {
+                                *confirming = true;
+                            }
+                        }
+                    }),
+                    ModalHit::ResetCreditConfirmCancel => with_app(|app| {
+                        if let Some(ProviderModal::ResetCredits { confirming, .. }) =
+                            &mut app.provider_modal
+                        {
+                            *confirming = false;
+                        }
+                    }),
+                    ModalHit::ResetCreditConfirm => submit_reset_credit(hwnd),
                     ModalHit::Tab(tab) => with_app(|app| {
                         if let Some(ProviderModal::Picker {
                             selected_tab,
@@ -2569,6 +2833,7 @@ unsafe extern "system" fn window_proc(
                 app.pressed_account_control = None;
                 app.pressed_account_switch = None;
                 app.pressed_reauth_control = None;
+                app.pressed_reset_credit_control = None;
                 app.pressed_modal_hit = None;
                 app.button_inside = false;
             });
@@ -2589,7 +2854,7 @@ unsafe extern "system" fn window_proc(
                         .filter(|preset| provider_catalog_tab(preset) == *selected_tab)
                         .count() as i32;
                     *scroll = (*scroll - delta.signum() * 64).clamp(0, (count * 54 - 300).max(0));
-                } else if app.expanded {
+                } else if app.provider_modal.is_none() && app.expanded {
                     app.scroll_offset -= delta.signum() * 76;
                     app.clamp_scroll(app.desired_height());
                 }
@@ -2738,6 +3003,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.account_pause_hits.clear();
     app.account_switch_hits.clear();
     app.account_reauth_hits.clear();
+    app.account_reset_credit_hits.clear();
     app.modal_hits.clear();
     let body_font = make_font(14, 500);
     let small_font = make_font(12, 400);
@@ -2951,9 +3217,14 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             } else {
                 " "
             };
+            let header_label = if app.expanded_providers.contains(&provider.name) {
+                provider_base_label(&provider)
+            } else {
+                provider_header_label(&provider)
+            };
             draw_text(
                 dc,
-                &format!("{marker} {}", provider_header_label(&provider)),
+                &format!("{marker} {header_label}"),
                 RECT {
                     left: 18,
                     top: y,
@@ -3011,8 +3282,15 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     let account_height = account_height(&account);
                     let reauth = reauth_eligible(&provider.name, &account);
                     let reauth_rect = reauth_action_rect(width, y);
+                    let reset_credits = reset_credit_count(&account);
                     let identity_width = measure_text_width(dc, &account.identity);
-                    let action_rect = account_action_rect(width, y, identity_width);
+                    let action_rect = account_action_rect(
+                        width,
+                        y,
+                        identity_width,
+                        reset_credits.is_some(),
+                    );
+                    let reset_credit_rect = reset_credit_action_rect(action_rect);
                     // One control per pool row: the ACTIVE account shows pause, every
                     // other account shows play ("make this account active"). OAuth pools
                     // (kiro/anthropic/xai) get the same controls as the Codex/API-key pools.
@@ -3097,6 +3375,33 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                             }
                         }
                     }
+                    if let Some(available) = reset_credits {
+                        let control = ResetCreditControl {
+                            id: account.id.clone(),
+                            identity: account.identity.clone(),
+                            available,
+                        };
+                        let busy = app.reset_credit_mutations.contains(&account.id);
+                        let hot = !busy
+                            && app.hot_reset_credit_control.as_ref() == Some(&control);
+                        let pressed = app.pressed_reset_credit_control.as_ref() == Some(&control);
+                        draw_reset_credit_control(
+                            dc,
+                            reset_credit_rect,
+                            available,
+                            hot,
+                            pressed,
+                            busy,
+                            body_font,
+                        );
+                        if !busy
+                            && reset_credit_rect.bottom > CONTENT_TOP
+                            && reset_credit_rect.top < height
+                        {
+                            app.account_reset_credit_hits
+                                .push((reset_credit_rect, control));
+                        }
+                    }
                     if provider.name == "openai" {
                         if reauth {
                             let control = ReauthControl {
@@ -3153,8 +3458,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                         },
                         DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                     );
-                    let rows = quota_rows(account.quota.as_ref());
                     let mut quota_y = y + 29;
+                    let rows = quota_rows(account.quota.as_ref());
                     for quota in &rows {
                         draw_quota_row(
                             dc,
@@ -3490,7 +3795,9 @@ unsafe fn draw_account_pause_control(
         0x009a9fa8
     };
     let cx = (rect.left + rect.right) / 2;
-    let cy = (rect.top + rect.bottom) / 2;
+    // Account names use DrawText's vertically centered body-font box. Shift the
+    // stroked silhouette by one pixel to share that optical text center/baseline.
+    let cy = (rect.top + rect.bottom) / 2 + 1;
     // Pause: exclude this (currently active) account from the rotation pool.
     fill_solid(
         dc,
@@ -3528,6 +3835,80 @@ unsafe fn draw_account_play_control(dc: HDC, rect: RECT, hot: bool, pressed: boo
     for rect in play_triangle_columns(cx - 5, cy, 7, 5) {
         fill_solid(dc, rect, color);
     }
+}
+
+unsafe fn draw_reset_credit_control(
+    dc: HDC,
+    rect: RECT,
+    available: u32,
+    hot: bool,
+    pressed: bool,
+    busy: bool,
+    font: HFONT,
+) {
+    let color = if busy {
+        0x006f7380
+    } else if hot || pressed {
+        0x00e9f4ef
+    } else {
+        0x0024bffb
+    };
+    let left = rect.left + 2;
+    let right = left + 15;
+    let cy = (rect.top + rect.bottom) / 2;
+    let top = cy - 6;
+    let bottom = cy + 6;
+    // Same Lucide ticket silhouette used by gui/src/icons.tsx::IconTicket:
+    // rounded ticket body, opposing admission notches, and a dashed divider.
+    let outline = [
+        (left + 2, top),
+        (right - 2, top),
+        (right, top + 2),
+        (right, cy - 3),
+        (right - 2, cy - 2),
+        (right - 3, cy),
+        (right - 2, cy + 2),
+        (right, cy + 3),
+        (right, bottom - 2),
+        (right - 2, bottom),
+        (left + 2, bottom),
+        (left, bottom - 2),
+        (left, cy + 3),
+        (left + 2, cy + 2),
+        (left + 3, cy),
+        (left + 2, cy - 2),
+        (left, cy - 3),
+        (left, top + 2),
+        (left + 2, top),
+    ];
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(color));
+    let old_pen = SelectObject(dc, pen);
+    let _ = MoveToEx(dc, outline[0].0, outline[0].1, None);
+    for &(x, y) in &outline[1..] {
+        let _ = LineTo(dc, x, y);
+    }
+    let divider_x = left + 8;
+    for (from, to) in [(top + 1, top + 4), (cy - 1, cy + 2), (bottom - 4, bottom - 1)] {
+        let _ = MoveToEx(dc, divider_x, from, None);
+        let _ = LineTo(dc, divider_x, to);
+    }
+    let _ = SelectObject(dc, old_pen);
+    let _ = DeleteObject(pen);
+
+    let old_font = SelectObject(dc, font);
+    set_text_color(dc, color);
+    draw_text(
+        dc,
+        &available.to_string(),
+        RECT {
+            left: right + 2,
+            top: rect.top,
+            right: rect.right - 1,
+            bottom: rect.bottom,
+        },
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+    let _ = SelectObject(dc, old_font);
 }
 
 /// Column rects forming the standard RIGHT-pointing play triangle: the flat edge on
@@ -3577,9 +3958,13 @@ unsafe fn draw_provider_modal(
     );
     let _ = SelectObject(dc, body_font);
     set_text_color(dc, 0x00f0ece8);
+    let modal_title = match app.provider_modal.as_ref() {
+        Some(ProviderModal::ResetCredits { .. }) => "초기화권",
+        _ => "프로바이더 추가",
+    };
     draw_text(
         dc,
-        "프로바이더 추가",
+        modal_title,
         RECT {
             left: 24,
             top: 14,
@@ -3903,6 +4288,243 @@ unsafe fn draw_provider_modal(
                         bottom: add_top + 94,
                     },
                     DT_LEFT | DT_WORDBREAK,
+                );
+            }
+        }
+        Some(ProviderModal::ResetCredits {
+            control,
+            credits,
+            loading,
+            confirming,
+            submitting,
+            error,
+        }) => {
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x009da3ad);
+            draw_text(
+                dc,
+                &control.identity,
+                RECT {
+                    left: 24,
+                    top: 48,
+                    right: width - 24,
+                    bottom: 76,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            if *confirming {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    "!",
+                    RECT {
+                        left: width / 2 - 20,
+                        top: 116,
+                        right: width / 2 + 20,
+                        bottom: 158,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                );
+                let _ = SelectObject(dc, body_font);
+                set_text_color(dc, 0x00f0ece8);
+                draw_text(
+                    dc,
+                    "초기화권 1개를 사용할까요?",
+                    RECT {
+                        left: 40,
+                        top: 164,
+                        right: width - 40,
+                        bottom: 202,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                );
+                let _ = SelectObject(dc, small_font);
+                set_text_color(dc, 0x009da3ad);
+                let next_credit = credits.first().map(|credit| {
+                    format!(
+                        "다음 사용권 · 만료 {}",
+                        format_credit_timestamp(&credit.expires_at)
+                    )
+                });
+                draw_text(
+                    dc,
+                    next_credit.as_deref().unwrap_or("다음 사용권 정보를 불러오지 못했습니다"),
+                    RECT {
+                        left: 40,
+                        top: 210,
+                        right: width - 40,
+                        bottom: 242,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+                draw_text(
+                    dc,
+                    "현재 시간/주간 사용량 제한이 즉시 초기화되며 되돌릴 수 없습니다.",
+                    RECT {
+                        left: 48,
+                        top: 250,
+                        right: width - 48,
+                        bottom: 292,
+                    },
+                    DT_CENTER | DT_WORDBREAK,
+                );
+                let cancel_rect = RECT {
+                    left: width / 2 - 144,
+                    top: 322,
+                    right: width / 2 - 8,
+                    bottom: 358,
+                };
+                let confirm_rect = RECT {
+                    left: width / 2 + 8,
+                    top: 322,
+                    right: width / 2 + 144,
+                    bottom: 358,
+                };
+                draw_native_button(dc, cancel_rect, "취소", *submitting);
+                draw_native_button(
+                    dc,
+                    confirm_rect,
+                    if *submitting { "사용 중…" } else { "초기화권 사용" },
+                    *submitting,
+                );
+                if !*submitting {
+                    app.modal_hits
+                        .push((cancel_rect, ModalHit::ResetCreditConfirmCancel));
+                    app.modal_hits
+                        .push((confirm_rect, ModalHit::ResetCreditConfirm));
+                }
+            } else if *loading {
+                set_text_color(dc, 0x009da3ad);
+                draw_text(
+                    dc,
+                    "초기화권 정보를 불러오는 중…",
+                    RECT {
+                        left: 40,
+                        top: 110,
+                        right: width - 40,
+                        bottom: 160,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                );
+            } else {
+                set_text_color(dc, 0x00e9e4df);
+                draw_text(
+                    dc,
+                    &format!("사용 가능한 초기화권 {}개", control.available),
+                    RECT {
+                        left: 32,
+                        top: 82,
+                        right: width - 32,
+                        bottom: 112,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                if credits.is_empty() {
+                    set_text_color(dc, 0x009da3ad);
+                    draw_text(
+                        dc,
+                        "표시할 초기화권이 없습니다.",
+                        RECT {
+                            left: 40,
+                            top: 132,
+                            right: width - 40,
+                            bottom: 180,
+                        },
+                        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                    );
+                } else {
+                    for (index, credit) in credits.iter().take(5).enumerate() {
+                        let top = 118 + index as i32 * 62;
+                        let row = RECT {
+                            left: 30,
+                            top,
+                            right: width - 30,
+                            bottom: top + 56,
+                        };
+                        fill_solid(dc, row, if index == 0 { 0x003a312b } else { 0x002d2825 });
+                        draw_reset_credit_control(
+                            dc,
+                            RECT {
+                                left: row.left + 10,
+                                top: row.top + 13,
+                                right: row.left + 42,
+                                bottom: row.top + 43,
+                            },
+                            (index + 1) as u32,
+                            index == 0,
+                            false,
+                            false,
+                            small_font,
+                        );
+                        set_text_color(dc, if index == 0 { 0x0024bffb } else { 0x00e9e4df });
+                        draw_text(
+                            dc,
+                            if index == 0 { "다음 사용" } else { "대기" },
+                            RECT {
+                                left: row.left + 52,
+                                top: row.top + 3,
+                                right: row.right - 12,
+                                bottom: row.top + 26,
+                            },
+                            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                        );
+                        set_text_color(dc, 0x009da3ad);
+                        draw_text(
+                            dc,
+                            &format!(
+                                "지급 {}  ·  만료 {}",
+                                format_credit_timestamp(&credit.granted_at),
+                                format_credit_timestamp(&credit.expires_at)
+                            ),
+                            RECT {
+                                left: row.left + 52,
+                                top: row.top + 27,
+                                right: row.right - 12,
+                                bottom: row.bottom - 3,
+                            },
+                            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                        );
+                        if index == 0 && !*submitting {
+                            app.modal_hits.push((row, ModalHit::ResetCreditUse));
+                        }
+                    }
+                }
+                let use_rect = RECT {
+                    left: 48,
+                    top: 446,
+                    right: width - 48,
+                    bottom: 484,
+                };
+                let disabled = *submitting || control.available == 0 || credits.is_empty();
+                draw_native_button(dc, use_rect, "다음 초기화권 사용", disabled);
+                if !disabled {
+                    app.modal_hits.push((use_rect, ModalHit::ResetCreditUse));
+                }
+                set_text_color(dc, 0x008e949e);
+                draw_text(
+                    dc,
+                    "초기화권은 만료 순서에 따라 다음 사용권부터 사용됩니다.",
+                    RECT {
+                        left: 36,
+                        top: 490,
+                        right: width - 36,
+                        bottom: 520,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+            }
+            if let Some(error) = error {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    error,
+                    RECT {
+                        left: 36,
+                        top: 520,
+                        right: width - 36,
+                        bottom: 548,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                 );
             }
         }
@@ -4430,6 +5052,30 @@ mod account_control_tests {
     }
 
     #[test]
+    fn reset_credit_action_uses_the_existing_account_row_only_when_available() {
+        let without_credit = AccountView::default();
+        let with_credit = AccountView {
+            quota: Some(Quota {
+                reset_credits: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let zero_credit = AccountView {
+            quota: Some(Quota {
+                reset_credits: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(reset_credit_count(&without_credit), None);
+        assert_eq!(reset_credit_count(&zero_credit), None);
+        assert_eq!(reset_credit_count(&with_credit), Some(1));
+        assert_eq!(account_height(&with_credit), account_height(&without_credit));
+    }
+
+    #[test]
     fn empty_text_never_reaches_win32_gdi() {
         assert_eq!(gdi_text_units(""), None);
         assert_eq!(
@@ -4638,7 +5284,7 @@ mod account_control_tests {
 
     #[test]
     fn action_follows_short_identity_and_stays_before_health_column() {
-        let rect = account_action_rect(DEFAULT_WIDTH, 120, 96);
+        let rect = account_action_rect(DEFAULT_WIDTH, 120, 96, false);
         assert_eq!(rect.left, ACCOUNT_IDENTITY_LEFT + 96 + ACCOUNT_ACTION_GAP);
         assert_eq!(rect.right - rect.left, ACCOUNT_ACTION_WIDTH);
         assert!(rect.right <= DEFAULT_WIDTH - 244);
@@ -4660,8 +5306,29 @@ mod account_control_tests {
 
     #[test]
     fn long_identity_cannot_push_action_into_health_column() {
-        let rect = account_action_rect(DEFAULT_WIDTH, 120, 2_000);
+        let rect = account_action_rect(DEFAULT_WIDTH, 120, 2_000, false);
         assert_eq!(rect.right, DEFAULT_WIDTH - 244 - ACCOUNT_ACTION_GAP);
+    }
+
+    #[test]
+    fn ticket_badge_sits_after_play_pause_and_before_health() {
+        let action = account_action_rect(DEFAULT_WIDTH, 120, 2_000, true);
+        let ticket = reset_credit_action_rect(action);
+
+        assert_eq!(ticket.left, action.right + ACCOUNT_ACTION_GAP);
+        assert_eq!(ticket.right - ticket.left, RESET_CREDIT_ACTION_WIDTH);
+        assert!(ticket.right <= DEFAULT_WIDTH - 244);
+        assert_eq!(ticket.top, action.top);
+        assert_eq!(ticket.bottom, action.bottom);
+    }
+
+    #[test]
+    fn reset_credit_dates_are_compact_and_explicitly_utc() {
+        assert_eq!(
+            format_credit_timestamp("2026-09-21T00:27:48.432665Z"),
+            "2026.09.21 00:27 UTC"
+        );
+        assert_eq!(format_credit_timestamp("unknown"), "unknown");
     }
 
     #[test]

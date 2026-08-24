@@ -3,6 +3,7 @@ import { formatUptime } from "../formatUptime";
 import { IconActivity } from "../icons";
 import { useI18n, type Locale, type TFn } from "../i18n/shared";
 import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 
 /**
  * Memory observability card. Polls GET /api/system/memory (#314 WP3) every 5s
@@ -274,12 +275,12 @@ export default function MemoryObservabilityCard({ apiBase }: { apiBase: string }
       }
     };
     void fetchMemory();
-    const interval = setInterval(() => void fetchMemory(), 5000);
+    const stop = startVisibilityPoll(() => void fetchMemory(), 5000);
     return () => {
       cancelled = true;
       active?.controller.abort();
       active?.clear();
-      clearInterval(interval);
+      stop();
     };
   }, [apiBase, restartPhase, restartFromPid]);
 

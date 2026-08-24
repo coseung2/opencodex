@@ -243,13 +243,20 @@ export function isNativeOpenAiEntry(entry: RawEntry): boolean {
   return typeof entry.slug === "string" && !entry.slug.includes("/");
 }
 
+function nativeAutoCompactLimit(contextWindow: number, maxInputTokens?: number): number {
+  const ninetyPercent = Math.floor(contextWindow * 0.9);
+  return typeof maxInputTokens === "number" && maxInputTokens > 0
+    ? Math.min(ninetyPercent, maxInputTokens, contextWindow)
+    : ninetyPercent;
+}
+
 export function applyNativeOpenAiContextOverride(entry: RawEntry): void {
   if (!isNativeOpenAiEntry(entry)) return;
   const override = NATIVE_OPENAI_CONTEXT_OVERRIDES[entry.slug as string];
   if (!override) return;
   if (typeof override.contextWindow === "number") {
     entry.context_window = override.contextWindow;
-    entry.auto_compact_token_limit = Math.floor(override.contextWindow * 0.9);
+    entry.auto_compact_token_limit = nativeAutoCompactLimit(override.contextWindow, override.maxInputTokens);
   }
   if (typeof override.maxContextWindow === "number") {
     entry.max_context_window = override.maxContextWindow;

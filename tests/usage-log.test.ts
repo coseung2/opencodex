@@ -692,4 +692,67 @@ describe("usage log", () => {
     expect(readRecentUsageEntries(0)).toEqual([]);
     expect(readRecentUsageEntries(-1)).toEqual([]);
   });
+
+  test("persists only privacy-safe Codex serving-account labels", () => {
+    appendUsageEntry({
+      requestId: "ocx-account-label",
+      timestamp: 1,
+      provider: "openai-p123abc",
+      model: "gpt-5.6-sol",
+      accountLogLabel: "p123abc",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "reported",
+      usage: { inputTokens: 2, outputTokens: 1 },
+      attempts: [{
+        ordinal: 1,
+        provider: "openai-p123abc",
+        model: "gpt-5.6-sol",
+        adapter: "openai-responses",
+        accountLogLabel: "p123abc",
+        status: 200,
+        durationMs: 1,
+        sendCount: 1,
+        recoveryKinds: [],
+        usageStatus: "reported",
+        usage: { inputTokens: 2, outputTokens: 1 },
+      }],
+    });
+    appendUsageEntry({
+      requestId: "ocx-private-label",
+      timestamp: 2,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      accountLogLabel: "private-account-id" as never,
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported",
+    });
+
+    const [safe, rejected] = readUsageEntries();
+    expect(safe).toMatchObject({
+      accountLogLabel: "p123abc",
+      attempts: [{ accountLogLabel: "p123abc" }],
+    });
+    expect(rejected).not.toHaveProperty("accountLogLabel");
+    expect(readFileSync(usageLogPath(), "utf8")).not.toContain("private-account-id");
+  });
+
+  test("persists a bounded single-line shadow helper marker", () => {
+    appendUsageEntry({
+      requestId: "ocx-helper-marker",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-target",
+      shadowCallRewrittenFrom: "gpt-helper\nsk-testsecret123",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported",
+    });
+
+    const [entry] = readUsageEntries();
+    expect(entry?.shadowCallRewrittenFrom).toContain("gpt-helper");
+    expect(entry?.shadowCallRewrittenFrom).not.toContain("\n");
+    expect(entry?.shadowCallRewrittenFrom).not.toContain("testsecret123");
+  });
 });

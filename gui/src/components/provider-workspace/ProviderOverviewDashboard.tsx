@@ -7,7 +7,7 @@ import { useMemo } from "react";
 import { useT, useI18n } from "../../i18n/shared";
 import { IconAlert, IconChevron } from "../../icons";
 import type { WorkspaceSections, WorkspaceItem } from "../../provider-workspace/catalog";
-import { accountQuotaFromReport, type ProviderQuotaReportView } from "../../provider-workspace/report";
+import { accountQuotaFromReport, capacitySummaryFromReport, type ProviderQuotaReportView } from "../../provider-workspace/report";
 import {
   attentionReasonKey,
   buildAttentionItems,
@@ -157,7 +157,18 @@ export default function ProviderOverviewDashboard({
                   <div className="pws-dashboard-row-info">
                     <span className="pws-dashboard-row-name">{formatProviderDisplayName(item.name, t)}</span>
                     <span className="pws-dashboard-row-meta muted">
-                      {t("pws.dashboard.checkedAgo", { time: formatRelativeTime(report.updatedAt, timeLabels) })}
+                      {(() => {
+                        const capacity = capacitySummaryFromReport(report);
+                        if (!capacity) return t("pws.dashboard.checkedAgo", { time: formatRelativeTime(report.updatedAt, timeLabels) });
+                        const coverage = t("pws.capacity.coverage", {
+                          included: capacity.includedAccounts,
+                          total: capacity.includedAccounts + capacity.excludedAccounts,
+                        });
+                        const recovery = capacity.nextRecoveryAt
+                          ? t("pws.capacity.nextRecovery", { time: formatRelativeTime(capacity.nextRecoveryAt, timeLabels) })
+                          : "";
+                        return `${t("pws.capacity.estimate")} · ${coverage}${recovery ? ` · ${recovery}` : ""}`;
+                      })()}
                     </span>
                   </div>
                   <IconChevron className="pws-dashboard-row-chevron" aria-hidden="true" />

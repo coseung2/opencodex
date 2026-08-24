@@ -8,6 +8,8 @@ import { type ComboItem, parseComboList } from "../combo-workspace-data";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { setClientResourceData } from "../client-resource";
+import { createBoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import {
@@ -155,18 +157,21 @@ export default function Models({ apiBase }: { apiBase: string }) {
   );
 
   const loadShadowCall = useCallback(async () => {
+    const bounded = createBoundedFetch(15_000);
     try {
-      const r = await fetch(`${apiBase}/api/shadow-call-settings`);
+      const r = await fetch(`${apiBase}/api/shadow-call-settings`, { signal: bounded.signal });
       const data = await readJsonIfOk<ShadowCallData>(r);
       if (data) setShadowCall(data);
     } catch { /* old server / network: keep the section disabled */ }
+    finally { bounded.clear(); }
   }, [apiBase]);
 
   const loadV2 = useCallback(async () => {
     // Never let a toggle in flight be clobbered by the poll (same single-flight rule as models).
     if (v2BusyRef.current) return;
+    const bounded = createBoundedFetch(15_000);
     try {
-      const r = await fetch(`${apiBase}/api/v2`);
+      const r = await fetch(`${apiBase}/api/v2`, { signal: bounded.signal });
       if (!(r.headers.get("content-type") ?? "").includes("application/json")) { setV2(null); return; }
       const data = await readJsonIfOk<V2Status>(r);
       if (!data || typeof data.enabled !== "boolean") { setV2(null); return; }
@@ -178,15 +183,17 @@ export default function Models({ apiBase }: { apiBase: string }) {
       });
     } catch {
       setV2(null); // old server / network: hide the section instead of guessing
+    } finally {
+      bounded.clear();
     }
   }, [apiBase]);
 
   const fetchCatalog = useCallback(async (signal: AbortSignal): Promise<CachedModelsPage> => {
     const [modelsRes, capsRes, providersRes, selectionData] = await Promise.all([
-      fetch(`${apiBase}/api/models`),
-      fetch(`${apiBase}/api/provider-context-caps`),
-      fetch(`${apiBase}/api/providers`),
-      fetchSelectedModels(apiBase),
+      fetch(`${apiBase}/api/models`, { signal }),
+      fetch(`${apiBase}/api/provider-context-caps`, { signal }),
+      fetch(`${apiBase}/api/providers`, { signal }),
+      fetchSelectedModels(apiBase, (input, init) => fetch(input, { ...init, signal })),
     ]);
     const [data, capsData, providerData] = await Promise.all([
       readJsonOrThrow<ModelRow[]>(modelsRes),
@@ -240,7 +247,12 @@ export default function Models({ apiBase }: { apiBase: string }) {
       applyCatalog(next);
       return next;
     },
-    { isEmpty: () => false, pollMs: 10_000, initialData: cached ?? undefined },
+    {
+      isEmpty: () => false,
+      pollMs: 10_000,
+      initialData: cached ?? undefined,
+      deadlineMs: 60_000,
+    },
   );
   const catalogState = catalogResource.state;
 
@@ -271,12 +283,12 @@ export default function Models({ apiBase }: { apiBase: string }) {
       void loadShadowCall();
       void loadV2();
     }, 0);
-    const timer = window.setInterval(() => {
+    const stop = startVisibilityPoll(() => {
       if (!v2BusyRef.current) void loadV2();
-    }, 10000);
+    }, 10_000);
     return () => {
       window.clearTimeout(timeout);
-      window.clearInterval(timer);
+      stop();
     };
   }, [loadShadowCall, loadV2]);
 

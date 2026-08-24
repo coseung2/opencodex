@@ -3,9 +3,8 @@
  *
  * The eager bounded relay (src/server/relay-eager.ts) uses a JS async producer
  * loop — the exact shape of the Bun#32111 use-after-free (fixed upstream by Bun
- * PR #32120, merged 2026-06-21). No RELEASED Bun version is proven to carry
- * that fix yet, so `MIN_FIXED_BUN_VERSION` is null: every runtime is
- * "known-bad" until a bundle-bump commit sets it. Windows no-rewrite traffic
+ * PR #32120, merged 2026-06-21). Bun 1.4.0 is the first released version proven
+ * to carry that fix, so older runtimes remain "known-bad". Windows no-rewrite traffic
  * follows this runtime/config decision. Darwin no-rewrite traffic stays on tee
  * for `auto` regardless of runtime capability and reaches eager relay only via
  * explicit `streamMode: "eager-relay"` opt-in (see
@@ -18,10 +17,10 @@
  */
 
 /**
- * Bump in the SAME commit that bumps package.json's bundled Bun to a version
- * verified to include Bun PR #32120. null = no released version is known-fixed.
+ * Keep this in sync with the first bundled stable release verified to include
+ * Bun PR #32120. null = no released version is known-fixed.
  */
-export const MIN_FIXED_BUN_VERSION: string | null = null;
+export const MIN_FIXED_BUN_VERSION: string | null = "1.4.0";
 
 export type StreamMode = "auto" | "legacy-tee" | "eager-relay";
 

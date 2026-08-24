@@ -3,6 +3,7 @@ import {
   notePoolRotationSuccess,
   peekRoundRobinAccount,
   pickRoundRobinAccount,
+  selectPriorityTier,
 } from "../src/codex/pool-rotation";
 import {
   clearCodexUpstreamHealth,
@@ -116,6 +117,24 @@ describe("pickRoundRobinAccount", () => {
   });
 });
 
+describe("Codex account selection order", () => {
+  test("keeps flat pools unchanged and descends only when a higher tier is drained", () => {
+    const ids = ["main", "pool-a", "pool-b"] as const;
+    expect(selectPriorityTier(ids, () => 0, () => true)).toBe(ids);
+
+    const priorities: Record<string, number> = { main: 10, "pool-a": 10, "pool-b": 0 };
+    expect(selectPriorityTier(ids, id => priorities[id]!, id => id !== "main" && id !== "pool-a"))
+      .toEqual(["pool-b"]);
+  });
+
+  test("a live manual pin caps the priority ceiling at its tier", () => {
+    const ids = ["pool-high", "pool-pinned", "pool-low"];
+    const priorities: Record<string, number> = { "pool-high": 10, "pool-pinned": 0, "pool-low": -10 };
+    expect(selectPriorityTier(ids, id => priorities[id]!, () => true, "pool-pinned"))
+      .toEqual(["pool-pinned"]);
+  });
+});
+
 describe("accountPoolStrategy new-session routing", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -154,6 +173,26 @@ describe("accountPoolStrategy new-session routing", () => {
       resolveCodexAccountForThread(null, config),
     ];
     expect(new Set(picks).size).toBe(3);
+  });
+
+  test("priority preempts an unbound active account while a live manual pin wins", () => {
+    const config = makeThreeAccountConfig({
+      accountPoolStrategy: "quota",
+      activeCodexAccountId: "a",
+      codexAccountPriorities: { a: 0, b: 10, c: -10 },
+    });
+    for (const id of THREE_ACCOUNT_IDS) updateAccountQuota(id, 10);
+
+    expect(resolveCodexAccountForThread(null, config)).toBe("b");
+
+    clearCodexUpstreamHealth();
+    config.activeCodexAccountId = "a";
+    config.activeCodexAccountPinned = "a";
+    expect(resolveCodexAccountForThread(null, config)).toBe("a");
+
+    config.pausedCodexAccountIds = ["a"];
+    expect(resolveCodexAccountForThread(null, config)).toBe("b");
+    expect(config.activeCodexAccountPinned).toBeUndefined();
   });
 
   test("an independent native scope does not advance the shared round-robin cursor", () => {

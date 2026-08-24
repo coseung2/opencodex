@@ -51,6 +51,7 @@ Startup failures and Rust panics are written to the bounded diagnostic log `%LOC
 - Drag anywhere on the notch to move it; its chosen position is preserved while it expands, collapses, or refreshes.
 - Click a provider with multiple accounts to expand or collapse its account rows.
 - Click the pause icon beside an OpenAI account to exclude it from the rotation pool. A paused account shows a play icon that includes it again. The icon updates immediately and rolls back if OCX rejects the request.
+- OpenAI accounts with reset credits show the same compact ticket badge used by the dashboard beside the pause/play control. Click it to open an in-app modal with every ticket's grant and expiry dates; OCX identifies the FIFO next ticket, confirms consumption in the modal, and refreshes the displayed count after a successful reset.
 - Accounts that require renewed credentials expose an inline **재인증** action on the same row. OpenAI's main account is intentionally excluded; eligible OpenAI pool and generic OAuth accounts can start, cancel, and retry browser authentication.
 - Providers with quota data are shown first. Configured providers without quota data remain visible with their usage and account controls.
 - Press **Esc** to collapse.

@@ -6,8 +6,8 @@ import {
   deterministicTestBatches,
   discoverTestFiles,
   shouldBatchFullSuite,
-  WINDOWS_BUN_1_3_14_BATCH_SIZE,
-  WINDOWS_BUN_1_3_14_PARALLELISM,
+  WINDOWS_BUN_BATCH_SIZE,
+  WINDOWS_BUN_PARALLELISM,
 } from "../scripts/test";
 
 describe("test runner isolation", () => {
@@ -30,11 +30,13 @@ describe("test runner isolation", () => {
   });
 });
 
-describe("Windows Bun 1.3.14 full-suite batching", () => {
-  test("activates only for the exact pinned Windows full suite", () => {
+describe("Windows Bun full-suite batching", () => {
+  test("covers the legacy and bundled Windows runtimes only for a full suite", () => {
     expect(shouldBatchFullSuite("win32", "1.3.14", [])).toBe(true);
     expect(shouldBatchFullSuite("win32", "1.3.14+canary.1", [])).toBe(true);
-    expect(shouldBatchFullSuite("win32", "1.4.0", [])).toBe(false);
+    expect(shouldBatchFullSuite("win32", "1.4.0", [])).toBe(true);
+    expect(shouldBatchFullSuite("win32", "1.4.0+34cbb9a40", [])).toBe(true);
+    expect(shouldBatchFullSuite("win32", "1.4.1", [])).toBe(false);
     expect(shouldBatchFullSuite("linux", "1.3.14", [])).toBe(false);
     expect(shouldBatchFullSuite("win32", "1.3.14", ["tests/test-runner.test.ts"])).toBe(false);
   });
@@ -59,7 +61,7 @@ describe("Windows Bun 1.3.14 full-suite batching", () => {
     expect(new Set(files).size).toBe(files.length);
     const batches = deterministicTestBatches(files);
     expect(batches.flat()).toEqual(files);
-    expect(batches.every(batch => batch.length <= WINDOWS_BUN_1_3_14_BATCH_SIZE)).toBe(true);
-    expect(WINDOWS_BUN_1_3_14_PARALLELISM).toBe(2);
+    expect(batches.every(batch => batch.length <= WINDOWS_BUN_BATCH_SIZE)).toBe(true);
+    expect(WINDOWS_BUN_PARALLELISM).toBe(2);
   });
 });

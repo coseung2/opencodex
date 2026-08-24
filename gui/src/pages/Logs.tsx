@@ -112,6 +112,7 @@ export interface LogEntry {
   provider: string;
   surface?: LogSurface;
   conversationId?: string;
+  shadowCallRewrittenFrom?: string;
   requestedEffort?: string;
   effectiveEffort?: string;
   reasoningWireField?: string;
@@ -374,6 +375,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [detail, setDetail] = useState<LogEntry | null>(null);
   const [surfaceFilter, setSurfaceFilter] = useState<LogSurfaceFilter>("all");
+  const [interceptedHelpersOnly, setInterceptedHelpersOnly] = useState(false);
   const [conversationFilter, setConversationFilter] = useState("");
   const [conversationQueryHash, setConversationQueryHash] = useState<string | undefined>();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -490,6 +492,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
 
   const filteredLogs = logs.filter(log => (
     logMatchesSurface(log, surfaceFilter)
+    && (!interceptedHelpersOnly || Boolean(log.shadowCallRewrittenFrom))
     && (!conversationQuery || matchesLogConversationId(log.conversationId, conversationQuery, conversationQueryHash))
   ));
   const conversationTotals = conversationQuery ? summarizeFilteredLogs(filteredLogs) : null;
@@ -584,6 +587,14 @@ export default function Logs({ apiBase }: { apiBase: string }) {
             </button>
           ))}
         </div>
+        <label className="muted text-control logs-filter-field">
+          <input
+            type="checkbox"
+            checked={interceptedHelpersOnly}
+            onChange={event => setInterceptedHelpersOnly(event.target.checked)}
+          />
+          {t("logs.filter.interceptedHelpersOnly")}
+        </label>
         <label className="muted text-control logs-filter-field">
           {t("logs.filter.conversation.label")}
           <input
@@ -732,6 +743,14 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                  <td className="mono log-col-model" title={modelTitle(log)}>
                    <span className="logs-model-cell">
                     <span>{modelLabel(log.resolvedModel ?? log.model)}</span>
+                      {log.shadowCallRewrittenFrom && (
+                        <span
+                          className="badge badge-muted"
+                          title={t("logs.badge.interceptedHelperTitle")}
+                        >
+                          {t("logs.badge.interceptedHelper", { model: log.shadowCallRewrittenFrom })}
+                        </span>
+                      )}
                       {(log.surface === "claude" || log.surface === "claude-desktop") && (
                         <span className="badge badge-accent">{t("logs.badge.claude")}</span>
                       )}

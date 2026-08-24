@@ -80,6 +80,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       for (const row of data.providers ?? []) rank[row.provider] = row.requests;
       return rank;
     },
+    { deadlineMs: 60_000 },
   );
   /*
    * Quota revalidation is driven by an explicit revision, not by anything derived from

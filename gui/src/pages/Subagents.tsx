@@ -26,8 +26,8 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const saveInFlight = useRef(false);
   const delegation = useSubagentDelegation(apiBase);
 
-  const loadSubagents = useCallback(async (): Promise<CachedSubagents> => {
-    const res = await fetch(`${apiBase}/api/subagent-models`);
+  const loadSubagents = useCallback(async (signal?: AbortSignal): Promise<CachedSubagents> => {
+    const res = await fetch(`${apiBase}/api/subagent-models`, { signal });
     const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[] }>(res, t("sub.loadFail"));
     if (!response) throw new Error(t("sub.loadFail"));
     const available = response.available ?? [];

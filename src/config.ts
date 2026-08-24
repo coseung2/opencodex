@@ -12,6 +12,8 @@ import {
   isValidCodexAccountNamespaceTarget,
   MAIN_CODEX_ACCOUNT_NAMESPACE_TARGET,
 } from "./codex/account-namespace-match";
+import { isCodexAccountPriorityKey } from "./codex/account-priority";
+import { parseAccountPriority } from "./codex/pool-rotation";
 import { COMBO_NAMESPACE, comboConfigIssues } from "./combos/types";
 import {
   forgetHardenedSecretPath,
@@ -712,6 +714,25 @@ const codexAccountNamespacesSchema = z.custom<Record<string, unknown>>(
   }
 }).pipe(z.record(z.string(), z.string()));
 
+const codexAccountPrioritiesSchema = z.custom<Record<string, unknown>>(
+  (value): value is Record<string, unknown> => !!value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null),
+  { error: "codexAccountPriorities must be a plain object mapping account ids to integers" },
+).superRefine((priorities, ctx) => {
+  for (const [accountId, priority] of Object.entries(priorities)) {
+    if (!isCodexAccountPriorityKey(accountId)) {
+      ctx.addIssue({ code: "custom", path: [accountId], message: "invalid Codex account id" });
+    }
+    if (parseAccountPriority(priority) === null) {
+      ctx.addIssue({ code: "custom", path: [accountId], message: "selection order must be an integer between -100 and 100" });
+    }
+  }
+}).pipe(z.record(z.string(), z.number().int()));
+
+const CODEX_ACCOUNT_PIN_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+
 /**
  * Deliberately permissive. A user's config is not ours to invalidate: a strict
  * entry fails the whole parse, and loadConfig's fallback then backs the file up
@@ -779,13 +800,18 @@ const configSchema = z.object({
   // hashes, UUIDs), so validate only length, never charset: a foreign id must not
   // drop the whole paused set on config load.
   pausedOauthAccountIds: z.record(z.string(), z.array(z.string().min(1).max(128))).optional(),
+  codexAccountPriorities: codexAccountPrioritiesSchema.optional().catch(undefined),
+  activeCodexAccountPinned: z.string().regex(CODEX_ACCOUNT_PIN_PATTERN).optional().catch(undefined),
   codexAccountNamespaces: codexAccountNamespacesSchema.optional(),
+  codexAccountPickerEnabled: z.boolean().optional().catch(false),
   // Model ids excluded from the Grok Build managed block (dashboard switches).
   grokExcludedModels: z.array(z.string()).optional(),
   // Invalid values degrade to undefined ("auto") instead of failing the whole
   // parse: a hand-edited typo must never trip the backup-and-defaults repair
   // path below and wipe providers/pool accounts. Warning emitted in loadConfig.
   streamMode: z.enum(["auto", "legacy-tee", "eager-relay"]).optional().catch(undefined),
+  // A retry can be billable, so absence and malformed hand edits both stay off.
+  emptyCompletionRetry: z.boolean().optional().catch(false),
   // Same degrade-don't-reject rationale as the fields above: a hand-edited
   // non-string must not trip the backup-and-defaults repair path. Unset then
   // takes the canonical sideband path (src/server/live.ts normalizeSidebandRoot).
@@ -1258,6 +1284,29 @@ function rawConfigRecord(rawParsed: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function degradedCodexAccountRoutingWarnings(rawParsed: unknown, validated: OcxConfig): string[] {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw) return [];
+  const warnings: string[] = [];
+  if (raw.codexAccountPriorities !== undefined && validated.codexAccountPriorities === undefined) {
+    warnings.push("codexAccountPriorities ignored: expected account ids mapped to integers between -100 and 100");
+  }
+  if (raw.activeCodexAccountPinned !== undefined && validated.activeCodexAccountPinned === undefined) {
+    warnings.push("activeCodexAccountPinned ignored: expected a Codex account id");
+  }
+  if (raw.codexAccountPickerEnabled !== undefined
+    && typeof raw.codexAccountPickerEnabled !== "boolean") {
+    warnings.push("codexAccountPickerEnabled ignored: expected a boolean");
+  }
+  return warnings;
+}
+
+function warnDegradedCodexAccountRouting(rawParsed: unknown, validated: OcxConfig): void {
+  for (const warning of degradedCodexAccountRoutingWarnings(rawParsed, validated)) {
+    console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
+  }
+}
+
 function malformedNativeSubagentFields(rawParsed: unknown): NativeSubagentPersistedField[] {
   const raw = rawConfigRecord(rawParsed);
   if (!raw) return [];
@@ -1325,6 +1374,7 @@ export function loadConfig(): OcxConfig {
       const config = normalizeApiKeyIds(result.data as OcxConfig);
       warnDegradedStreamMode(parsed, config);
       warnDegradedHostname(parsed, config);
+      warnDegradedCodexAccountRouting(parsed, config);
       warnDegradedApiKeys(parsed, config);
       warnDegradedClaudeSubagentEffort(parsed);
       warnDegradedNativeSubagentConfig(parsed, config);
@@ -1344,6 +1394,7 @@ export function loadConfig(): OcxConfig {
       warnConfigRepaired(configPath, result.error);
       const config = normalizeApiKeyIds(retryResult.data as OcxConfig);
       warnDegradedHostname(parsed, config);
+      warnDegradedCodexAccountRouting(parsed, config);
       warnDegradedApiKeys(parsed, config);
       warnDegradedClaudeSubagentEffort(parsed);
       warnDegradedNativeSubagentConfig(parsed, config);
@@ -1391,6 +1442,7 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   const rawEffort = rawClaudeSubagentEffort(rawParsed);
   const normalized = normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed);
   const warnings = configPlaceholderWarnings(normalized);
+  warnings.push(...degradedCodexAccountRoutingWarnings(rawParsed, normalized));
   if (rawEffort !== undefined && !isClaudeSubagentEffort(rawEffort)) {
     warnings.push(`claudeCode.subagentEffort ignored: expected one of ${CLAUDE_SUBAGENT_EFFORTS.join(", ")}`);
   }
@@ -1472,12 +1524,42 @@ function googleAntigravityStaticCatalogVersionError(value: unknown): string | nu
   return "schema_invalid: googleAntigravityStaticCatalogVersion: must be 1 or omitted";
 }
 
+function codexAccountRoutingPreferenceError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw) return null;
+  if (raw.codexAccountPriorities !== undefined) {
+    const parsed = codexAccountPrioritiesSchema.safeParse(raw.codexAccountPriorities);
+    if (!parsed.success) {
+      return schemaDiagnosticsError(parsed.error).replace("schema_invalid: ", "schema_invalid: codexAccountPriorities.");
+    }
+  }
+  const pin = raw.activeCodexAccountPinned;
+  if (pin !== undefined && (typeof pin !== "string" || !CODEX_ACCOUNT_PIN_PATTERN.test(pin))) {
+    return "schema_invalid: activeCodexAccountPinned: must be an account id";
+  }
+  const picker = raw.codexAccountPickerEnabled;
+  if (picker !== undefined && typeof picker !== "boolean") {
+    return "schema_invalid: codexAccountPickerEnabled: must be a boolean";
+  }
+  return null;
+}
+
+function emptyCompletionRetryError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "emptyCompletionRetry")) return null;
+  return raw.emptyCompletionRetry === undefined || typeof raw.emptyCompletionRetry === "boolean"
+    ? null
+    : "schema_invalid: emptyCompletionRetry: must be a boolean or omitted";
+}
+
 /** Validate an in-memory config candidate without touching disk. Used by headless CLI import/set. */
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const boundaryError = blankHostnameError(value)
     ?? claudeSubagentEffortError(value)
     ?? appOwnedMemoryBudgetError(value)
-    ?? googleAntigravityStaticCatalogVersionError(value);
+    ?? googleAntigravityStaticCatalogVersionError(value)
+    ?? codexAccountRoutingPreferenceError(value)
+    ?? emptyCompletionRetryError(value);
   if (boundaryError) return { ok: false, error: boundaryError };
   const result = configSchema.safeParse(value);
   if (result.success) return { ok: true, config: normalizeApiKeyIds(result.data as OcxConfig) };
@@ -2009,6 +2091,7 @@ export function getDefaultConfig(): OcxConfig {
   // Adding extra providers (e.g. opencode-go) and switching defaultProvider is a user/runtime choice.
   return {
     port: 10100,
+    emptyCompletionRetry: false,
     managementUsageMaxReadBytes: 64 * 1024 * 1024,
     appOwnedMemoryBudgetMb: DEFAULT_APP_OWNED_MEMORY_BUDGET_BYTES / (1024 * 1024),
     // Fresh/re-initialized configs are already written in the current three-tier

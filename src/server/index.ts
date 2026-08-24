@@ -41,9 +41,11 @@ import { setStorageCleanupPolicyJobLiveApply } from "../storage/policy-job";
 import { scheduleStorageCleanupStartupRun, startStorageCleanupScheduler } from "../storage/policy-scheduler";
 import { runOpenAiTierStartupMigration } from "../providers/openai-tier-startup";
 import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-startup";
+import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
 import type { StorageCleanupPolicy } from "../types";
+import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
 import {
   CodexAccountCooldownError,
   cooldownErrorMessage,
@@ -272,7 +274,9 @@ function attachLiveSidebandUpstream(ws: ServerWebSocket<WsData>): void {
 // export function relaySseWithHeartbeat
 
 export function startServer(port?: number) {
-  const config = runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig()));
+  const config = runModelRenameStartupMigration(
+    runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig())),
+  );
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
   assertServerAuthConfig(config);
@@ -392,6 +396,10 @@ export function startServer(port?: number) {
     port: listenPort,
     hostname: bindHost,
     idleTimeout: 255,
+    // Keep Bun's listener admission ceiling aligned with the bounded
+    // decompression reader. Bun otherwise rejects valid large Codex turns at
+    // its lower default before the application can enforce the 256 MiB cap.
+    maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
     async fetch(req, requestServer): Promise<Response> {
       const url = new URL(req.url);
       markActivity(`${req.method} ${url.pathname}`);

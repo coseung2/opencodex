@@ -7,6 +7,8 @@ import type {
 } from "./add-codex-account-reducer";
 import type { TFn } from "../i18n/shared";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
+import { createBoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 
 export function useAddCodexAccountOAuth({
   apiBase,
@@ -30,7 +32,7 @@ export function useAddCodexAccountOAuth({
   const aliveRef = useRef(true);
   const pollErrorStreakRef = useRef(0);
   const pollInFlightRef = useRef(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<(() => void) | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
   const flowRef = useRef<string | null>(null);
@@ -51,7 +53,7 @@ export function useAddCodexAccountOAuth({
   }, [ui.flowId]);
 
   const stopPolling = useCallback(() => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    if (pollRef.current) { pollRef.current(); pollRef.current = null; }
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
@@ -167,13 +169,14 @@ export function useAddCodexAccountOAuth({
           : `${apiBase}/api/codex-auth/login-status`;
         const pollSession = new AbortController();
         pollAbortRef.current = pollSession;
-        pollRef.current = setInterval(async () => {
+        pollRef.current = startVisibilityPoll(async () => {
           if (pollInFlightRef.current || pollSession.signal.aborted) return;
           pollInFlightRef.current = true;
           // Bound each tick and abort it when stopPolling/cleanup cancels the session.
+          const bounded = createBoundedFetch(10_000);
           const tickSignal = AbortSignal.any([
             pollSession.signal,
-            AbortSignal.timeout(10_000),
+            bounded.signal,
           ]);
           try {
             const stRes = await fetch(statusUrl, { signal: tickSignal });
@@ -218,6 +221,7 @@ export function useAddCodexAccountOAuth({
               dispatch({ type: "set-status-notice", statusNotice: t("codexAuth.oauthStatusRetrying"), statusTone: "warn" });
             }
           } finally {
+            bounded.clear();
             pollInFlightRef.current = false;
           }
         }, 2000);

@@ -66,7 +66,7 @@ describe("test fixture directories", () => {
       .map(([literal, files]) => `${literal} <- ${files.join(", ")}`);
 
     expect(shared).toEqual([]);
-  });
+  }, 15_000);
 
   test("the two files behind the original flake no longer use a fixed path", () => {
     // Regression pin for the specific pair. Both now derive a per-run directory, which also

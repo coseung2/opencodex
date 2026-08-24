@@ -58,7 +58,7 @@ import { createAdmissionGate, ResourceAdmissionError, type AdmissionMetrics } fr
 
 import { JAWCODE_CATALOG_AUGMENT_PROVIDERS, catalogModelSlug, shouldExposeRoutedModel } from "./parsing";
 import type { CatalogModel } from "./parsing";
-import { disabledNativeSlugs, hasComboTargets, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiSlugs, nativeParallelToolCalls, nativeReasoningEfforts } from "./metadata";
+import { disabledNativeSlugs, hasComboTargets, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, nativeOpenAiSlugs, nativeParallelToolCalls, nativeReasoningEfforts } from "./metadata";
 import { deriveComboCatalogModel, normalizedOpenAiApiSignature, openAiApiCollisionWarnings, replaceLastComboCatalogOmissions, warnUncataloguedComboOnce } from "./aggregation";
 import type { ComboCatalogOmission } from "./aggregation";
 
@@ -274,8 +274,13 @@ export function warnDroppedConfiguredIdsOnce(name: string, droppedConfiguredIds:
 }
 
 export function isGlm52ModelId(id: string): boolean {
-  const normalized = id.toLowerCase();
+  const normalized = id.trim().toLowerCase();
   return normalized === "glm-5.2" || normalized === "glm-5.2[1m]";
+}
+
+export function isGlm53ModelId(id: string): boolean {
+  const normalized = id.trim().toLowerCase();
+  return normalized === "glm-5.3" || normalized === "glm-5.3[1m]";
 }
 
 function plainRecord(value: unknown): Record<string, unknown> | undefined {
@@ -358,6 +363,17 @@ function modelInputModalities(
     value === "text" || value === "image" || value === "audio"
   ));
   if (explicit && explicit.length > 0) return explicit;
+  const architecture = plainRecord(item.architecture);
+  const architectureModality = typeof architecture?.modality === "string"
+    ? normalizedMetadataString(architecture.modality, 64)
+    : undefined;
+  if (architectureModality?.includes("->")) {
+    const [rawInput = ""] = architectureModality.split("->");
+    const inferred = rawInput
+      .split("+")
+      .filter(value => value === "text" || value === "image" || value === "audio");
+    if (inferred.length > 0) return [...new Set(inferred)];
+  }
   if (capabilityRecord?.vision === false) return ["text"];
   if (capabilityRecord?.vision === true || capabilities?.some(value => value === "vision" || value === "image-input")) {
     return ["text", "image"];
@@ -385,9 +401,11 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
     ? sanitizeCodexReasoningEfforts(listedReasoningEfforts)
     : typeof rawReasoningEfforts === "boolean"
       ? (rawReasoningEfforts
-        ? ((providerName === "neuralwatt" || providerName === "zai") && isGlm52ModelId(item.id)
-          ? ["low", "medium", "high", "xhigh", "max"]
-          : ["low", "medium", "high", "xhigh"])
+        ? ((providerName === "neuralwatt" || providerName === "zai") && isGlm53ModelId(item.id)
+          ? ["low", "high", "max"]
+          : (providerName === "neuralwatt" || providerName === "zai") && isGlm52ModelId(item.id)
+            ? ["low", "medium", "high", "xhigh", "max"]
+            : ["low", "medium", "high", "xhigh"])
         : [])
       : undefined;
   const capabilities = modelCapabilities(item);
@@ -756,7 +774,7 @@ async function gatherRoutedModelsUncached(
         id: slug,
         owned_by: "openai",
         contextWindow,
-        maxInputTokens: contextWindow,
+        maxInputTokens: nativeOpenAiMaxInputTokens(slug) ?? contextWindow,
         inputModalities: nativeInputModalities(slug),
         reasoningEfforts: nativeReasoningEfforts(slug),
         ...(nativeParallelToolCalls(slug) ? { parallelToolCalls: true } : {}),

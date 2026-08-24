@@ -6,6 +6,8 @@ import { Notice } from "../ui";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
+import { createBoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 import { DebugClaudeInboundPanel } from "./debug-claude-inbound-panel";
 import { DebugLogViewer } from "./debug-log-viewer";
 import { DebugPageHeader, DebugSettingsPanel } from "./debug-settings-panel";
@@ -147,14 +149,20 @@ export default function Debug({ apiBase, embedded, active = true }: { apiBase: s
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stream identity only
   }, [active, apiBase, stream, streamEnabled]);
 
-  const pollLogs = useEffectEvent((initial: boolean) => {
-    void fetchLogs(initial);
+  const pollInFlightRef = useRef(false);
+  const pollTick = useEffectEvent(() => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    const bounded = createBoundedFetch(10_000);
+    void fetchLogs(false, bounded.signal).finally(() => {
+      bounded.clear();
+      pollInFlightRef.current = false;
+    });
   });
 
   useEffect(() => {
     if (!active || !follow || !streamEnabled) return;
-    const interval = setInterval(() => pollLogs(false), 1000);
-    return () => clearInterval(interval);
+    return startVisibilityPoll(() => pollTick(), 1000);
   }, [active, follow, streamEnabled]);
 
   useEffect(() => {

@@ -47,6 +47,7 @@ import {
 } from "../src/codex/routing";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 import { setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+import { setCodexAccountPaused } from "../src/codex/account-pause";
 
 let testDir: string;
 let previousOpencodexHome: string | undefined;
@@ -198,6 +199,39 @@ describe("Codex auth context", () => {
       accessToken: "pool_token",
       chatgptAccountId: "pool_acc",
     });
+  });
+
+  test("an exact account selector serves only its credential and fails closed when paused", async () => {
+    const cfg = config();
+    cfg.codexAccounts?.push({
+      id: "pool-b",
+      email: "pool-b@example.test",
+      isMain: false,
+      chatgptAccountId: "pool_b_acc",
+    });
+    cfg.codexAccountPriorities = { "pool-a": 100, "pool-b": -100 };
+    for (const id of ["pool-a", "pool-b"]) {
+      saveCodexAccountCredential(id, {
+        accessToken: `${id}-access`,
+        refreshToken: `${id}-refresh`,
+        expiresAt: Date.now() + 300_000,
+        chatgptAccountId: `${id}-chatgpt`,
+      });
+    }
+
+    const selected = await resolveCodexAuthContext(new Headers(), cfg, "direct", {
+      accountId: "pool-b",
+      modelId: "gpt-5.6-sol",
+    });
+    expect(selected).toMatchObject({ kind: "pool", accountId: "pool-b", fixedAccount: true });
+    expect(headersForCodexAuthContext(new Headers(), selected).get("authorization"))
+      .toBe("Bearer pool-b-access");
+    expect(cfg.activeCodexAccountId).toBe("pool-a");
+
+    setCodexAccountPaused(cfg, "pool-b", true);
+    await expect(resolveCodexAuthContext(new Headers(), cfg, "pool", { accountId: "pool-b" }))
+      .rejects.toThrow("Selected Codex account is unavailable");
+    expect(cfg.codexAccounts?.map(account => account.id)).toContain("pool-b");
   });
 
   test("exclusion selects another eligible account without changing the active account", async () => {

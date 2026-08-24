@@ -9,9 +9,10 @@ import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { OcxUsage } from "../types";
 import type { AdapterRequest } from "../adapters/base";
-import { redactSecretString } from "../lib/redact";
+import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import {
   appendUsageEntry,
+  isCodexUsageAccountLogLabel,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
   isKnownUsageSurface,
@@ -37,6 +38,8 @@ import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/
 export interface RequestLogContext {
   model: string;
   provider: string;
+  /** Stable non-PII Codex Pool account identity for durable usage attribution. */
+  accountLogLabel?: string;
   /** TTFT: ms from request start to the first non-empty model output delta (WP4, devlog 040). */
   firstOutputMs?: number;
   /** Best-effort chat/session correlation for Logs grouping (#330). Opaque; omit when unknown. */
@@ -53,6 +56,8 @@ export interface RequestLogContext {
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
   requestedModel?: string;
+  /** Original helper model when shadow-call interception rewrote the request. */
+  shadowCallRewrittenFrom?: string;
   /** Internal structural combo identity; omitted from RequestLogEntry/JSONL. */
   comboId?: string;
   requestedEffort?: string;
@@ -102,6 +107,7 @@ export interface RequestLogEntry {
   timestamp: number;
   model: string;
   provider: string;
+  accountLogLabel?: string;
   /** TTFT: ms from request start to the first non-empty model output delta; unset for non-streaming/tool-only. */
   firstOutputMs?: number;
   surface?: "claude" | "claude-desktop" | "grok";
@@ -118,6 +124,8 @@ export interface RequestLogEntry {
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   requestedModel?: string;
+  /** Original helper model when shadow-call interception rewrote the request. */
+  shadowCallRewrittenFrom?: string;
   requestedEffort?: string;
   effectiveEffort?: string;
   reasoningWireField?: string;
@@ -219,10 +227,16 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     timestamp: entry.timestamp,
     model: entry.model,
     provider: entry.provider,
+    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+      ? { accountLogLabel: entry.accountLogLabel }
+      : {}),
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(entry.shadowCallRewrittenFrom
+      ? { shadowCallRewrittenFrom: entry.shadowCallRewrittenFrom }
+      : {}),
     ...(entry.requestedEffort ? { requestedEffort: entry.requestedEffort } : {}),
     ...(entry.effectiveEffort ? { effectiveEffort: entry.effectiveEffort } : {}),
     ...(entry.reasoningWireField ? { reasoningWireField: entry.reasoningWireField } : {}),
@@ -281,6 +295,14 @@ export function hydrateRequestLogsFromDisk(
 }
 
 export function addRequestLog(entry: RequestLogEntry) {
+  const safeEntry = { ...entry };
+  if (safeEntry.accountLogLabel !== undefined && !isCodexUsageAccountLogLabel(safeEntry.accountLogLabel)) {
+    delete safeEntry.accountLogLabel;
+  }
+  const shadowCallRewrittenFrom = sanitizeLogMetadataString(safeEntry.shadowCallRewrittenFrom);
+  if (shadowCallRewrittenFrom) safeEntry.shadowCallRewrittenFrom = shadowCallRewrittenFrom;
+  else delete safeEntry.shadowCallRewrittenFrom;
+  entry = safeEntry;
   retainRequestLogEntry(entry);
   try {
     // Failure diagnostics survive the 200-entry ring buffer by riding the persisted
@@ -299,6 +321,9 @@ export function addRequestLog(entry: RequestLogEntry) {
       timestamp: entry.timestamp,
       provider: entry.provider,
       model: entry.model,
+      ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+        ? { accountLogLabel: entry.accountLogLabel }
+        : {}),
       ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
       // This function REBUILDS the persisted row field by field rather than
       // spreading it, so a field missing here reaches /api/logs and never
@@ -309,6 +334,9 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
       ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
       ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+      ...(entry.shadowCallRewrittenFrom
+        ? { shadowCallRewrittenFrom: entry.shadowCallRewrittenFrom }
+        : {}),
       ...(entry.requestedEffort ? { requestedEffort: entry.requestedEffort } : {}),
       ...(entry.effectiveEffort ? { effectiveEffort: entry.effectiveEffort } : {}),
       ...(entry.reasoningWireField ? { reasoningWireField: entry.reasoningWireField } : {}),
@@ -786,12 +814,18 @@ export function addFinalRequestLog(
     timestamp: start,
     model: isCombo ? logCtx.requestedModel! : logCtx.model,
     provider: isCombo ? "combo" : logCtx.provider,
+    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
+      ? { accountLogLabel: logCtx.accountLogLabel }
+      : {}),
     ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
     ...(logCtx.requestedModel ? { requestedModel: logCtx.requestedModel } : {}),
+    ...(sanitizeLogMetadataString(logCtx.shadowCallRewrittenFrom)
+      ? { shadowCallRewrittenFrom: sanitizeLogMetadataString(logCtx.shadowCallRewrittenFrom)! }
+      : {}),
     ...(logCtx.requestedEffort ? { requestedEffort: logCtx.requestedEffort } : {}),
     ...(logCtx.effectiveEffort ? { effectiveEffort: logCtx.effectiveEffort } : {}),
     ...(logCtx.reasoningWireField ? { reasoningWireField: logCtx.reasoningWireField } : {}),
@@ -849,6 +883,10 @@ export function filterRequestLogs(logs: RequestLogEntry[], params: URLSearchPara
     filtered = /^[1-5]xx$/.test(status)
       ? filtered.filter(entry => Math.floor(entry.status / 100) === Number(status[0]))
       : filtered.filter(entry => String(entry.status) === status);
+  }
+  const helper = params.get("helper")?.trim().toLowerCase();
+  if (helper === "intercepted" || helper === "1" || helper === "true") {
+    filtered = filtered.filter(entry => Boolean(entry.shadowCallRewrittenFrom));
   }
   const tailRaw = params.get("tail")?.trim();
   if (tailRaw) {
@@ -939,10 +977,13 @@ export function sealRequestAttemptIdentity(
   attempt: PersistedUsageAttempt | undefined,
   provider: string,
   adapter: string,
+  accountLogLabel?: string,
 ): void {
   if (!attempt) return;
   attempt.provider = provider;
   attempt.adapter = adapter;
+  if (isCodexUsageAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
+  else delete attempt.accountLogLabel;
 }
 
 export function noteAttemptSend(

@@ -19,6 +19,10 @@ const MAX_STICKY_LIMIT = 100;
 const DEFAULT_STRATEGY: OcxAccountPoolRotationStrategy = "quota";
 const VALID_STRATEGIES = new Set<OcxAccountPoolRotationStrategy>(["quota", "round-robin", "fill-first"]);
 
+export const DEFAULT_ACCOUNT_PRIORITY = 0;
+export const MIN_ACCOUNT_PRIORITY = -100;
+export const MAX_ACCOUNT_PRIORITY = 100;
+
 /** Strict parse for management APIs — returns null instead of defaulting. */
 export function parseAccountPoolStrategy(raw: unknown): OcxAccountPoolRotationStrategy | null {
   if (typeof raw === "string" && VALID_STRATEGIES.has(raw as OcxAccountPoolRotationStrategy)) {
@@ -43,6 +47,49 @@ export function normalizeAccountPoolStickyLimit(raw: unknown): number {
   return parseAccountPoolStickyLimit(raw) ?? DEFAULT_STICKY_LIMIT;
 }
 
+export function parseAccountPriority(raw: unknown): number | null {
+  return typeof raw === "number"
+    && Number.isInteger(raw)
+    && raw >= MIN_ACCOUNT_PRIORITY
+    && raw <= MAX_ACCOUNT_PRIORITY
+    ? raw
+    : null;
+}
+
+export function normalizeAccountPriority(raw: unknown): number {
+  return parseAccountPriority(raw) ?? DEFAULT_ACCOUNT_PRIORITY;
+}
+
+/**
+ * Narrow eligible ids to the highest configured tier that still has quota headroom.
+ * Equal-priority pools and fully drained pools preserve the caller's exact list/order.
+ */
+export function selectPriorityTier(
+  ids: readonly string[],
+  priorityOf: (id: string) => number,
+  hasHeadroom: (id: string) => boolean,
+  pinnedId?: string,
+): readonly string[] {
+  if (ids.length <= 1) return ids;
+  const priorities = ids.map(priorityOf);
+  const firstPriority = priorities[0]!;
+  if (priorities.every(priority => priority === firstPriority)) return ids;
+
+  let ceiling = Number.POSITIVE_INFINITY;
+  if (pinnedId !== undefined) {
+    const pinnedIndex = ids.indexOf(pinnedId);
+    if (pinnedIndex >= 0 && hasHeadroom(pinnedId)) ceiling = priorities[pinnedIndex]!;
+  }
+
+  const tiers = [...new Set(priorities)].sort((a, b) => b - a);
+  for (const tier of tiers) {
+    if (tier > ceiling) continue;
+    const members = ids.filter((_, index) => priorities[index] === tier);
+    if (members.some(hasHeadroom)) return members;
+  }
+  return ids;
+}
+
 function getOrCreateState(poolKey: string): SelectionState {
   let state = selectionState.get(poolKey);
   if (!state) {
@@ -60,7 +107,7 @@ function cloneSelectionState(state: SelectionState): SelectionState {
   };
 }
 
-function smoothWeightedIndex(ids: string[], state: SelectionState): number {
+function smoothWeightedIndex(ids: readonly string[], state: SelectionState): number {
   let best = -1;
   let bestScore = Number.NEGATIVE_INFINITY;
   let total = 0;
@@ -87,7 +134,7 @@ function smoothWeightedIndex(ids: string[], state: SelectionState): number {
  * either the live map entry or a scratch/clone for dry-run peek.
  */
 function pickRoundRobinFromState(
-  eligibleIds: string[],
+  eligibleIds: readonly string[],
   stickyLimit: number,
   state: SelectionState,
   commitSticky: boolean,
@@ -118,7 +165,7 @@ function pickRoundRobinFromState(
 
 export function pickRoundRobinAccount(
   poolKey: string,
-  eligibleIds: string[],
+  eligibleIds: readonly string[],
   stickyLimit: number,
 ): string | null {
   return pickRoundRobinFromState(eligibleIds, stickyLimit, getOrCreateState(poolKey), true);
@@ -130,7 +177,7 @@ export function pickRoundRobinAccount(
  */
 export function peekRoundRobinAccount(
   poolKey: string,
-  eligibleIds: string[],
+  eligibleIds: readonly string[],
   stickyLimit: number,
 ): string | null {
   const live = selectionState.get(poolKey);

@@ -79,6 +79,23 @@ pub fn set_codex_account_paused(id: &str, paused: bool) -> Result<(), String> {
     Ok(())
 }
 
+pub fn consume_reset_credit(account_id: &str) -> Result<ResetCreditConsumeResponse, String> {
+    post_json(
+        "/api/codex-auth/reset-credits/consume",
+        &serde_json::json!({ "accountId": account_id }),
+    )
+}
+
+pub fn fetch_reset_credits(account_id: &str) -> Result<ResetCreditsResponse, String> {
+    get_json(
+        &format!(
+            "/api/codex-auth/reset-credits?accountId={}",
+            encode_component(account_id)
+        ),
+        20_000,
+    )
+}
+
 /// Pause or resume one OAuth pool account (kiro, anthropic, xai, ...).
 pub fn set_oauth_account_paused(provider: &str, id: &str, paused: bool) -> Result<(), String> {
     let body = serde_json::json!({
@@ -491,6 +508,34 @@ mod tests {
         assert!(pool.accounts[1].active);
         assert!(pool.accounts[1].needs_reauth);
         assert_eq!(pool.accounts[1].health, "Reauth required");
+    }
+
+    #[test]
+    fn reset_credit_consume_response_accepts_authoritative_remaining() {
+        let response: ResetCreditConsumeResponse = serde_json::from_value(serde_json::json!({
+            "code": "reset",
+            "remaining": 2
+        }))
+        .expect("response parses");
+
+        assert_eq!(response.code, "reset");
+        assert_eq!(response.remaining, Some(2));
+    }
+
+    #[test]
+    fn reset_credit_details_preserve_fifo_dates() {
+        let response: ResetCreditsResponse = serde_json::from_value(serde_json::json!({
+            "credits": [
+                {"granted_at": "2026-08-22T00:27:48Z", "expires_at": "2026-09-21T00:27:48Z"},
+                {"granted_at": "2026-08-23T00:27:48Z", "expires_at": "2026-09-22T00:27:48Z"}
+            ],
+            "available_count": 2
+        }))
+        .expect("details parse");
+
+        assert_eq!(response.available_count, 2);
+        assert_eq!(response.credits[0].granted_at, "2026-08-22T00:27:48Z");
+        assert_eq!(response.credits[1].expires_at, "2026-09-22T00:27:48Z");
     }
 
     #[test]

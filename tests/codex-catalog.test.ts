@@ -1049,9 +1049,9 @@ describe("Codex catalog routed normalization", () => {
     expect((gpt56?.supported_reasoning_levels as { effort: string }[]).map(l => l.effort)).toEqual([
       "low", "medium", "high", "xhigh", "max", "ultra",
     ]);
-    expect(gpt56?.context_window).toBe(372_000);
-    expect(gpt56?.max_context_window).toBe(372_000);
-    expect(gpt56?.auto_compact_token_limit).toBe(334_800);
+    expect(gpt56?.context_window).toBe(1_050_000);
+    expect(gpt56?.max_context_window).toBe(1_050_000);
+    expect(gpt56?.auto_compact_token_limit).toBe(922_000);
     expect((gpt55?.supported_reasoning_levels as { effort: string }[]).map(l => l.effort)).toEqual([
       "low", "medium", "high", "xhigh", "max", "ultra",
     ]);
@@ -1093,7 +1093,8 @@ describe("Codex catalog routed normalization", () => {
       expect(e).not.toHaveProperty("minimal_client_version");
       expect(e).not.toHaveProperty("prefer_websockets");
       expect(e).not.toHaveProperty("supports_websockets");
-      expect(e?.context_window).toBe(372_000);
+      expect(e?.context_window).toBe(1_050_000);
+      expect(e?.auto_compact_token_limit).toBe(922_000);
       expect(e?.tool_mode).toBe("code_mode_only");
       expect(e?.use_responses_lite).toBe(true);
     }

@@ -99,6 +99,19 @@ export function defaultCodexAccountNamespaces(
   return namespaces;
 }
 
+/** Initialize generated selectors only for an explicit opt-in with no existing bindings. */
+export function initializeDefaultCodexAccountNamespaces(
+  config: Pick<
+    OcxConfig,
+    "codexAccountPickerEnabled" | "codexAccountNamespaces" | "codexAccounts" | "combos" | "providers"
+  >,
+): boolean {
+  if (config.codexAccountPickerEnabled !== true
+    || Object.keys(config.codexAccountNamespaces ?? {}).length > 0) return false;
+  config.codexAccountNamespaces = defaultCodexAccountNamespaces(config);
+  return true;
+}
+
 /**
  * Add one account to a generated map without renaming or replacing explicit existing entries.
  * The account-creation layer must reject a new id that already equals an existing selector key.
@@ -146,4 +159,12 @@ export function codexAccountNamespaceEntries(
 ): Array<[string, string]> {
   return Object.entries(config.codexAccountNamespaces ?? {})
     .map(([namespace, accountId]) => [namespace, normalizeCodexAccountNamespaceTarget(accountId)]);
+}
+
+/** Existing hand-written maps remain enabled unless explicitly hidden. */
+export function codexAccountPickerEnabled(
+  config: Pick<OcxConfig, "codexAccountNamespaces" | "codexAccountPickerEnabled">,
+): boolean {
+  return (config.codexAccountPickerEnabled === undefined || config.codexAccountPickerEnabled === true)
+    && Object.keys(config.codexAccountNamespaces ?? {}).length > 0;
 }

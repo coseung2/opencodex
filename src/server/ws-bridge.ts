@@ -5,6 +5,7 @@ import { headersForCodexAuthContext } from "../codex/auth-context";
 import type { ResponsesTerminalStatus } from "../bridge";
 import type { DataPlaneAdmission } from "./auth-cors";
 import type { AdmissionReservation } from "../lib/admission";
+import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
 
 const OPEN = 1;
 type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
@@ -224,7 +225,7 @@ export async function pumpResponsesSseToWebSocket(
   ws.data.cancel = cancel;
 
   const decoder = new TextDecoder();
-  let buffer = "";
+  const framer = new BoundedSseFrameBuffer();
   let terminalSeen = false;
 
   const handlePayload = (payload: string): boolean => {
@@ -259,17 +260,14 @@ export async function pumpResponsesSseToWebSocket(
     while (!terminalSeen) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let next: { block: string; rest: string } | null;
-      while ((next = nextSseBlock(buffer))) {
-        buffer = next.rest;
-        const payload = parseSseBlock(next.block);
+      for (const frame of framer.feed(value)) {
+        const payload = parseSseBlock(decoder.decode(frame.block));
         if (payload && handlePayload(payload)) break;
       }
     }
-    buffer += decoder.decode();
-    if (!terminalSeen && buffer.trim()) {
-      const payload = parseSseBlock(buffer);
+    const tail = framer.finish();
+    if (!terminalSeen && tail.byteLength > 0) {
+      const payload = parseSseBlock(decoder.decode(tail));
       if (payload) handlePayload(payload);
     }
     if (!terminalSeen && isCurrent() && !clientCancelled) {
@@ -277,11 +275,19 @@ export async function pumpResponsesSseToWebSocket(
       sendProtocolError(ws, 502, "Upstream stream ended before response terminal event");
     }
   } catch (err) {
+    framer.dispose();
+    if (err instanceof WsSendDroppedError) throw err;
     if (!terminalSeen && isCurrent() && ws.readyState === OPEN) {
-      if (!(err instanceof WsSendDroppedError)) reportTerminal("incomplete");
-      sendProtocolError(ws, 502, err instanceof Error ? err.message : String(err));
+      reportTerminal("incomplete");
+      try {
+        sendProtocolError(ws, 502, err instanceof Error ? err.message : String(err));
+      } catch (sendErr) {
+        if (!(sendErr instanceof WsSendDroppedError)) throw sendErr;
+      }
     }
   } finally {
+    framer.dispose();
+    void reader.cancel().catch(() => {});
     if (ws.data.cancel === cancel) ws.data.cancel = undefined;
   }
 }

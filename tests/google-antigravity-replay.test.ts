@@ -7,6 +7,7 @@ import {
   clearAntigravityReplay,
   evictOldestAntigravityReplayForBudget,
   observeAntigravityReplay,
+  scopedAntigravityReplaySessionId,
   setAntigravityReplayLimitsForTests,
 } from "../src/adapters/google-antigravity-replay";
 import { sanitizeAntigravityClaudeSignatures } from "../src/adapters/google-antigravity-wire";
@@ -34,6 +35,27 @@ describe("antigravity reasoning-replay cache", () => {
     ];
     applyAntigravityReplay(MODEL, SESSION, contents);
     expect((contents[1].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBe(SIG);
+  });
+
+  test("credential and destination scopes cannot replay each other's thought signatures", () => {
+    const scopeA = scopedAntigravityReplaySessionId(SESSION, "https://cca-a.test", "token-a");
+    const scopeB = scopedAntigravityReplaySessionId(SESSION, "https://cca-a.test", "token-b");
+    const scopeC = scopedAntigravityReplaySessionId(SESSION, "https://cca-b.test", "token-a");
+    expect(scopeA).toBeTruthy();
+    expect(scopeB).not.toBe(scopeA);
+    expect(scopeC).not.toBe(scopeA);
+
+    observeAntigravityReplay(MODEL, scopeA!, [fcPart("get_x", {}, SIG)]);
+    const sameScope = [{ role: "model", parts: [fcPart("get_x", {})] }];
+    const otherCredential = [{ role: "model", parts: [fcPart("get_x", {})] }];
+    const otherDestination = [{ role: "model", parts: [fcPart("get_x", {})] }];
+    applyAntigravityReplay(MODEL, scopeA!, sameScope);
+    applyAntigravityReplay(MODEL, scopeB!, otherCredential);
+    applyAntigravityReplay(MODEL, scopeC!, otherDestination);
+
+    expect((sameScope[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBe(SIG);
+    expect((otherCredential[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBeUndefined();
+    expect((otherDestination[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBeUndefined();
   });
 
   test("ignores signatures shorter than the minimum length", () => {

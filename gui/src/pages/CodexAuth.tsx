@@ -4,6 +4,8 @@ import CodexAccountPool from "../components/CodexAccountPool";
 import { codexAccountModeState, type CodexAccountModeState } from "../codex-multi-state";
 import { ensureOpenAiProvider, openAiAccountProviderState, OpenAiEnableError } from "../provider-payload";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
+import { createBoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 
 export type OpenAiAccountBannerState = CodexAccountModeState | "invalid" | null;
 
@@ -110,8 +112,9 @@ export default function CodexAuth({ apiBase }: { apiBase: string }) {
   const [enableError, setEnableError] = useState("");
 
   const loadMode = useCallback(async () => {
+    const bounded = createBoundedFetch(15_000);
     try {
-      const res = await fetch(`${apiBase}/api/config`);
+      const res = await fetch(`${apiBase}/api/config`, { signal: bounded.signal });
       if (!res.ok) throw new Error(String(res.status));
       const config = await res.json();
       const providerState = openAiAccountProviderState(openaiProviderFromConfig(config));
@@ -129,6 +132,8 @@ export default function CodexAuth({ apiBase }: { apiBase: string }) {
       writeSessionListCache(configCacheKey, { bannerState: mode, accountModeState: mode });
     } catch {
       // Keep last-good banner on transient config failures.
+    } finally {
+      bounded.clear();
     }
   }, [apiBase, configCacheKey]);
 
@@ -142,8 +147,8 @@ export default function CodexAuth({ apiBase }: { apiBase: string }) {
       initialModeKeyRef.current = apiBase;
       void Promise.resolve().then(() => { void loadMode(); });
     }
-    const iv = window.setInterval(() => { void loadMode(); }, 30_000);
-    return () => { window.clearInterval(iv); };
+    const stop = startVisibilityPoll(() => { void loadMode(); }, 30_000);
+    return () => { stop(); };
   }, [apiBase, loadMode]);
 
   const enableOpenAi = async () => {

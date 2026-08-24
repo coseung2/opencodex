@@ -31,7 +31,7 @@ function nativeTemplate(): Record<string, unknown> {
 
 const EXPECTED_KEY_PROVIDER_IDS = [
   "anthropic-apikey", "openai-apikey", "umans", "opencode-go", "neuralwatt", "openrouter", "orcarouter", "bizrouter", "groq", "google", "google-vertex", "azure-openai",
-  "deepseek", "cerebras", "deepinfra", "hyperbolic", "baseten", "together", "fireworks", "firepass", "moonshot",
+  "deepseek", "cerebras", "deepinfra", "hyperbolic", "nscale", "vultr", "baseten", "nebius", "digitalocean", "scaleway", "together", "fireworks", "firepass", "moonshot",
   "huggingface", "nvidia", "venice", "zai", "zhipu-bigmodel", "nanogpt", "synthetic", "siliconflow", "qwen-cloud", "tencent-coding-plan",
   "volcengine", "volcengine-coding-plan", "volcengine-agent-plan", "qianfan", "alibaba", "alibaba-token-plan", "alibaba-token-plan-intl", "parallel", "zenmux", "litellm", "ollama-cloud", "mistral",
   "minimax", "minimax-cn", "kimi-code", "opencode-zen", "vercel-ai-gateway",
@@ -59,7 +59,7 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS.umans.noVisionModels).toContain("umans-glm-5.2");
     // Zen Go text-only models are vision-sidecar covered; Kimi K2.7 Code is multimodal and must NOT be listed.
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].noVisionModels).toEqual([
-      "glm-5.2", "glm-5", "glm-5.1",
+      "glm-5.3", "glm-5.2", "glm-5", "glm-5.1",
       "deepseek-v4-flash", "deepseek-v4-pro",
       "mimo-v2-pro", "mimo-v2.5-pro",
       "minimax-m2.5", "minimax-m2.7",
@@ -80,6 +80,7 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].noPenaltyModels).toContain("kimi-k3");
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].preserveReasoningContentModels).toContain("kimi-k3");
     expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-coder"]).toBe(262_144);
+    expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-glm-5.3"]).toBe(405_504);
     expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-glm-5.2"]).toBe(405_504);
     expect(KEY_LOGIN_PROVIDERS.umans.modelInputModalities?.["umans-coder"]).toEqual(["text", "image"]);
     expect(KEY_LOGIN_PROVIDERS.umans.modelInputModalities?.["umans-glm-5.2"]).toEqual(["text"]);
@@ -100,6 +101,7 @@ describe("provider registry parity", () => {
     const derived = deriveKeyLoginMap()["openai-apikey"];
     expect(derived.modelMaxInputTokens).not.toBe(apiRegistry.modelMaxInputTokens);
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("anthropic/claude-sonnet-5");
+    expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("stealth/ox-alpha");
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("openai/gpt-5.6-sol");
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("openai/gpt-5.6-terra");
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("openai/gpt-5.6-luna");
@@ -108,6 +110,7 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS.openrouter.modelContextWindows?.["openai/gpt-5.6-terra"]).toBe(1_050_000);
     expect(KEY_LOGIN_PROVIDERS.openrouter.modelContextWindows?.["openai/gpt-5.6-luna"]).toBe(1_050_000);
     expect(KEY_LOGIN_PROVIDERS.deepseek.models).toContain("deepseek-v4-pro");
+    expect(KEY_LOGIN_PROVIDERS.deepseek.models).toContain("deepseek-v4-flash-vision-exp");
     expect(KEY_LOGIN_PROVIDERS.deepseek.modelReasoningEfforts?.["deepseek-v4-pro"]).toEqual(["high", "xhigh", "max"]);
     expect(KEY_LOGIN_PROVIDERS.deepseek.modelReasoningEffortMap?.["deepseek-v4-pro"]?.xhigh).toBe("max");
     expect(KEY_LOGIN_PROVIDERS.deepseek.modelReasoningEffortMap?.["deepseek-v4-pro"]?.max).toBe("max");
@@ -216,9 +219,11 @@ describe("provider registry parity", () => {
       baseUrl: "https://api.deepseek.com",
       defaultModel: "deepseek-v4-flash",
       modelContextWindows: {
-        "deepseek-v4-flash": 1_000_000,
-        "deepseek-v4-pro": 1_000_000,
+        "deepseek-v4-flash": 1_048_576,
+        "deepseek-v4-pro": 1_048_576,
+        "deepseek-v4-flash-vision-exp": 1_048_576,
       },
+      modelInputModalities: { "deepseek-v4-flash-vision-exp": ["text", "image"] },
     });
 
     const minimaxModels = [
@@ -265,22 +270,37 @@ describe("provider registry parity", () => {
       liveModels: false,
       models: [
         "qwen3.8-max-preview", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash",
-        "glm-5.2", "deepseek-v4-pro",
+        "glm-5.3", "glm-5.2", "deepseek-v4-pro",
       ],
       modelInputModalities: {
         "qwen3.8-max-preview": ["text", "image"],
         "qwen3.7-max": ["text", "image"],
+        "qwen3.7-plus": ["text", "image"],
+        "qwen3.6-flash": ["text", "image"],
+        "glm-5.3": ["text"],
+        "glm-5.2": ["text"],
+        "deepseek-v4-pro": ["text"],
       },
       modelReasoningEfforts: {
         "qwen3.8-max-preview": ["low", "medium", "high", "xhigh", "max"],
+        "qwen3.7-max": ["low", "medium", "high", "xhigh", "max"],
+        "qwen3.7-plus": ["low", "medium", "high", "xhigh", "max"],
+        "qwen3.6-flash": ["low", "medium", "high", "xhigh", "max"],
+        "glm-5.3": ["low", "high", "max"],
+        "glm-5.2": ["low", "medium", "high", "xhigh", "max"],
+        "deepseek-v4-pro": ["high", "xhigh", "max"],
       },
       modelContextWindows: {
         "qwen3.8-max-preview": 983_616,
         "qwen3.7-max": 1_000_000,
+        "qwen3.7-plus": 1_000_000,
+        "qwen3.6-flash": 1_000_000,
+        "glm-5.3": 1_000_000,
+        "glm-5.2": 1_000_000,
         "deepseek-v4-pro": 1_000_000,
       },
-      noVisionModels: ["glm-5.2", "deepseek-v4-pro"],
-      preserveReasoningContentModels: expect.arrayContaining(["qwen3.8-max-preview", "qwen3.7-max", "qwen3.7-plus"]),
+      noVisionModels: ["glm-5.3", "glm-5.2", "deepseek-v4-pro"],
+      preserveReasoningContentModels: ["glm-5.3", "glm-5.2", "deepseek-v4-pro", "qwen3.8-max-preview", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash"],
     });
     expect(KEY_LOGIN_PROVIDERS["alibaba-token-plan"].thinkingBudgetModels)
       .toContain("qwen3.8-max-preview");
@@ -292,6 +312,7 @@ describe("provider registry parity", () => {
 
     const neuralwatt = PROVIDER_REGISTRY.find(entry => entry.id === "neuralwatt");
     expect(neuralwatt?.models).toEqual([
+      "glm-5.3", "glm-5.3-fast", "glm-5.3-short", "glm-5.3-short-fast",
       "glm-5.2", "glm-5.2-fast", "glm-5.2-short", "glm-5.2-short-fast",
       "kimi-k2.6", "kimi-k2.6-fast", "kimi-k2.7-code",
       "qwen3.5-397b", "qwen3.5-397b-fast", "qwen3.6-35b", "qwen3.6-35b-fast",
@@ -306,6 +327,7 @@ describe("provider registry parity", () => {
     expect(neuralwatt?.noReasoningModels).toContain("glm-5.2-short-fast");
     expect(neuralwatt?.noReasoningModels).not.toContain("kimi-k2.5-fast");
     expect(neuralwatt?.noVisionModels).toEqual([
+      "glm-5.3", "glm-5.3-fast", "glm-5.3-short", "glm-5.3-short-fast",
       "glm-5.2", "glm-5.2-fast", "glm-5.2-short", "glm-5.2-short-fast",
       "qwen3.5-397b", "qwen3.5-397b-fast",
     ]);
@@ -318,7 +340,10 @@ describe("provider registry parity", () => {
     const optedInProviders = PROVIDER_REGISTRY
       .filter(entry => entry.modelSuffixBracketStrip)
       .map(entry => entry.id);
-    expect(zai?.modelContextWindows).toEqual({ "glm-5.2": 1_000_000, "glm-5.2[1m]": 1_000_000 });
+    expect(zai?.modelContextWindows).toEqual({
+      "glm-5.3": 1_000_000, "glm-5.3[1m]": 1_000_000,
+      "glm-5.2": 1_000_000, "glm-5.2[1m]": 1_000_000,
+    });
     expect(providerConfigSeed(zai!).modelSuffixBracketStrip).toBe(true);
     expect(optedInProviders).toEqual(["kimi", "zai", "kimi-code"]);
 
@@ -451,7 +476,7 @@ describe("provider registry parity", () => {
     expect(nvidia?.freeTier).toBe(true);
     expect(nvidia?.authKind).toBe("key");
     expect(nvidia?.keyOptional).toBeUndefined();
-    expect(freeTierProviders).toEqual(["nvidia", "cloudflare-workers-ai"]);
+    expect(freeTierProviders).toEqual(["scaleway", "nvidia", "cloudflare-workers-ai"]);
   });
 
   test("freeTier propagates through config seed, enrich backfill, and presets without overwriting user config", async () => {
@@ -494,7 +519,7 @@ describe("provider registry parity", () => {
     const ollamaCloud = PROVIDER_REGISTRY.find(entry => entry.id === "ollama-cloud");
 
     expect(ollamaCloud?.models).toEqual([
-      "glm-5.2", "deepseek-v4-pro", "qwen3-coder:480b", "gpt-oss:120b",
+      "glm-5.3", "glm-5.2", "deepseek-v4-pro", "qwen3-coder:480b", "gpt-oss:120b",
       "kimi-k2.6", "minimax-m3", "qwen3.5:397b", "gemma4:31b",
     ]);
     expect(ollamaCloud?.models).not.toContain("qwen3-coder");
@@ -609,7 +634,10 @@ describe("provider registry parity", () => {
     expect(OAUTH_PROVIDERS.anthropic.providerConfig.modelContextWindows?.["claude-sonnet-5"]).toBe(1_000_000);
     expect(OAUTH_PROVIDERS.xai.providerConfig.defaultModel).toBe("grok-4.5");
     expect(OAUTH_PROVIDERS.xai.providerConfig.liveModels).toBe(true);
+    expect(OAUTH_PROVIDERS.xai.providerConfig.models).toContain("grok-4.6");
     expect(OAUTH_PROVIDERS.xai.providerConfig.models).toContain("grok-4.5");
+    expect(OAUTH_PROVIDERS.xai.providerConfig.modelContextWindows?.["grok-4.6"]).toBe(500_000);
+    expect(OAUTH_PROVIDERS.xai.providerConfig.modelReasoningEfforts?.["grok-4.6"]).toEqual(["low", "medium", "high", "xhigh"]);
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelContextWindows?.["grok-4.5"]).toBe(500_000);
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelReasoningEfforts?.["grok-4.5"]).toEqual(["low", "medium", "high"]);
     expect(OAUTH_PROVIDERS.xai.providerConfig.noVisionModels).toContain("grok-build-0.1");
@@ -617,9 +645,9 @@ describe("provider registry parity", () => {
     expect(antigravityRegistry?.liveModels).toBe(false);
     expect(providerConfigSeed(antigravityRegistry!).liveModels).toBe(false);
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.liveModels).toBe(false);
-    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.defaultModel).toBe("gemini-3.6-flash");
+    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.defaultModel).toBe("gemini-3.7-flash");
     // Collapsed picker: base models only, no effort-suffix variants.
-    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toContain("gemini-3.6-flash");
+    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toContain("gemini-3.7-flash");
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toContain("gemini-3.1-pro");
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toContain("claude-sonnet-4-6");
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toContain("claude-opus-4-6-thinking");
@@ -627,15 +655,16 @@ describe("provider registry parity", () => {
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toContain("gemini-3.1-flash-image");
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.models).toHaveLength(6);
     // Effort ladders on collapsed base models.
-    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelReasoningEfforts?.["gemini-3.6-flash"]).toEqual(["low", "medium", "high"]);
+    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelReasoningEfforts?.["gemini-3.7-flash"]).toEqual(["low", "medium", "high"]);
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelReasoningEfforts?.["gemini-3.1-pro"]).toEqual(["low", "high"]);
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelReasoningEfforts?.["claude-opus-4-6-thinking"]).toEqual(["low", "medium", "high", "max"]);
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelReasoningEfforts?.["claude-sonnet-4-6"]).toEqual(["low", "medium", "high", "max"]);
     // Context windows on collapsed base models.
-    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelContextWindows?.["gemini-3.6-flash"]).toBe(1_048_576);
+    expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelContextWindows?.["gemini-3.7-flash"]).toBe(1_048_576);
     expect(OAUTH_PROVIDERS["google-antigravity"].providerConfig.modelContextWindows?.["gemini-3.1-pro"]).toBe(1_048_576);
     // Suffix and compat IDs are NOT in the picker list.
     for (const hidden of [
+      "gemini-3.6-flash",
       "gemini-3.6-flash-low",
       "gemini-3.6-flash-medium",
       "gemini-3.6-flash-high",

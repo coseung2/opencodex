@@ -255,7 +255,7 @@ export function useDashboardData(apiBase: string) {
     `dashboard-usage:${apiBase}`,
     [apiBase],
     (signal) => fetchDashboardUsage(apiBase, signal),
-    { pollMs: 60_000, enabled: overviewReady },
+    { pollMs: 60_000, enabled: overviewReady, deadlineMs: 60_000 },
   );
 
   const diagnosticsPoll = useKeyedClientResource(

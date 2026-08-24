@@ -21,7 +21,7 @@ import { isVertexTruncationReason, vertexTruncationErrorMessage } from "./google
 import { ANTIGRAVITY_REQUEST_UA, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
 import { compileGoogleWireBody } from "./google-wire-compiler";
 import { neutralizeIdentity } from "./identity";
-import { antigravityUsesReplayCache, applyAntigravityReplay, clearAntigravityReplay, observeAntigravityReplay } from "./google-antigravity-replay";
+import { antigravityUsesReplayCache, applyAntigravityReplay, clearAntigravityReplay, observeAntigravityReplay, scopedAntigravityReplaySessionId } from "./google-antigravity-replay";
 import { resolveAntigravityEffortWireModel } from "../providers/antigravity-models";
 import {
   isTranslatorBudgetExceededError,
@@ -275,7 +275,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
   // Per-request closure: resolveAdapter builds a fresh adapter per request (server.ts), so buildRequest
   // can stash the CCA model/session for parseStream's reasoning-replay observation.
   let antigravityModel: string | undefined;
-  let antigravitySession: string | undefined;
+  let antigravityReplaySession: string | undefined;
   let restoreGoogleToolName = (name: string): string => name;
   return {
     name: "google",
@@ -333,7 +333,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const mappedEffort = mapReasoningEffort(provider, parsed.modelId, parsed.options.reasoning);
         const { wireModelId, thinkingLevel } = resolveAntigravityEffortWireModel(parsed.modelId, mappedEffort);
         antigravityModel = wireModelId;
-        antigravitySession = sessionId;
+        antigravityReplaySession = scopedAntigravityReplaySessionId(
+          sessionId,
+          provider.baseUrl,
+          provider.apiKey,
+          provider.headers,
+        );
         // Effort → thinkingConfig for CCA (CLIProxyAPI proven: request.generationConfig.thinkingConfig).
         // Suffix/compat IDs return thinkingLevel=undefined — the suffix IS the effort, no contradiction.
         if (thinkingLevel) {
@@ -359,8 +364,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         // Compile names before replay: signatures are keyed by the exact provider-visible name.
         if (Array.isArray((request as { contents?: unknown[] }).contents)) {
           const contents = (request as { contents: unknown[] }).contents;
-          if (antigravityUsesReplayCache(wireModelId)) {
-            applyAntigravityReplay(wireModelId, sessionId, contents);
+          if (antigravityUsesReplayCache(wireModelId) && antigravityReplaySession) {
+            applyAntigravityReplay(wireModelId, antigravityReplaySession, contents);
           } else {
             sanitizeAntigravityClaudeSignatures(contents);
           }
@@ -457,9 +462,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           const err = chunk.error as { message?: string } | undefined;
           // Clear-on-invalid: a signature rejection means our replayed thoughtSignatures are stale.
           // Drop the cache entry so the next turn starts clean instead of re-injecting a bad sig.
-          if (provider.googleMode === "cloud-code-assist" && antigravityModel && antigravitySession
+          if (provider.googleMode === "cloud-code-assist" && antigravityModel && antigravityReplaySession
             && /signature|invalid_argument|invalid argument/i.test(err?.message ?? "")) {
-            clearAntigravityReplay(antigravityModel, antigravitySession);
+            clearAntigravityReplay(antigravityModel, antigravityReplaySession);
           }
           yield { type: "error", message: err?.message ?? "upstream error" };
           return "terminate";
@@ -494,8 +499,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
         const parts = candidates[0].content?.parts as { text?: string; functionCall?: { name: string; args: unknown } }[] | undefined;
         // Antigravity reasoning-replay: record thoughtSignatures from the model parts for the next turn.
-        if (provider.googleMode === "cloud-code-assist" && parts && antigravityModel && antigravitySession) {
-          observeAntigravityReplay(antigravityModel, antigravitySession, parts as unknown[]);
+        if (provider.googleMode === "cloud-code-assist" && parts && antigravityModel && antigravityReplaySession) {
+          observeAntigravityReplay(antigravityModel, antigravityReplaySession, parts as unknown[]);
         }
         if (parts) {
           for (const part of parts) {
@@ -711,8 +716,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const imageBudget = createImageBudget();
       if (candidates?.[0]?.content?.parts) {
         // Non-streaming CCA: observe thoughtSignatures for the next turn, same as the stream path.
-        if (provider.googleMode === "cloud-code-assist" && antigravityModel && antigravitySession) {
-          observeAntigravityReplay(antigravityModel, antigravitySession, candidates[0].content.parts as unknown[]);
+        if (provider.googleMode === "cloud-code-assist" && antigravityModel && antigravityReplaySession) {
+          observeAntigravityReplay(antigravityModel, antigravityReplaySession, candidates[0].content.parts as unknown[]);
         }
         for (const part of candidates[0].content.parts) {
           if (part.text) events.push({ type: "text_delta", text: part.text });

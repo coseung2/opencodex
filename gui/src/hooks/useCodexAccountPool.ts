@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { extractAutoSwitchThresholdPayload } from "../codex-auto-switch";
 import type { AccountQuota } from "../codex-quota-utils";
 import { accountNeedsReauth } from "../oauth-health-display";
+import { createBoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 
 /**
  * Codex account pool DATA layer (WP3 / 030_account_state_lift.md).
@@ -151,6 +153,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
 
   const load = useCallback(async (refreshQuota = false): Promise<boolean> => {
     const generation = ++loadGenerationRef.current;
+    const bounded = createBoundedFetch(20_000);
     setInflightCount(count => count + 1);
     // The try opens immediately after the increment so even a synchronous throw in the
     // observer snapshot below cannot leave the counter stuck above zero.
@@ -167,7 +170,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
 
       const accountsTask = (async (): Promise<boolean> => {
         try {
-          const response = await fetch(`${apiBase}/api/codex-auth/accounts${refreshQuota ? "?refresh=1" : ""}`);
+          const response = await fetch(
+            `${apiBase}/api/codex-auth/accounts${refreshQuota ? "?refresh=1" : ""}`,
+            { signal: bounded.signal },
+          );
           if (!response.ok) throw new Error("account load failed");
           const payload = await response.json();
           if (loadGenerationRef.current === generation) {
@@ -186,7 +192,9 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
 
       const activeTask = (async (): Promise<boolean> => {
         try {
-          const response = await fetch(`${apiBase}/api/codex-auth/active`);
+          const response = await fetch(`${apiBase}/api/codex-auth/active`, {
+            signal: bounded.signal,
+          });
           if (!response.ok) throw new Error("active account load failed");
           const active = await response.json();
           if (loadGenerationRef.current === generation) {
@@ -231,6 +239,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
       if (!hasLoadedRef.current) setLoadState("error");
       return false;
     } finally {
+      bounded.clear();
       setInflightCount(count => Math.max(0, count - 1));
       setFirstAttemptSettled(true);
     }
@@ -273,11 +282,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
     };
   }, [enabled, needsQuotaFill, pauseCount, load]);
 
-  // Background refresh, suspended while any pause lease is held.
+  // Background refresh, suspended while any pause lease is held or the tab is hidden.
   useEffect(() => {
     if (!enabled || pauseCount > 0) return;
-    const interval = window.setInterval(() => { void load(); }, REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
+    return startVisibilityPoll(() => { void load(); }, REFRESH_INTERVAL_MS);
   }, [enabled, load, pauseCount]);
 
   const pauseRefresh = useCallback((): PauseToken => {

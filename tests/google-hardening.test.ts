@@ -281,7 +281,7 @@ describe("google provider hardening", () => {
     expect(events.some(e => e.type === "error")).toBe(false);
   });
 
-  test("sends Gemini Flash thinkingLevel only for direct AI Studio requests", async () => {
+  test("sends Gemini Flash thinkingLevel for direct AI Studio and Antigravity requests", async () => {
     const direct = createGoogleAdapter(provider({
       modelReasoningEfforts: {
         "gemini-3.5-flash": ["minimal", "low", "medium", "high"],
@@ -311,7 +311,7 @@ describe("google provider hardening", () => {
     expect(JSON.parse(high.body).generationConfig.thinkingConfig).toEqual({ thinkingLevel: "high" });
     expect(JSON.parse(unset.body).generationConfig).toBeUndefined();
     expect(JSON.parse(legacy.body).generationConfig.thinkingConfig).toEqual({ thinkingLevel: "medium" });
-    expect(JSON.parse(antigravity.body).request.generationConfig).toBeUndefined();
+    expect(JSON.parse(antigravity.body).request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "high" });
   });
 
   test("publishes audited AI Studio metadata while Vertex stays frozen", () => {

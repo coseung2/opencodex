@@ -997,6 +997,7 @@ test("chatCompletionsToResponsesBody recovers tool_calls function.name from earl
         // Client lost the name on a re-serialized tool_call with same id (should still recover if same turn
         // already registered the name earlier in the same tool_calls array / prior items).
         tool_calls: [
+          { id: "call_a", type: "function", function: { arguments: '{"cmd":"ls"}' } },
           { id: "call_b", type: "function", function: { name: "exec_command", arguments: '{"cmd":"pwd"}' } },
           { id: "call_b", type: "function", function: { arguments: '{"cmd":"pwd"}' } },
         ],
@@ -1004,7 +1005,54 @@ test("chatCompletionsToResponsesBody recovers tool_calls function.name from earl
     ],
   });
   const calls = (body.input as Array<Record<string, unknown>>).filter(i => i.type === "function_call");
+  expect(calls.filter(c => c.call_id === "call_a").map(c => c.name)).toEqual(["exec_command", "exec_command"]);
   expect(calls.some(c => c.call_id === "call_b" && c.name === "exec_command")).toBe(true);
+});
+
+test("chatCompletionsToResponsesBody indexes tool-call names once per call", () => {
+  const count = 1_000;
+  const messages: Array<Record<string, unknown>> = [{ role: "user", content: "start" }];
+  for (let i = 0; i < count; i++) {
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: `linear_call_${i}`,
+        type: "function",
+        function: { name: "exec_command", arguments: "{}" },
+      }],
+    });
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(Map.prototype, "set");
+  if (!descriptor || typeof descriptor.value !== "function") throw new Error("Map.prototype.set is unavailable");
+  const nativeSet = descriptor.value as (
+    this: Map<unknown, unknown>,
+    key: unknown,
+    value: unknown,
+  ) => Map<unknown, unknown>;
+  let matchingSetCalls = 0;
+  let body: Record<string, unknown> | null = null;
+  const countingSet: typeof Map.prototype.set = function <K, V>(
+    this: Map<K, V>,
+    key: K,
+    value: V,
+  ): Map<K, V> {
+    if (typeof key === "string" && key.startsWith("linear_call_") && value === "exec_command") {
+      matchingSetCalls += 1;
+    }
+    return Reflect.apply(nativeSet, this, [key, value]) as Map<K, V>;
+  };
+
+  Object.defineProperty(Map.prototype, "set", { ...descriptor, value: countingSet });
+  try {
+    body = chatCompletionsToResponsesBody({ model: "gpt-test", messages });
+  } finally {
+    Object.defineProperty(Map.prototype, "set", descriptor);
+  }
+
+  expect((body!.input as unknown[]).length).toBe(count + 1);
+  expect(matchingSetCalls).toBe(count);
 });
 
 // Local-stack fixup regressions (Sol audit of #279, devlog 100_merge_records.md WP5):

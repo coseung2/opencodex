@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import { saveConfigPreservingClaudeCode } from "../config";
 import { isCodexAccountGenerationLive, readCodexAccountRecord } from "./account-store";
 import { codexAccountLogLabel } from "./account-label";
+import {
+  clearCodexAccountPin,
+  codexAccountPriorityLookup,
+  pinnedCodexAccountId,
+} from "./account-priority";
 import { isCodexAccountPaused } from "./account-pause";
 import { isCodexAccountUsable } from "./account-usability";
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
@@ -13,6 +18,7 @@ import {
   notePoolRotationSuccess,
   peekRoundRobinAccount,
   pickRoundRobinAccount,
+  selectPriorityTier,
   seedPoolRotationAccount,
 } from "./pool-rotation";
 import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota } from "./quota";
@@ -177,6 +183,8 @@ export type CodexUpstreamOutcomeMeta = {
   modelId?: string;
   /** When set, clears affinity for this thread immediately on transient failure. */
   threadId?: string | null;
+  /** Suppress Pool rotation and affinity failover for an exact account selector. */
+  fixedAccount?: boolean;
   /**
    * Probe lease held by this request, when it was admitted through an active
    * quota cooldown. Only the outcome carrying the current lease may clear the
@@ -736,7 +744,7 @@ function getEligiblePoolAccounts(
   excludeId?: string,
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
-): string[] {
+): readonly string[] {
   const ids = (config.codexAccounts ?? [])
     .filter(account => isSelectableCodexPoolAccount(account)
       && account.id !== excludeId
@@ -758,14 +766,20 @@ function getEligiblePoolAccounts(
   ) {
     ids.unshift(MAIN_CODEX_ACCOUNT_ID);
   }
-  return ids;
+  if (!config.codexAccountPriorities) return ids;
+  return selectPriorityTier(
+    ids,
+    codexAccountPriorityLookup(config),
+    id => hasCodexQuotaHeadroom(config, id),
+    pinnedCodexAccountId(config),
+  );
 }
 
 function listEligibleCodexAccountIds(
   config: OcxConfig,
   now: number,
   quotaScope?: CodexQuotaScope,
-): string[] {
+): readonly string[] {
   return getEligiblePoolAccounts(config, undefined, now, quotaScope);
 }
 
@@ -773,7 +787,7 @@ function stickyLimitForConfig(config: OcxConfig): number {
   return normalizeAccountPoolStickyLimit(config.accountPoolStickyLimit);
 }
 
-function isActiveUnderFillFirstThreshold(config: OcxConfig, accountId: string): boolean {
+function hasCodexQuotaHeadroom(config: OcxConfig, accountId: string): boolean {
   const threshold = config.autoSwitchThreshold ?? 80;
   if (threshold <= 0) return true;
   const usage = computeCodexUsageScore(getAccountQuota(accountId), getPoolAccountPlan(config, accountId));
@@ -795,7 +809,7 @@ function pickFillFirstCodexAccount(
   if (eligible.length === 0) return null;
 
   const active = getEffectiveActiveCodexAccountId(config);
-  if (active && eligible.includes(active) && isActiveUnderFillFirstThreshold(config, active)) {
+  if (active && eligible.includes(active) && hasCodexQuotaHeadroom(config, active)) {
     return active;
   }
 
@@ -806,7 +820,7 @@ function pickFillFirstCodexAccount(
 function pickNextFillFirstCodexAccount(
   config: OcxConfig,
   afterId: string | null,
-  eligible = listEligibleCodexAccountIds(config, Date.now()),
+  eligible: readonly string[] = listEligibleCodexAccountIds(config, Date.now()),
   _now = Date.now(),
 ): string | null {
   if (eligible.length === 0) return null;
@@ -814,7 +828,7 @@ function pickNextFillFirstCodexAccount(
   if (!afterId) {
     // Prefer an under-threshold account when starting with no active cursor.
     for (const id of ordered) {
-      if (isActiveUnderFillFirstThreshold(config, id)) return id;
+      if (hasCodexQuotaHeadroom(config, id)) return id;
     }
     return ordered[0] ?? null;
   }
@@ -829,7 +843,7 @@ function pickNextFillFirstCodexAccount(
   const startIdx = stableAll.indexOf(afterId);
   if (startIdx < 0) {
     for (const id of ordered) {
-      if (isActiveUnderFillFirstThreshold(config, id)) return id;
+      if (hasCodexQuotaHeadroom(config, id)) return id;
     }
     return ordered[0] ?? null;
   }
@@ -840,7 +854,7 @@ function pickNextFillFirstCodexAccount(
     const candidate = stableAll[(startIdx + step) % stableAll.length]!;
     if (!eligible.includes(candidate)) continue;
     if (!fallback) fallback = candidate;
-    if (isActiveUnderFillFirstThreshold(config, candidate)) return candidate;
+    if (hasCodexQuotaHeadroom(config, candidate)) return candidate;
   }
   return fallback ?? ordered[0] ?? null;
 }
@@ -955,11 +969,11 @@ export function pickAlternateCodexAccount(
 ): string | null {
   const strategy = normalizeAccountPoolStrategy(config.accountPoolStrategy);
   if (strategy === "round-robin") {
-    const eligible = listEligibleCodexAccountIds(config, now, quotaScope).filter(id => id !== excludeId);
+    const eligible = getEligiblePoolAccounts(config, excludeId, now, quotaScope);
     return pickRoundRobinAccount(codexPoolKeyForScope(quotaScope), eligible, stickyLimitForConfig(config));
   }
   if (strategy === "fill-first") {
-    const eligible = listEligibleCodexAccountIds(config, now, quotaScope).filter(id => id !== excludeId);
+    const eligible = getEligiblePoolAccounts(config, excludeId, now, quotaScope);
     return pickNextFillFirstCodexAccount(config, excludeId, eligible, now);
   }
   return pickLowestUsageCodexAccount(config, excludeId, now, quotaScope);
@@ -970,6 +984,11 @@ export function getEffectiveActiveCodexAccountId(config: OcxConfig): string | un
   return runtimeActiveCodexAccountId ?? config.activeCodexAccountId;
 }
 
+export function isEffectiveCodexAccountPinned(config: OcxConfig): boolean {
+  const pinned = pinnedCodexAccountId(config);
+  return pinned !== undefined && pinned === getEffectiveActiveCodexAccountId(config);
+}
+
 /**
  * Automatic strategy / failover cursor only — never mutates `config.activeCodexAccountId`
  * so an unrelated `saveConfig` cannot persist transient rotation as operator selection.
@@ -978,10 +997,18 @@ function rememberActiveCodexAccount(_config: OcxConfig, accountId: string): void
   runtimeActiveCodexAccountId = accountId;
 }
 
+function releaseCodexAccountPinFor(config: OcxConfig, accountId: string): boolean {
+  const pinned = pinnedCodexAccountId(config);
+  if (pinned === undefined || pinned === accountId) return false;
+  clearCodexAccountPin(config);
+  return true;
+}
+
 /** Persist operator (or quota-strategy) active selection to config + disk. */
 function setActiveCodexAccount(config: OcxConfig, accountId: string): void {
   runtimeActiveCodexAccountId = undefined;
-  if (config.activeCodexAccountId === accountId) return;
+  const releasedPin = releaseCodexAccountPinFor(config, accountId);
+  if (config.activeCodexAccountId === accountId && !releasedPin) return;
   config.activeCodexAccountId = accountId;
   saveConfigPreservingClaudeCode(config);
 }
@@ -992,6 +1019,7 @@ function promoteActiveCodexAccount(config: OcxConfig, accountId: string): void {
     setActiveCodexAccount(config, accountId);
     return;
   }
+  releaseCodexAccountPinFor(config, accountId);
   rememberActiveCodexAccount(config, accountId);
 }
 
@@ -1010,6 +1038,7 @@ export function reconcileCodexActiveAfterExclusion(
   if (config.activeCodexAccountId === excludedAccountId) {
     config.activeCodexAccountId = undefined;
   }
+  clearCodexAccountPin(config, excludedAccountId);
   if (!wasEffective) return getEffectiveActiveCodexAccountId(config) ?? null;
 
   runtimeActiveCodexAccountId = undefined;
@@ -1020,6 +1049,49 @@ export function reconcileCodexActiveAfterExclusion(
 
 function isUnknownUsage(usage: number): boolean {
   return usage >= CODEX_UNKNOWN_USAGE_SCORE;
+}
+
+function pickLowestUsageAmong(config: OcxConfig, ids: readonly string[]): string | null {
+  let best: string | null = null;
+  let bestUsage = Number.POSITIVE_INFINITY;
+  for (const id of ids) {
+    const usage = computeCodexUsageScore(getAccountQuota(id), getPoolAccountPlan(config, id));
+    if (usage < bestUsage) {
+      best = id;
+      bestUsage = usage;
+    }
+  }
+  return best;
+}
+
+/** Move an unbound request up when a higher-priority tier regains headroom. */
+function pickPriorityPreemption(
+  config: OcxConfig,
+  active: string,
+  now: number,
+  quotaScope?: CodexQuotaScope,
+): string | null {
+  if (!config.codexAccountPriorities) return null;
+  const eligible = getEligiblePoolAccounts(config, undefined, now, quotaScope);
+  if (eligible.length === 0 || eligible.includes(active)) return null;
+  const pinned = pinnedCodexAccountId(config);
+  if (pinned !== undefined && eligible.includes(pinned) && hasCodexQuotaHeadroom(config, pinned)) return null;
+  const priorityOf = codexAccountPriorityLookup(config);
+  if (priorityOf(eligible[0]!) <= priorityOf(active)) return null;
+  return pickLowestUsageAmong(config, eligible.filter(id => hasCodexQuotaHeadroom(config, id)));
+}
+
+/** Retire a persisted manual pin only after its account is durably unavailable or drained. */
+function releaseDrainedCodexAccountPin(config: OcxConfig): void {
+  const pinned = pinnedCodexAccountId(config);
+  if (pinned === undefined) return;
+  const drained = !isCodexAccountUsable(config, pinned)
+    || isAccountNeedsReauth(pinned)
+    || isCodexAccountPaused(config, pinned)
+    || !hasCodexQuotaHeadroom(config, pinned);
+  if (!drained) return;
+  clearCodexAccountPin(config);
+  saveConfigPreservingClaudeCode(config);
 }
 
 function applyQuotaAutoSwitch(
@@ -1053,11 +1125,16 @@ function shouldFailover(config: OcxConfig, accountId: string, now: number): bool
   return !!health && health.consecutiveFailures >= threshold;
 }
 
-function applyFailureFailover(config: OcxConfig, active: string, now: number): string {
+function applyFailureFailover(
+  config: OcxConfig,
+  active: string,
+  now: number,
+  quotaScope?: CodexQuotaScope,
+): string {
   if (!shouldFailover(config, active, now)) return active;
-  const best = pickAlternateCodexAccount(config, active, now);
+  const best = pickAlternateCodexAccount(config, active, now, quotaScope);
   if (best) {
-    promoteActiveCodexAccount(config, best);
+    if (!isIndependentCodexQuotaScope(quotaScope)) promoteActiveCodexAccount(config, best);
     return best;
   }
   return active;
@@ -1130,6 +1207,8 @@ export function previewCodexAccountForRequest(
     else return null;
   }
 
+  active = pickPriorityPreemption(config, active, now, quotaScope) ?? active;
+
   const threshold = config.autoSwitchThreshold ?? 80;
   if (threshold > 0) {
     const usage = computeCodexUsageScore(getAccountQuota(active), getPoolAccountPlan(config, active));
@@ -1157,6 +1236,7 @@ export function resolveCodexAccountForThreadDetailed(
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
 ): CodexThreadResolution {
+  if (!isIndependentCodexQuotaScope(quotaScope)) releaseDrainedCodexAccountPin(config);
   const entry = threadId ? getThreadAffinity(threadId, quotaScope) : undefined;
   if (threadId && entry) {
     if (isThreadAffinityExpired(entry, now)) {
@@ -1227,8 +1307,13 @@ export function resolveCodexAccountForThreadDetailed(
       return { status: "none" };
     }
   }
+  const preempted = pickPriorityPreemption(config, active, now, quotaScope);
+  if (preempted) {
+    if (!isIndependentCodexQuotaScope(quotaScope)) rememberActiveCodexAccount(config, preempted);
+    active = preempted;
+  }
   active = applyQuotaAutoSwitch(config, active, now, quotaScope);
-  active = applyFailureFailover(config, active, now);
+  active = applyFailureFailover(config, active, now, quotaScope);
   if (!isCodexAccountUsable(config, active)) {
     return hasConfiguredPoolAccount(config, active) ? { status: "selected", accountId: active } : { status: "none" };
   }
@@ -1354,7 +1439,7 @@ export function recordCodexUpstreamOutcome(
       // The shared native scope is the existing account-wide native behavior:
       // threads must leave it and new requests should prefer an eligible account.
       // Spark remains isolated so a same-account Terra/Luna combo fallback can run.
-      if (quotaScope === "shared") {
+      if (quotaScope === "shared" && !meta.fixedAccount) {
         clearThreadAccountMapForAccount(accountId);
         notePoolRotationFailure(POOL_KEY_CODEX, accountId);
         if (getEffectiveActiveCodexAccountId(config) === accountId) {
@@ -1399,17 +1484,21 @@ export function recordCodexUpstreamOutcome(
           ...(prior?.lastProbeAt !== undefined ? { lastProbeAt: prior.lastProbeAt } : {}),
         }),
     });
-    clearThreadAccountMapForAccount(accountId);
-    notePoolRotationFailure(POOL_KEY_CODEX, accountId);
-    const effectiveActive = getEffectiveActiveCodexAccountId(config);
-    if (effectiveActive === accountId) {
-      // Same-request 429 retry already picked via excludeAccountId — reuse it so
-      // round-robin does not advance the ring a second time.
-      const reused = meta.promoteAccountId && meta.promoteAccountId !== accountId
-        ? meta.promoteAccountId
-        : null;
-      const fallback = reused ?? pickAlternateCodexAccount(config, accountId, now);
-      if (fallback) promoteActiveCodexAccount(config, fallback);
+    if (!meta.fixedAccount) {
+      clearThreadAccountMapForAccount(accountId);
+      if (!isIndependentCodexQuotaScope(quotaScope)) {
+        notePoolRotationFailure(POOL_KEY_CODEX, accountId);
+        const effectiveActive = getEffectiveActiveCodexAccountId(config);
+        if (effectiveActive === accountId) {
+          // Same-request 429 retry already picked via excludeAccountId; reuse it so
+          // round-robin does not advance the ring a second time.
+          const reused = meta.promoteAccountId && meta.promoteAccountId !== accountId
+            ? meta.promoteAccountId
+            : null;
+          const fallback = reused ?? pickAlternateCodexAccount(config, accountId, now, quotaScope);
+          if (fallback) promoteActiveCodexAccount(config, fallback);
+        }
+      }
     }
     return;
   }
@@ -1454,15 +1543,21 @@ export function recordCodexUpstreamOutcome(
   // thread is still pinned to the FAILING account — a late failure from account A
   // must not delete a newer healthy binding to account B (race: T→A, A fails,
   // T→B, late A failure must not delete B's mapping).
-  if (failoverReady && meta.threadId) {
+  if (!meta.fixedAccount && failoverReady && meta.threadId) {
     deleteThreadAffinitiesForAccount(meta.threadId, accountId);
   }
   // Once the account is past the failover streak, clear every thread still pinned
   // to it — matching 429 affinity behavior so "continue" cannot stay on a bad peer.
-  if (shouldFailover(config, accountId, now)) {
+  if (!meta.fixedAccount && shouldFailover(config, accountId, now)) {
     clearThreadAccountMapForAccount(accountId);
   }
-  if (getEffectiveActiveCodexAccountId(config) === accountId) applyFailureFailover(config, accountId, now);
+  if (
+    !meta.fixedAccount
+    && !isIndependentCodexQuotaScope(quotaScope)
+    && getEffectiveActiveCodexAccountId(config) === accountId
+  ) {
+    applyFailureFailover(config, accountId, now, quotaScope);
+  }
 }
 
 export function formatCodexProviderForLog(providerName: string, accountId: string | null, config: OcxConfig): string {

@@ -1,19 +1,21 @@
+import { readBoundedResponseBody } from "../lib/bounded-body";
+
 export class CodexWarmupError extends Error {
-  code: "http_status" | "missing_body" | "stream_failed" | "stream_incomplete" | "stream_error" | "invalid_sse" | "no_terminal" | "transport";
+  code: "http_status" | "missing_body" | "stream_failed" | "stream_incomplete" | "stream_error" | "stream_too_large" | "invalid_sse" | "no_terminal" | "transport";
   status?: number;
-  /** Upstream error detail extracted from the response body (truncated to 512 chars). */
-  upstreamDetail?: string;
+  /** Internal-only classification used to preserve exhausted-account registration. */
+  quotaLike?: boolean;
 
   constructor(
     code: CodexWarmupError["code"],
     message = "Codex warmup failed",
-    options: { status?: number; cause?: unknown; upstreamDetail?: string } = {},
+    options: { status?: number; cause?: unknown; quotaLike?: boolean } = {},
   ) {
     super(message);
     this.name = "CodexWarmupError";
     this.code = code;
     this.status = options.status;
-    this.upstreamDetail = options.upstreamDetail;
+    this.quotaLike = options.quotaLike;
     if (options.cause !== undefined) this.cause = options.cause;
   }
 }
@@ -29,37 +31,42 @@ const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const FALLBACK_MODELS = ["gpt-5.5"];
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 0x7fff_ffff;
 const MAX_ERROR_BODY_BYTES = 2048;
+const MAX_WARMUP_STREAM_BYTES = 1024 * 1024;
 
-/** Read the first MAX_ERROR_BODY_BYTES of a response body and extract an error message. */
-async function readErrorDetail(res: Response): Promise<string | undefined> {
+/** Classify a bounded structured error without retaining or exposing upstream text. */
+async function readErrorQuotaClassification(res: Response, signal: AbortSignal): Promise<boolean> {
   try {
-    const text = await res.text();
-    const trimmed = text.slice(0, MAX_ERROR_BODY_BYTES);
-    try {
-      const json = JSON.parse(trimmed) as Record<string, unknown>;
-      // ChatGPT backend error shape: { error: { message: "..." } } or { detail: "..." }
-      const nested = json.error;
-      if (nested && typeof nested === "object" && typeof (nested as Record<string, unknown>).message === "string") {
-        return ((nested as Record<string, unknown>).message as string).slice(0, 512);
-      }
-      if (typeof json.detail === "string") return json.detail.slice(0, 512);
-      if (typeof json.error === "string") return (json.error as string).slice(0, 512);
-      if (typeof json.message === "string") return json.message.slice(0, 512);
-    } catch {
-      // Non-JSON response body may contain sensitive data (tokens, credentials).
-      // Only surface structured error messages, never raw text.
+    const bounded = await readBoundedResponseBody(res, {
+      signal,
+      maxBytes: MAX_ERROR_BODY_BYTES,
+      fatalUtf8: true,
+    });
+    if (!bounded.displaySafe) return false;
+    const json = JSON.parse(bounded.text) as Record<string, unknown>;
+    const nested = json.error;
+    const detail = nested && typeof nested === "object" && typeof (nested as Record<string, unknown>).message === "string"
+      ? (nested as Record<string, unknown>).message
+      : typeof json.detail === "string"
+        ? json.detail
+        : typeof json.error === "string"
+          ? json.error
+          : typeof json.message === "string"
+            ? json.message
+            : "";
+    return /\b(?:quota|rate[\s_-]*limit|usage[\s_-]*limit)\b/i.test(String(detail));
+  } catch (error) {
+    if (signal.aborted) {
+      throw new CodexWarmupError("transport", "Codex warmup request failed", { cause: error });
     }
-    return undefined;
-  } catch {
-    return undefined;
+    return false;
   }
 }
 
 function safeWarmupReason(err: unknown): string {
   if (err instanceof CodexWarmupError) {
-    const base = err.status ? `${err.code}:${err.status}` : err.code;
-    return err.upstreamDetail ? `${base} — ${err.upstreamDetail}` : base;
+    return err.status ? `${err.code}:${err.status}` : err.code;
   }
   return "transport";
 }
@@ -77,9 +84,7 @@ export function codexWarmupFailureReason(err: unknown): string {
 export function isCodexWarmupQuotaFailure(err: unknown): boolean {
   if (!(err instanceof CodexWarmupError) || err.code !== "http_status") return false;
   if (err.status === 429) return true;
-  return err.status === 403
-    && typeof err.upstreamDetail === "string"
-    && /\b(?:quota|rate[\s_-]*limit|usage[\s_-]*limit)\b/i.test(err.upstreamDetail);
+  return err.status === 403 && err.quotaLike === true;
 }
 
 function eventTypeFromData(data: unknown): string | undefined {
@@ -103,83 +108,186 @@ function parseSseFrame(frame: string): unknown | null {
   }
 }
 
-async function drainWarmupSse(body: ReadableStream<Uint8Array>): Promise<void> {
+async function drainWarmupSse(body: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  let buffer = new Uint8Array(Math.min(MAX_WARMUP_STREAM_BYTES, 64 * 1024));
+  let bufferedBytes = 0;
+  let scanOffset = 0;
+  let bytesRead = 0;
+  const abortError = () => new CodexWarmupError("transport", "Codex warmup request failed", {
+    cause: signal.reason,
+  });
+  const cancelReader = () => {
+    try {
+      void reader.cancel(signal.reason).catch(() => {});
+    } catch {
+      // Custom streams may throw synchronously from cancel().
+    }
+  };
+  const readWithSignal = (): Promise<Awaited<ReturnType<typeof reader.read>>> => {
+    if (signal.aborted) {
+      cancelReader();
+      return Promise.reject(abortError());
+    }
+    const read = reader.read();
+    void read.catch(() => {});
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        action();
+      };
+      const onAbort = () => {
+        cancelReader();
+        finish(() => reject(abortError()));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      read.then(
+        result => finish(() => resolve(result)),
+        error => finish(() => reject(error)),
+      );
+    });
+  };
+  const ensureCapacity = (requiredBytes: number) => {
+    if (requiredBytes <= buffer.byteLength) return;
+    const grown = new Uint8Array(Math.min(
+      MAX_WARMUP_STREAM_BYTES,
+      Math.max(requiredBytes, buffer.byteLength * 2),
+    ));
+    grown.set(buffer.subarray(0, bufferedBytes));
+    buffer = grown;
+  };
+  const findFrameDelimiter = (start: number): { index: number; length: 2 | 3 | 4 } | undefined => {
+    for (let index = start; index < bufferedBytes - 1; index += 1) {
+      const firstLength = buffer[index] === 10
+        ? 1
+        : buffer[index] === 13 && buffer[index + 1] === 10 ? 2 : 0;
+      if (firstLength === 0) continue;
+      const secondStart = index + firstLength;
+      const secondLength = buffer[secondStart] === 10
+        ? 1
+        : buffer[secondStart] === 13 && buffer[secondStart + 1] === 10 ? 2 : 0;
+      if (secondLength > 0) return { index, length: (firstLength + secondLength) as 2 | 3 | 4 };
+    }
+    return undefined;
+  };
+  const acceptFrame = (frame: Uint8Array): boolean => {
+    const parsed = parseSseFrame(decoder.decode(frame));
+    const type = eventTypeFromData(parsed);
+    if (type === "response.completed") return true;
+    if (type === "response.failed") throw new CodexWarmupError("stream_failed");
+    if (type === "response.incomplete") throw new CodexWarmupError("stream_incomplete");
+    if (type === "error") throw new CodexWarmupError("stream_error");
+    return false;
+  };
 
   try {
+    if (signal.aborted) throw abortError();
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithSignal();
+      if (signal.aborted) throw abortError();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (value.byteLength > MAX_WARMUP_STREAM_BYTES - bytesRead) {
+        throw new CodexWarmupError("stream_too_large", "Codex warmup stream exceeded the size limit");
+      }
+      bytesRead += value.byteLength;
+      ensureCapacity(bufferedBytes + value.byteLength);
+      buffer.set(value, bufferedBytes);
+      bufferedBytes += value.byteLength;
 
+      let consumedBytes = 0;
       for (;;) {
-        const frameEnd = buffer.search(/\r?\n\r?\n/);
-        if (frameEnd < 0) break;
-        const frame = buffer.slice(0, frameEnd);
-        const delimiterLength = buffer[frameEnd] === "\r" ? 4 : 2;
-        buffer = buffer.slice(frameEnd + delimiterLength);
-        const parsed = parseSseFrame(frame);
-        const type = eventTypeFromData(parsed);
-        if (type === "response.completed") return;
-        if (type === "response.failed") throw new CodexWarmupError("stream_failed");
-        if (type === "response.incomplete") throw new CodexWarmupError("stream_incomplete");
-        if (type === "error") throw new CodexWarmupError("stream_error");
+        const delimiter = findFrameDelimiter(scanOffset);
+        if (!delimiter) {
+          scanOffset = Math.max(consumedBytes, bufferedBytes - 3);
+          break;
+        }
+        if (acceptFrame(buffer.subarray(consumedBytes, delimiter.index))) return;
+        consumedBytes = delimiter.index + delimiter.length;
+        scanOffset = consumedBytes;
+      }
+      if (consumedBytes > 0) {
+        buffer.copyWithin(0, consumedBytes, bufferedBytes);
+        bufferedBytes -= consumedBytes;
+        scanOffset = Math.max(0, scanOffset - consumedBytes);
       }
     }
 
-    if (buffer.trim()) {
-      const parsed = parseSseFrame(buffer);
-      const type = eventTypeFromData(parsed);
-      if (type === "response.completed") return;
-      if (type === "response.failed") throw new CodexWarmupError("stream_failed");
-      if (type === "response.incomplete") throw new CodexWarmupError("stream_incomplete");
-      if (type === "error") throw new CodexWarmupError("stream_error");
-    }
-
+    if (bufferedBytes > 0 && acceptFrame(buffer.subarray(0, bufferedBytes))) return;
     throw new CodexWarmupError("no_terminal", "Codex warmup ended before completion");
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A non-settling cancellation can keep the pending read locked briefly.
+    }
   }
 }
 
 async function tryWarmup(options: CodexWarmupOptions, model: string): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetch(CODEX_RESPONSES_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${options.accessToken}`,
-        "ChatGPT-Account-Id": options.chatgptAccountId,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        instructions: "Reply with OK.",
-        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
-        stream: true,
-        store: false,
-      }),
-      signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-    });
-  } catch (err) {
-    throw new CodexWarmupError("transport", "Codex warmup request failed", { cause: err });
-  }
-
-  if (!res.ok) {
-    const upstreamDetail = await readErrorDetail(res);
-    throw new CodexWarmupError("http_status", "Codex warmup was rejected", {
-      status: res.status,
-      upstreamDetail,
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw new CodexWarmupError("transport", "Codex warmup request failed", {
+      cause: new RangeError("Codex warmup timeout is outside the supported range"),
     });
   }
-  if (!res.body) throw new CodexWarmupError("missing_body");
+  const deadline = new AbortController();
+  const signal = deadline.signal;
+  const timer = setTimeout(() => {
+    deadline.abort(new DOMException("Codex warmup timed out", "TimeoutError"));
+  }, timeoutMs);
 
   try {
-    await drainWarmupSse(res.body);
+    let res: Response;
+    try {
+      res = await fetch(CODEX_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${options.accessToken}`,
+          "ChatGPT-Account-Id": options.chatgptAccountId,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          instructions: "Reply with OK.",
+          input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+          stream: true,
+          store: false,
+        }),
+        signal,
+      });
+    } catch (err) {
+      throw new CodexWarmupError("transport", "Codex warmup request failed", { cause: err });
+    }
+
+    if (!res.ok) {
+      const quotaLike = await readErrorQuotaClassification(res, signal);
+      throw new CodexWarmupError("http_status", "Codex warmup was rejected", {
+        status: res.status,
+        quotaLike,
+      });
+    }
+    const body = res.body;
+    if (!body) throw new CodexWarmupError("missing_body");
+
+    try {
+      await drainWarmupSse(body, signal);
+    } finally {
+      try {
+        void body.cancel().catch(() => {});
+      } catch {
+        // Some custom streams throw synchronously from cancel().
+      }
+    }
   } finally {
-    await res.body?.cancel().catch(() => {});
+    clearTimeout(timer);
   }
 }
 

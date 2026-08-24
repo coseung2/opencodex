@@ -1,4 +1,4 @@
-import { fetchMainAccountInfo, listCodexAuthAccounts } from "../codex/auth-api";
+import { effectiveCodexAuthAccountId, fetchMainAccountInfo, listCodexAuthAccounts } from "../codex/auth-api";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { resolveEnvValue } from "../config";
 import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
@@ -15,12 +15,21 @@ import {
   sweepExpiredOnWrite,
   type GenerationContext,
 } from "../lib/state-store-sweeper";
+import { readBoundedResponseBody } from "../lib/bounded-body";
+import {
+  aggregateCodexPoolCapacity,
+  type CodexCapacityAggregation,
+  type CodexCapacityQuota,
+  type CodexCapacityWindowAggregation,
+} from "./codex-capacity";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
+/** Successful provider quota payloads are small; reject oversized or stalled JSON. */
+export const QUOTA_RESPONSE_MAX_BYTES = 512 * 1024;
 /** Kiro's getUsageLimits endpoint cold-starts slowly after idle periods (>8s seen); keep a
  *  dedicated, more generous bound so a flaky first hit does not drop the provider into the
  *  "no quota" bucket for the rest of the negative-cache window. */
@@ -87,6 +96,7 @@ export interface ProviderQuotaReport {
   quota: ProviderQuota;
   updatedAt: number;
   reverseEngineered?: boolean;
+  aggregation?: CodexCapacityAggregation;
 }
 
 export interface ProviderQuotaResponse {
@@ -167,18 +177,86 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+const QUOTA_JSON_READ_FAILURE = Symbol("quota-json-read-failure");
+
+async function readQuotaJson(
+  response: Response,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<unknown | typeof QUOTA_JSON_READ_FAILURE> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > QUOTA_RESPONSE_MAX_BYTES) {
+    try {
+      void response.body?.cancel(
+        new DOMException("Provider quota response is too large", "QuotaExceededError"),
+      ).catch(() => undefined);
+    } catch {
+      // Best-effort cancellation only.
+    }
+    return QUOTA_JSON_READ_FAILURE;
+  }
+
+  try {
+    const bounded = await readBoundedResponseBody(response, {
+      maxBytes: QUOTA_RESPONSE_MAX_BYTES,
+      totalTimeoutMs: timeoutMs,
+      inactivityTimeoutMs: timeoutMs,
+      firstByteTimeoutMs: timeoutMs,
+    });
+    if (bounded.oversized || bounded.truncated || !bounded.displaySafe) return QUOTA_JSON_READ_FAILURE;
+    return JSON.parse(bounded.text) as unknown;
+  } catch {
+    return QUOTA_JSON_READ_FAILURE;
+  }
+}
+
+/** Test-only access to the quota reader's deadline and cancellation contract. */
+export async function readProviderQuotaJsonForTests(response: Response, timeoutMs: number): Promise<unknown> {
+  const result = await readQuotaJson(response, timeoutMs);
+  return result === QUOTA_JSON_READ_FAILURE ? null : result;
+}
+
 function isBuiltInChatGptForwardProvider(name: string, provider: OcxProviderConfig): boolean {
   return name === OPENAI_CODEX_PROVIDER_ID && isCanonicalOpenAiForwardProvider(provider);
 }
 
-function report(provider: string, source: string, quota: ProviderQuota): ProviderQuotaReport | null {
-  if (!hasQuotaRows(quota)) return null;
+function report(
+  provider: string,
+  source: string,
+  quota: ProviderQuota,
+  aggregation?: CodexCapacityAggregation,
+): ProviderQuotaReport | null {
+  if (!hasQuotaRows(quota) && !aggregation) return null;
   return {
     provider,
     label: providerLabel(provider),
     source,
     quota,
     updatedAt: quota.updatedAt,
+    ...(aggregation ? { aggregation } : {}),
+  };
+}
+
+function publicCapacityWindow(window: CodexCapacityWindowAggregation): CodexCapacityWindowAggregation {
+  const { totalWeight: _totalWeight, consumedWeight: _consumedWeight, remainingWeight: _remainingWeight, ...safe } = window;
+  return safe as CodexCapacityWindowAggregation;
+}
+
+function publicCapacityAggregation(
+  aggregation: CodexCapacityAggregation,
+  presentation: NonNullable<CodexCapacityAggregation["presentation"]>,
+): CodexCapacityAggregation {
+  return {
+    ...aggregation,
+    presentation,
+    ...(aggregation.fiveHour ? { fiveHour: publicCapacityWindow(aggregation.fiveHour) } : {}),
+    ...(aggregation.weekly ? { weekly: publicCapacityWindow(aggregation.weekly) } : {}),
+    ...(aggregation.monthly ? { monthly: publicCapacityWindow(aggregation.monthly) } : {}),
+    ...(aggregation.customWindows ? {
+      customWindows: aggregation.customWindows.map(window => ({
+        label: window.label,
+        ...publicCapacityWindow(window),
+      })),
+    } : {}),
   };
 }
 
@@ -194,12 +272,44 @@ async function fetchChatGptForwardQuota(
     return quota ? report(provider, "chatgpt:wham", quota) : null;
   }
   const accounts = await listCodexAuthAccounts(config, forceRefresh);
-  const activeId = config.activeCodexAccountId || MAIN_CODEX_ACCOUNT_ID;
-  const active = accounts.find(account => account.id === activeId)
+  const activeId = effectiveCodexAuthAccountId(config);
+  const capacityAccounts = accounts.map(account => ({ ...account, active: account.id === activeId }));
+  const active = capacityAccounts.find(account => account.active)
     ?? accounts.find(account => account.id === MAIN_CODEX_ACCOUNT_ID)
     ?? accounts[0];
-  const quota = active?.quota ? { ...active.quota, updatedAt: active.quota.updatedAt ?? Date.now() } as ProviderQuota : null;
-  return quota ? report(provider, "chatgpt:wham", quota) : null;
+  const now = Date.now();
+  const capacity = aggregateCodexPoolCapacity(capacityAccounts, now);
+  if (capacity.aggregation && capacity.quota) {
+    return report(
+      provider,
+      "chatgpt:wham",
+      capacity.quota as ProviderQuota,
+      publicCapacityAggregation(capacity.aggregation, "aggregate"),
+    );
+  }
+  const activeUsable = !!active && !active.paused && active.needsReauth !== true;
+  const quota = activeUsable && active?.quota
+    ? { ...active.quota, updatedAt: active.quota.updatedAt ?? now } as CodexCapacityQuota
+    : null;
+  if (quota && now - quota.updatedAt <= 30 * 60_000) {
+    return report(
+      provider,
+      "chatgpt:wham",
+      quota as ProviderQuota,
+      capacity.aggregation
+        ? publicCapacityAggregation(capacity.aggregation, "effective-account-fallback")
+        : undefined,
+    );
+  }
+  if (capacity.aggregation) {
+    return report(
+      provider,
+      "chatgpt:wham",
+      { updatedAt: now },
+      publicCapacityAggregation(capacity.aggregation, "coverage-only"),
+    );
+  }
+  return null;
 }
 
 async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | null> {
@@ -219,7 +329,7 @@ async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | nu
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   const config = asRecord(body?.config);
   const currentPeriod = asRecord(config?.currentPeriod);
   // A weekly window is the meter contract; other shapes (spend-cap etc.) fail closed.
@@ -293,7 +403,7 @@ async function fetchKiroUsageQuota(
     signal: AbortSignal.timeout(KIRO_QUOTA_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   if (!body) return null;
   const credit = kiroCreditRow(body);
   if (!credit) return null;
@@ -333,7 +443,7 @@ async function fetchAnthropicUsageQuota(accessToken: string): Promise<ProviderQu
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) return null;
-    const body = asRecord(await response.json().catch(() => null));
+    const body = asRecord(await readQuotaJson(response));
     if (!body) return null;
     const fiveHour = parseClaudeBucket(body.five_hour);
     const sevenDay = parseClaudeBucket(body.seven_day);
@@ -762,7 +872,7 @@ async function fetchKimiQuota(provider: string, config: OcxProviderConfig): Prom
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const quota = parseKimiQuotaPayload(await response.json().catch(() => null));
+  const quota = parseKimiQuotaPayload(await readQuotaJson(response));
   return quota ? report(provider, "kimi:usages", quota) : null;
 }
 
@@ -845,7 +955,7 @@ async function fetchOpencodeGoUsageApi(apiKey: string | undefined): Promise<{
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   const usage = asRecord(body?.usage);
   if (!usage) return null;
   const parse = (raw: unknown): OpencodeGoUsageWindow => {
@@ -1023,7 +1133,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (periodRes.ok) {
-      const body = asRecord(await periodRes.json().catch(() => null));
+      const body = asRecord(await readQuotaJson(periodRes));
       const planUsage = asRecord(body?.planUsage);
       if (planUsage) {
         const resetAt = normalizeResetAt(body?.billingCycleEnd ?? planUsage.billingCycleEnd ?? body?.periodEnd);
@@ -1085,7 +1195,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (summaryRes.ok) {
-      const body = asRecord(await summaryRes.json().catch(() => null));
+      const body = asRecord(await readQuotaJson(summaryRes));
       const individual = asRecord(body?.individualUsage);
       const plan = asRecord(individual?.plan);
       if (plan) {
@@ -1114,7 +1224,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   if (!body) return null;
 
   // Prefer the gpt-4 bucket (historical "fast requests"); else first model with used+limit.
@@ -1228,7 +1338,7 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   const models = asRecord(body?.models);
   if (!models) return null;
 
