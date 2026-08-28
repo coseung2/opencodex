@@ -340,8 +340,10 @@ beforeEach(() => {
       plan: "plus",
       isMain: true,
       quota: {
+        fiveHourPercent: 28,
         weeklyPercent: 42,
         monthlyPercent: 17,
+        fiveHourResetAt: 1_750_000_000,
         weeklyResetAt: 1_800_000_000,
         monthlyResetAt: 1_900_000_000,
       },
@@ -621,12 +623,15 @@ describe("ocx account CLI (issue #180 matrix)", () => {
       request.path === "/api/codex-auth/accounts" && request.search === "?refresh=1"
     )).toBe(true);
     expect(human.stdout).toContain("weekly 42%");
+    expect(human.stdout).toContain("5h 28%");
     expect(human.stdout).toContain("monthly 17%");
     expect(human.stdout).toContain("resets 2027-");
     expect(human.stdout).toContain("chatgpt_1 j***@example.com pro quota: unknown needs-reauth");
     expect(parsed.accounts.find(row => row.id === "__main__")?.quota).toEqual({
+      fiveHourPercent: 28,
       weeklyPercent: 42,
       monthlyPercent: 17,
+      fiveHourResetAt: 1_750_000_000,
       weeklyResetAt: 1_800_000_000,
       monthlyResetAt: 1_900_000_000,
     });
@@ -940,8 +945,10 @@ describe("ocx account CLI (issue #180 matrix)", () => {
     expect(refresh.code).toBe(0);
     expect(Object.keys(refreshed)).toEqual(["accounts"]);
     expect((refreshed.accounts as Array<Record<string, unknown>>)[0]?.quota).toEqual({
+      fiveHourPercent: 28,
       weeklyPercent: 42,
       monthlyPercent: 17,
+      fiveHourResetAt: 1_750_000_000,
       weeklyResetAt: 1_800_000_000,
       monthlyResetAt: 1_900_000_000,
     });

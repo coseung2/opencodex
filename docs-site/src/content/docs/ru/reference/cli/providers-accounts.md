@@ -153,7 +153,7 @@ credential'а, это состояние тоже печатается, но к�
 ### `ocx account refresh <provider> [--json]`
 
 Для пула Codex используйте `ocx account refresh openai [--json]`. Команда принудительно
-обновляет account quota и печатает проценты недельной/месячной квоты и reset-time; отсутствующие
+обновляет account quota и печатает проценты квоты 5 ч/недельной/месячной и reset-time; отсутствующие
 данные о quota сообщаются как unknown, а не как 0%. JSON-envelope имеет форму
 `{ accounts: AccountRow[] }`, причём на каждой строке Codex присутствует `quota`.
 

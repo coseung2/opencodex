@@ -105,11 +105,13 @@ The **Codex Auth** page manages the native ChatGPT/Codex route:
 - Thread affinity prevents per-request flapping. With quota auto-switch enabled, a long-running
   thread is periodically re-evaluated and may rebind after its relevant usage reaches the threshold
   and a strictly lower-usage eligible account exists.
-- New sessions can choose the lowest-usage eligible account. Paid plans score the hottest known 5h,
-  weekly, or 30d window; Go/Free plans use the 30d window only.
+- New sessions can choose the lowest-usage eligible account. Plans that expose a rolling 5h meter
+  (currently Plus/Team/Business) score the hottest known 5h, weekly, or 30d window; Pro/ProLite
+  use the windows they expose, and Go/Free plans use the 30d window only.
 - When WHAM supplies `limit_window_seconds`, Codex Auth classifies a primary window of at least 28
   days as 30d instead of assuming every primary window is weekly. Responses without a duration keep
-  the legacy weekly interpretation.
+  the legacy weekly interpretation for a single window; Plus/Team/Business dual-window responses
+  retain the legacy primary=5h, secondary=weekly ordering.
 - **Refresh quotas** re-reads account usage immediately so routing and the account cards use the same
   values.
 - Pool request logs use opaque labels such as `p3fa91c`, never account emails.

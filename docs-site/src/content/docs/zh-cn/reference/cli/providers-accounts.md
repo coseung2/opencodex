@@ -142,7 +142,7 @@ Codex Pool 选择会清除进程本地 affinity，并从下一次请求开始生
 ### `ocx account refresh <provider> [--json]`
 
 对于 Codex 池，请使用 `ocx account refresh openai [--json]`。它会强制刷新账号配额，
-并打印可用的周/月百分比和重置时间；缺失的配额数据会报告为未知，而不是 0%。其
+并打印可用的 5h/每周/月百分比和重置时间；缺失的配额数据会报告为未知，而不是 0%。其
 JSON 外壳是 `{ accounts: AccountRow[] }`，每个 Codex 行上都会带有 `quota`。
 
 对于 OAuth 和 API 密钥提供方，这会强制刷新提供方的配额报告端点；它不是重新登录

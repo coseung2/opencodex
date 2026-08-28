@@ -124,7 +124,7 @@ Codex pool selection applies to the next request after clearing existing affinit
 
 ### `ocx account refresh <provider> [--json]`
 
-Codex プールの場合は、`ocx account refresh openai [--json]` を使用します。アカウント クォータを強制的に更新し、利用可能な週次/月次のパーセンテージとリセット時間を出力します。不足しているクォータ データは、0% ではなく不明として報告されます。その JSON エンベロープは `{ accounts: AccountRow[] }` で、Codex の各行に `quota` があります。
+Codex プールの場合は、`ocx account refresh openai [--json]` を使用します。アカウント クォータを強制的に更新し、利用可能な 5 時間/週次/月次のパーセンテージとリセット時間を出力します。不足しているクォータ データは、0% ではなく不明として報告されます。その JSON エンベロープは `{ accounts: AccountRow[] }` で、Codex の各行に `quota` があります。
 
 OAuth プロバイダーと API キー プロバイダーの場合、これによりプロバイダー クォータ レポート エンドポイントが強制的に更新されます。これは、トークンの再ログインや単純なアカウント リストの再読み取りではありません。 `--json` は `{ provider, report: ProviderQuotaReport | null }` を返します。サポートされているクォータ レポートがないプロバイダーは、`no quota report available for <provider>` を出力して 0 を終了します。不明なプロバイダーと管理 API のエラーは 1 を終了します。失敗またはタイムアウトしたアップストリーム クォータ プローブは、代わりに null または古いレポートに劣化し (終了 0)、ダッシュボードのクォータ バーと一致します。
 

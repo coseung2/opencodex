@@ -153,7 +153,7 @@ rotate the request to another eligible Pool account. These failure transitions r
 ### `ocx account refresh <provider> [--json]`
 
 For the Codex pool, use `ocx account refresh openai [--json]`. It force-refreshes account quotas and
-prints available weekly/monthly percentages and reset times; missing quota data is reported as
+prints available 5h/weekly/monthly percentages and reset times; missing quota data is reported as
 unknown, not 0%. Its JSON envelope is `{ accounts: AccountRow[] }`, with `quota` on each Codex row.
 
 For OAuth and API-key providers, this force-refreshes the provider quota-report endpoint; it is not a

@@ -82,6 +82,7 @@ import { codexAuthContextLogLabel } from "../../codex/account-label";
 import {
   computeQuotaCooldown,
   formatCodexProviderForLog,
+  getPoolAccountPlan,
   previewCodexAccountForRequest,
   recordCodexUpstreamOutcome,
   type CodexUpstreamOutcome,
@@ -360,6 +361,7 @@ async function retryCodexPoolOnAlternateAccount(
       firstAuthCtx.accountId,
       firstResponse.headers,
       firstAuthCtx.writerGeneration,
+      getPoolAccountPlan(config, firstAuthCtx.accountId),
     );
   }
   if (!shouldDeferCodexResetDerivedCooldown(firstResponse, options.deferCodexResetDerivedCooldown)) {
@@ -1726,15 +1728,18 @@ async function handleResponsesInner(
     );
     const terminalBodyWillRecord = !!terminalRecorder && upstreamResponse.ok && isEventStream;
     // Capture quota from upstream response for multi-account tracking
-   if (usesCodexForwardPoolAuth(authCtx, route.provider)) {
-      // primary was the 5h window; it now carries weekly data for GPT plans.
-      // Prefer primary when present, fall back to secondary for compatibility.
+    if (usesCodexForwardPoolAuth(authCtx, route.provider)) {
+      // The upstream has shipped both primary=5h/secondary=weekly and
+      // primary=weekly/secondary=monthly shapes. Header duration metadata is
+      // parsed by applyAccountQuotaFromUpstreamHeaders, which preserves every
+      // window it can identify instead of assuming a fixed slot meaning.
       const quotaMeta = codexQuotaOutcomeMeta(upstreamResponse);
       const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/auth-api");
       applyAccountQuotaFromUpstreamHeaders(
         authCtx.accountId,
         upstreamResponse.headers,
         authCtx.writerGeneration,
+        getPoolAccountPlan(config, authCtx.accountId),
       );
       if (terminalBodyWillRecord) {
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {

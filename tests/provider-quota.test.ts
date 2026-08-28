@@ -153,6 +153,7 @@ describe("fetchProviderQuotaReports", () => {
           email: "person@example.com",
           plan_type: "plus",
           rate_limit: {
+            primary_window: { used_percent: 11, reset_at: 1_788_000_000, limit_window_seconds: 18_000 },
             secondary_window: { used_percent: 34, reset_at: 1_789_000_000 },
             tertiary_window: { used_percent: 56, reset_at: 1_790_000_000 },
           },
@@ -237,6 +238,8 @@ describe("fetchProviderQuotaReports", () => {
     const byProvider = Object.fromEntries(result.reports.map(report => [report.provider, report]));
 
     expect(Object.keys(byProvider).sort()).toEqual(["anthropic", "cursor", "google-antigravity", "kimi", "openai", "xai"]);
+    expect(byProvider.openai?.quota.fiveHourPercent).toBe(11);
+    expect(byProvider.openai?.quota.fiveHourResetAt).toBe(1_788_000_000);
     expect(byProvider.openai?.quota.weeklyPercent).toBe(34);
     expect(byProvider.xai?.source).toBe("xai:grok-credits");
     expect(byProvider.xai?.quota.weeklyPercent).toBe(100);

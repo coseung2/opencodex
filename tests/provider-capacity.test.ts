@@ -26,6 +26,44 @@ function account(
 }
 
 describe("configured-weight Codex pool capacity", () => {
+  test("aggregates separate five-hour and weekly windows for Plus/Team", () => {
+    const result = aggregateCodexPoolCapacity([
+      {
+        isMain: true,
+        active: true,
+        plan: "plus",
+        paused: false,
+        quota: {
+          fiveHourPercent: 20,
+          fiveHourResetAt: NOW + 10_000,
+          weeklyPercent: 40,
+          weeklyResetAt: NOW + 20_000,
+          updatedAt: NOW,
+        },
+      },
+      {
+        isMain: false,
+        plan: "team",
+        paused: false,
+        quota: {
+          fiveHourPercent: 80,
+          fiveHourResetAt: NOW + 30_000,
+          weeklyPercent: 60,
+          weeklyResetAt: NOW + 40_000,
+          updatedAt: NOW,
+        },
+      },
+    ], NOW);
+    expect(result.quota).toMatchObject({
+      fiveHourPercent: 50,
+      fiveHourResetAt: NOW + 10_000,
+      weeklyPercent: 50,
+      weeklyResetAt: NOW + 20_000,
+    });
+    expect(result.aggregation?.fiveHour?.usedPercent).toBe(50);
+    expect(result.aggregation?.weekly?.usedPercent).toBe(50);
+  });
+
   test("weights Pro, Prolite, and Plus and groups the next recovery", () => {
     const result = aggregateCodexPoolCapacity([
       account("pro", 10, { isMain: true, active: true, weeklyResetAt: NOW + 30_000 }),

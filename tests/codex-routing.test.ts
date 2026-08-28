@@ -116,6 +116,9 @@ describe("codex routing", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 81 })).toBe(81);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 })).toBe(91);
     expect(computeCodexUsageScore({ weeklyPercent: 15 })).toBe(15);
+    expect(computeCodexUsageScore({ fiveHourPercent: 94, weeklyPercent: 15 }, "plus")).toBe(94);
+    expect(computeCodexUsageScore({ fiveHourPercent: 94, weeklyPercent: 15 }, "pro")).toBe(15);
+    expect(computeCodexUsageScore({ fiveHourPercent: 94, weeklyPercent: 15 }, "prolite")).toBe(15);
   });
 
   test("go and free plans use only the 30d quota window", () => {
@@ -136,6 +139,9 @@ describe("codex routing", () => {
     expect(isCodexQuotaExhausted({}, "plus")).toBe(false);
     expect(isCodexQuotaExhausted({ weeklyPercent: 99.9 }, "plus")).toBe(false);
     expect(isCodexQuotaExhausted({ weeklyPercent: 100 }, "plus")).toBe(true);
+    expect(isCodexQuotaExhausted({ fiveHourPercent: 100, weeklyPercent: 20 }, "plus")).toBe(true);
+    expect(isCodexQuotaExhausted({ fiveHourPercent: 100, weeklyPercent: 20 }, "pro")).toBe(false);
+    expect(isCodexQuotaExhausted({ fiveHourPercent: 100, weeklyPercent: 20 }, "prolite")).toBe(false);
     expect(isCodexQuotaExhausted({ monthlyPercent: 100 }, "plus")).toBe(true);
     expect(isCodexQuotaExhausted({ weeklyPercent: 100, monthlyPercent: 20 }, "free")).toBe(false);
     expect(isCodexQuotaExhausted({ weeklyPercent: 20, monthlyPercent: 100 }, "go")).toBe(true);
@@ -1107,6 +1113,42 @@ describe("codex routing", () => {
         primary_window: { used_percent: 39, reset_at: 3, limit_window_seconds: 2_628_000 },
       },
     })).toEqual({ monthlyPercent: 39, monthlyResetAt: 3 });
+  });
+
+  test("WHAM exposes separate five-hour and weekly windows for Plus/Team", () => {
+    expect(parseUsageQuota({
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: { used_percent: 23, reset_at: 2, limit_window_seconds: 18_000 },
+        secondary_window: { used_percent: 47, reset_at: 3, limit_window_seconds: 604_800 },
+      },
+    })).toEqual({
+      fiveHourPercent: 23,
+      fiveHourResetAt: 2,
+      weeklyPercent: 47,
+      weeklyResetAt: 3,
+    });
+
+    expect(parseUsageQuota({
+      plan_type: "team",
+      rate_limit: {
+        primary_window: { used_percent: 12, reset_at: 4 },
+        secondary_window: { used_percent: 34, reset_at: 5 },
+      },
+    })).toEqual({
+      fiveHourPercent: 12,
+      fiveHourResetAt: 4,
+      weeklyPercent: 34,
+      weeklyResetAt: 5,
+    });
+
+    expect(parseUsageQuota({
+      plan_type: "prolite",
+      rate_limit: {
+        primary_window: { used_percent: 12, reset_at: 6, limit_window_seconds: 18_000 },
+        secondary_window: { used_percent: 34, reset_at: 7, limit_window_seconds: 604_800 },
+      },
+    })).toEqual({ weeklyPercent: 12, weeklyResetAt: 6 });
   });
 
   test("WHAM monthly primary preserves a legacy secondary weekly window", () => {

@@ -475,6 +475,17 @@ struct QuotaBarRow {
     segments: Vec<QuotaSegment>,
 }
 
+/// A display column derived from one quota window supplied by the management
+/// API. Standard fields and provider-specific `customWindows` are flattened
+/// into the same shape so the notch never needs to know a plan name or API
+/// family when laying out the row.
+struct QuotaBarColumn {
+    label: String,
+    percent: Option<f64>,
+    reset_at: Option<f64>,
+    value_label: Option<String>,
+}
+
 fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
     let Some(quota) = quota else {
         return Vec::new();
@@ -482,7 +493,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
     let mut rows = Vec::new();
     if let Some(percent) = quota.five_hour_percent {
         rows.push(QuotaBarRow {
-            label: "5h limit".into(),
+            label: "5h".into(),
             percent,
             reset_at: quota.five_hour_reset_at,
             value_label: None,
@@ -491,7 +502,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
     }
     if let Some(percent) = quota.weekly_percent {
         rows.push(QuotaBarRow {
-            label: "Weekly limit".into(),
+            label: "Weekly".into(),
             percent,
             reset_at: quota.weekly_reset_at,
             value_label: None,
@@ -500,7 +511,7 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
     }
     if let Some(percent) = quota.monthly_percent {
         rows.push(QuotaBarRow {
-            label: "Monthly limit".into(),
+            label: "Monthly".into(),
             percent,
             reset_at: quota.monthly_reset_at,
             value_label: None,
@@ -521,8 +532,35 @@ fn quota_rows(quota: Option<&Quota>) -> Vec<QuotaBarRow> {
     rows
 }
 
+fn quota_columns(quota: Option<&Quota>) -> Vec<QuotaBarColumn> {
+    quota_rows(quota)
+        .into_iter()
+        .flat_map(|row| {
+            if row.segments.is_empty() {
+                return vec![QuotaBarColumn {
+                    label: row.label,
+                    percent: Some(row.percent),
+                    reset_at: row.reset_at,
+                    value_label: row.value_label,
+                }];
+            }
+            row.segments
+                .into_iter()
+                .filter_map(|segment| {
+                    segment.percent.map(|percent| QuotaBarColumn {
+                        label: segment.label,
+                        percent: Some(percent),
+                        reset_at: segment.reset_at,
+                        value_label: None,
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn provider_has_quota(provider: &ProviderView) -> bool {
-    !quota_rows(provider.quota.as_ref()).is_empty()
+    !quota_columns(provider.quota.as_ref()).is_empty()
 }
 
 fn ordered_provider_views(providers: &[ProviderView]) -> Vec<ProviderView> {
@@ -532,20 +570,18 @@ fn ordered_provider_views(providers: &[ProviderView]) -> Vec<ProviderView> {
 }
 
 fn provider_height(provider: &ProviderView) -> i32 {
-    let rows = quota_rows(provider.quota.as_ref()).len() as i32;
-    if rows == 0 {
+    if quota_columns(provider.quota.as_ref()).is_empty() {
         48
     } else {
-        38 + rows * 28
+        38 + 28
     }
 }
 
 fn account_height(account: &AccountView) -> i32 {
-    let rows = quota_rows(account.quota.as_ref()).len() as i32;
-    if rows == 0 {
+    if quota_columns(account.quota.as_ref()).is_empty() {
         38
     } else {
-        34 + rows * 26
+        34 + 26
     }
 }
 
@@ -3246,8 +3282,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                 },
                 DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
-            let rows = quota_rows(provider.quota.as_ref());
-            if rows.is_empty() {
+            let columns = quota_columns(provider.quota.as_ref());
+            if columns.is_empty() {
                 set_text_color(dc, 0x008e949e);
                 draw_text(
                     dc,
@@ -3261,19 +3297,15 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                 );
             } else {
-                let mut quota_y = y + 31;
-                for quota in &rows {
-                    draw_quota_row(
-                        dc,
-                        quota,
-                        38,
-                        width - 18,
-                        quota_y,
-                        small_font,
-                        app.state.auto_switch_threshold,
-                    );
-                    quota_y += 28;
-                }
+                draw_quota_columns(
+                    dc,
+                    &columns,
+                    38,
+                    width - 18,
+                    y + 31,
+                    small_font,
+                    app.state.auto_switch_threshold,
+                );
             }
             y += provider_height;
             if app.expanded_providers.contains(&provider.name) {
@@ -3458,20 +3490,16 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                         },
                         DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                     );
-                    let mut quota_y = y + 29;
-                    let rows = quota_rows(account.quota.as_ref());
-                    for quota in &rows {
-                        draw_quota_row(
-                            dc,
-                            quota,
-                            58,
-                            width - 18,
-                            quota_y,
-                            small_font,
-                            app.state.auto_switch_threshold,
-                        );
-                        quota_y += 26;
-                    }
+                    let columns = quota_columns(account.quota.as_ref());
+                    draw_quota_columns(
+                        dc,
+                        &columns,
+                        58,
+                        width - 18,
+                        y + 29,
+                        small_font,
+                        app.state.auto_switch_threshold,
+                    );
                     y += account_height;
                 }
             }
@@ -4609,143 +4637,110 @@ unsafe fn measure_text_width(dc: HDC, text: &str) -> i32 {
     rect.right - rect.left
 }
 
-unsafe fn draw_quota_row(
+/// Draw every quota window as a column in one compact horizontal row.
+///
+/// The list is produced from the management API payload, including any
+/// provider-specific `customWindows`, so this layout intentionally has no
+/// knowledge of plans or provider names. New windows automatically become
+/// additional columns (with an adaptive width and gap).
+unsafe fn draw_quota_columns(
     dc: HDC,
-    row: &QuotaBarRow,
+    columns: &[QuotaBarColumn],
     left: i32,
     right: i32,
     top: i32,
     font: HFONT,
     threshold: u32,
 ) {
-    if !row.segments.is_empty() {
-        // One row of standard-style bars: label + reset left, percent right,
-        // bar below — repeated side by side for every allocation window.
-        let _ = SelectObject(dc, font);
-        let count = row.segments.len() as i32;
-        let gap = 12;
-        let width = ((right - left - gap * (count - 1)) / count).max(24);
-        for (index, segment) in row.segments.iter().enumerate() {
-            let x0 = left + index as i32 * (width + gap);
-            let percent = segment.percent.unwrap_or(0.0);
-            let warning = (threshold > 0 && percent >= threshold as f64) || percent >= 99.5;
-            // Label + reset share one line ABOVE the bar, like the standard rows.
-            let head = match format_reset(segment.reset_at) {
-                Some(reset) => format!("{} · {}", segment.label, reset),
-                None => segment.label.clone(),
-            };
-            set_text_color(dc, 0x00a6a6a6);
+    if columns.is_empty() || right <= left {
+        return;
+    }
+
+    let count = columns.len() as i32;
+    let gap = if count > 4 { 6 } else { 8 };
+    let available = right - left;
+    let usable = (available - gap * (count - 1)).max(count);
+    let column_width = (usable / count).max(1);
+    let _ = SelectObject(dc, font);
+
+    for (index, column) in columns.iter().enumerate() {
+        let x0 = left + index as i32 * (column_width + gap);
+        if x0 >= right {
+            break;
+        }
+        let x1 = if index + 1 == columns.len() {
+            right
+        } else {
+            (x0 + column_width).min(right)
+        };
+        if x1 <= x0 {
+            continue;
+        }
+
+        let percent = column.percent.unwrap_or(0.0);
+        let warning = (threshold > 0 && percent >= threshold as f64) || percent >= 99.5;
+        let head = match format_reset(column.reset_at) {
+            Some(reset) => format!("{} · {}", column.label, reset),
+            None => column.label.clone(),
+        };
+        let value_width = (x1 - x0).min(48).max(18);
+        let label_right = (x1 - value_width).max(x0 + 1);
+
+        set_text_color(dc, if warning { 0x0024bffb } else { 0x00a6a6a6 });
+        draw_text(
+            dc,
+            &head,
+            RECT {
+                left: x0,
+                top,
+                right: label_right,
+                bottom: top + 14,
+            },
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+
+        if let Some(value) = &column.value_label {
+            // Text-only windows (for example an estimated cost) still occupy
+            // a column, but do not draw a misleading percentage bar.
+            set_text_color(dc, 0x00ececec);
             draw_text(
                 dc,
-                &head,
+                value,
                 RECT {
-                    left: x0,
+                    left: label_right,
                     top,
-                    right: x0 + width - 44,
-                    bottom: top + 14,
-                },
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-            );
-            set_text_color(dc, if warning { 0x0024bffb } else { 0x00ececec });
-            draw_text(
-                dc,
-                &format_percent(percent),
-                RECT {
-                    left: x0 + width - 42,
-                    top,
-                    right: x0 + width,
+                    right: x1,
                     bottom: top + 14,
                 },
                 DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
-            fill_solid(
-                dc,
-                RECT {
-                    left: x0,
-                    top: top + 16,
-                    right: x0 + width,
-                    bottom: top + 21,
-                },
-                0x00303030,
-            );
-            draw_quota_fill(dc, x0, x0 + width, top + 16, percent, warning);
+            continue;
         }
-        return;
-    }
-    let warning = (threshold > 0 && row.percent >= threshold as f64) || row.percent >= 99.5;
-    let _ = SelectObject(dc, font);
-    set_text_color(dc, if warning { 0x0024bffb } else { 0x00a6a6a6 });
-    draw_text(
-        dc,
-        &row.label,
-        RECT {
-            left,
-            top,
-            right: left + 190,
-            bottom: top + 16,
-        },
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-    );
-    if let Some(value) = &row.value_label {
-        // Text-only row (e.g. an estimated cost): no bar, no percent.
-        set_text_color(dc, 0x00ececec);
-        draw_text(
-            dc,
-            value,
-            RECT {
-                left: left + 196,
-                top,
-                right,
-                bottom: top + 16,
-            },
-            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-        );
-        return;
-    }
-    if let Some(reset) = format_reset(row.reset_at) {
-        set_text_color(dc, 0x00868686);
-        draw_text(
-            dc,
-            &reset,
-            RECT {
-                left: left + 196,
-                top,
-                right,
-                bottom: top + 16,
-            },
-            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-        );
-    }
 
-    let bar_right = right - 76;
-    fill_solid(
-        dc,
-        RECT {
-            left,
-            top: top + 19,
-            right: bar_right,
-            bottom: top + 24,
-        },
-        0x00303030,
-    );
-    draw_quota_fill(dc, left, bar_right, top + 19, row.percent, warning);
-    set_text_color(dc, if warning { 0x0024bffb } else { 0x00ececec });
-    let percent = if row.percent >= 99.5 {
-        format!("{} limit", format_percent(row.percent))
-    } else {
-        format!("{} used", format_percent(row.percent))
-    };
-    draw_text(
-        dc,
-        &percent,
-        RECT {
-            left: bar_right + 8,
-            top: top + 12,
-            right,
-            bottom: top + 29,
-        },
-        DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-    );
+        set_text_color(dc, if warning { 0x0024bffb } else { 0x00ececec });
+        draw_text(
+            dc,
+            &format_percent(percent),
+            RECT {
+                left: label_right,
+                top,
+                right: x1,
+                bottom: top + 14,
+            },
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        fill_solid(
+            dc,
+            RECT {
+                left: x0,
+                top: top + 16,
+                right: x1,
+                bottom: top + 21,
+            },
+            0x00303030,
+        );
+        draw_quota_fill(dc, x0, x1, top + 16, percent, warning);
+    }
 }
 
 unsafe fn draw_quota_fill(dc: HDC, left: i32, right: i32, top: i32, percent: f64, warning: bool) {
@@ -5388,7 +5383,7 @@ mod account_control_tests {
         let rows = quota_rows(Some(&quota));
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, "Weekly limit");
+        assert_eq!(rows[0].label, "Weekly");
         assert_eq!(rows[0].percent, 100.0);
         assert_eq!(rows[0].reset_at, Some(reset_at));
     }
@@ -5412,6 +5407,10 @@ mod account_control_tests {
         assert_eq!(rows[0].label, "추산 비용 · 30일");
         assert_eq!(rows[0].percent, 0.0);
         assert_eq!(rows[0].value_label.as_deref(), Some("~$8.48"));
+
+        let columns = quota_columns(Some(&quota));
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].value_label.as_deref(), Some("~$8.48"));
     }
 
     #[test]
@@ -5440,6 +5439,40 @@ mod account_control_tests {
         assert_eq!(rows[0].segments[1].percent, Some(3.36));
         assert_eq!(rows[0].segments[2].label, "Monthly");
         assert_eq!(rows[0].segments[2].reset_at, None);
+
+        let columns = quota_columns(Some(&quota));
+        assert_eq!(columns.len(), 3);
+        assert_eq!(columns[0].label, "5h");
+        assert_eq!(columns[1].label, "Weekly");
+        assert_eq!(columns[2].label, "Monthly");
+    }
+
+    #[test]
+    fn standard_and_custom_api_windows_share_one_dynamic_column_row() {
+        let quota = Quota {
+            five_hour_percent: Some(12.0),
+            five_hour_reset_at: Some(1_785_945_600_000.0),
+            weekly_percent: Some(34.0),
+            monthly_percent: Some(56.0),
+            custom_windows: vec![QuotaWindow {
+                label: "API window".into(),
+                percent: Some(78.0),
+                reset_at: None,
+                value_label: None,
+                segments: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let columns = quota_columns(Some(&quota));
+        assert_eq!(
+            columns.iter().map(|column| column.label.as_str()).collect::<Vec<_>>(),
+            vec!["5h", "Weekly", "Monthly", "API window"]
+        );
+        assert_eq!(columns.iter().map(|column| column.percent).collect::<Vec<_>>(),
+            vec![Some(12.0), Some(34.0), Some(56.0), Some(78.0)]);
+        assert_eq!(account_height(&AccountView::default()), 38);
+        assert_eq!(account_height(&AccountView { quota: Some(quota), ..Default::default() }), 60);
     }
 
     #[test]

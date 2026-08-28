@@ -219,6 +219,8 @@ pub struct CodexAccount {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountQuota {
+    pub five_hour_percent: Option<f64>,
+    pub five_hour_reset_at: Option<f64>,
     pub weekly_percent: Option<f64>,
     pub weekly_reset_at: Option<f64>,
     pub monthly_percent: Option<f64>,
@@ -565,6 +567,8 @@ fn merge_account_quota(target: &mut Option<AccountQuota>, source: Option<Account
     let Some(target) = target.as_mut() else {
         return;
     };
+    fill_optional(&mut target.five_hour_percent, source.five_hour_percent);
+    fill_optional(&mut target.five_hour_reset_at, source.five_hour_reset_at);
     fill_optional(&mut target.weekly_percent, source.weekly_percent);
     fill_optional(&mut target.weekly_reset_at, source.weekly_reset_at);
     fill_optional(&mut target.monthly_percent, source.monthly_percent);
@@ -626,6 +630,8 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
                     .unwrap_or_else(|| "Available".to_string())
             };
             let quota = account.quota.map(|q| Quota {
+                five_hour_percent: q.five_hour_percent,
+                five_hour_reset_at: q.five_hour_reset_at,
                 weekly_percent: q.weekly_percent,
                 weekly_reset_at: q.weekly_reset_at,
                 monthly_percent: q.monthly_percent,
@@ -916,7 +922,7 @@ mod tests {
     fn codex_account_views_collapse_main_and_pool_rows_for_the_same_email() {
         let response: CodexAccountsResponse = serde_json::from_str(
             r#"{"accounts":[
-                {"id":"pool-coseung","email":" user@example.com ","alias":"Primary","paused":true,"needsReauth":true,"quota":{"monthlyPercent":25}},
+                {"id":"pool-coseung","email":" user@example.com ","alias":"Primary","paused":true,"needsReauth":true,"quota":{"fiveHourPercent":25,"fiveHourResetAt":1787100000,"monthlyPercent":25}},
                 {"id":"__main__","email":"USER@EXAMPLE.COM","isMain":true,"quota":{"weeklyPercent":50,"resetCredits":2}},
                 {"id":"other","email":"other@example.com"}
             ]}"#,
@@ -932,6 +938,8 @@ mod tests {
         assert!(accounts[0].paused);
         assert!(accounts[0].needs_reauth);
         let quota = accounts[0].quota.as_ref().expect("merged quota");
+        assert_eq!(quota.five_hour_percent, Some(25.0));
+        assert_eq!(quota.five_hour_reset_at, Some(1787100000.0));
         assert_eq!(quota.weekly_percent, Some(50.0));
         assert_eq!(quota.monthly_percent, Some(25.0));
         assert_eq!(quota.reset_credits, Some(2));

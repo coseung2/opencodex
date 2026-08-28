@@ -319,6 +319,25 @@ describe("rate-limit reset credits", () => {
       });
     });
 
+    it("clears a stale five-hour row when a later weekly-only snapshot arrives", () => {
+      clearAccountQuota();
+      setAccountQuotaFromParsed("five-hour-stale", {
+        fiveHourPercent: 88,
+        fiveHourResetAt: 1787000000,
+        weeklyPercent: 20,
+        weeklyResetAt: 1787100000,
+      });
+      setAccountQuotaFromParsed("five-hour-stale", {
+        weeklyPercent: 25,
+        weeklyResetAt: 1787200000,
+      });
+      expect(getAccountQuota("five-hour-stale")).toEqual({
+        weeklyPercent: 25,
+        weeklyResetAt: 1787200000,
+        updatedAt: expect.any(Number),
+      });
+    });
+
     it("classifies a ~30d primary header as monthly and clears stale weekly", () => {
       clearAccountQuota();
       updateAccountQuota("monthly-A", 100, 1787401330);
@@ -349,6 +368,50 @@ describe("rate-limit reset credits", () => {
         updatedAt: expect.any(Number),
       });
     });
+
+    it("keeps explicit five-hour and weekly headers as separate windows", () => {
+      clearAccountQuota();
+      const headers = new Headers({
+        "x-codex-primary-used-percent": "23",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-reset-at": "1787000000",
+        "x-codex-secondary-used-percent": "47",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-reset-at": "1787600000",
+      });
+      applyAccountQuotaFromUpstreamHeaders("dual-window", headers);
+      expect(getAccountQuota("dual-window")).toEqual({
+        fiveHourPercent: 23,
+        fiveHourResetAt: 1787000000,
+        weeklyPercent: 47,
+        weeklyResetAt: 1787600000,
+        updatedAt: expect.any(Number),
+      });
+    });
+
+    it("infers duration-less dual headers only for plans with a five-hour meter", () => {
+      const headers = new Headers({
+        "x-codex-primary-used-percent": "12",
+        "x-codex-primary-reset-at": "1787000000",
+        "x-codex-secondary-used-percent": "34",
+        "x-codex-secondary-reset-at": "1787600000",
+      });
+      clearAccountQuota();
+      applyAccountQuotaFromUpstreamHeaders("plus-dual", headers, undefined, "plus");
+      expect(getAccountQuota("plus-dual")).toMatchObject({
+        fiveHourPercent: 12,
+        weeklyPercent: 34,
+      });
+
+      clearAccountQuota();
+      applyAccountQuotaFromUpstreamHeaders("pro-dual", headers, undefined, "pro");
+      expect(getAccountQuota("pro-dual")).toEqual({
+        weeklyPercent: 12,
+        weeklyResetAt: 1787000000,
+        updatedAt: expect.any(Number),
+      });
+    });
+
     it("preserves resetCredits when applying header quota snapshots", () => {
       clearAccountQuota();
       updateAccountQuota("credits-A", 10, 111, 20, 222, 3);

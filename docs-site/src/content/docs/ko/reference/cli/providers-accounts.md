@@ -124,7 +124,7 @@ Codex pool selection applies to the next request after clearing existing affinit
 
 ### `ocx account refresh <provider> [--json]`
 
-Codex 풀에는 `ocx account refresh openai [--json]`를 사용합니다. 계정 할당량을 강제로 새로 고치고 사용 가능 주간/월간 비율과 재설정 시간을 출력합니다. 할당량 데이터가 없으면 0%가 아니라 알 수 없음으로 보고합니다. JSON 봉투는 `{ accounts: AccountRow[] }`이며, Codex 행마다 `quota`가 붙습니다.
+Codex 풀에는 `ocx account refresh openai [--json]`를 사용합니다. 계정 할당량을 강제로 새로 고치고 사용 가능한 5시간/주간/월간 비율과 재설정 시간을 출력합니다. 할당량 데이터가 없으면 0%가 아니라 알 수 없음으로 보고합니다. JSON 봉투는 `{ accounts: AccountRow[] }`이며, Codex 행마다 `quota`가 붙습니다.
 
 OAuth 및 API 키 제공자에는 제공자의 할당량 보고 엔드포인트를 강제로 새로 고칩니다. 토큰 재로그인이나 단순한 계정 목록 재읽기가 아닙니다. `--json`은 `{ provider, report: ProviderQuotaReport | null }`를 반환합니다. 지원되는 할당량 보고가 없는 제공자는 `no quota report available for <provider>`를 출력하고 종료 코드 0으로 끝납니다. 알 수 없는 제공자와 관리 API 실패는 종료 코드 1로 끝납니다. 상위 할당량 확인이 실패하거나 시간 초과되면 대시보드의 할당량 막대와 맞추어 null 또는 오래된 보고로만 떨어집니다(종료 코드 0).
 

@@ -70,9 +70,12 @@ function resetIso(value: number | undefined): string | null {
 function refreshLine(row: FamilyRows["rows"][number]): string {
   const parts = [row.id === MAIN_ID ? "main" : row.id, row.email, row.plan];
   const quota = row.quota;
-  if (!quota || (quota.weeklyPercent === undefined && quota.monthlyPercent === undefined)) {
+  if (!quota || (quota.fiveHourPercent === undefined && quota.weeklyPercent === undefined && quota.monthlyPercent === undefined)) {
     parts.push("quota: unknown");
   } else {
+    if (quota.fiveHourPercent !== undefined) parts.push(`5h ${quota.fiveHourPercent}%`);
+    const fiveHourReset = resetIso(quota.fiveHourResetAt);
+    if (fiveHourReset) parts.push(`resets ${fiveHourReset}`);
     if (quota.weeklyPercent !== undefined) parts.push(`weekly ${quota.weeklyPercent}%`);
     const weeklyReset = resetIso(quota.weeklyResetAt);
     if (weeklyReset) parts.push(`resets ${weeklyReset}`);

@@ -55,6 +55,7 @@ import { clearAccountNeedsReauth, isAccountNeedsReauth, markAccountNeedsReauth }
 import {
   clearAccountQuota,
   getAccountQuota,
+  isCodexFiveHourQuotaPlan,
   isCodexQuotaExhausted,
   listAccountQuotas,
   parseUsageQuota,
@@ -328,6 +329,9 @@ function exhaustedQuotaRetryAt(
 ): number | undefined {
   const monthlyOnly = isThirtyDayOnlyPlan(plan);
   const resetSeconds: number[] = [];
+  if (!monthlyOnly && isCodexFiveHourQuotaPlan(plan)
+    && quota.fiveHourPercent !== undefined && quota.fiveHourPercent >= 100
+    && quota.fiveHourResetAt !== undefined) resetSeconds.push(quota.fiveHourResetAt);
   if (!monthlyOnly && quota.weeklyPercent !== undefined && quota.weeklyPercent >= 100
     && quota.weeklyResetAt !== undefined) resetSeconds.push(quota.weeklyResetAt);
   if (quota.monthlyPercent !== undefined && quota.monthlyPercent >= 100

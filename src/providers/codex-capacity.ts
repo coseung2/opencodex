@@ -256,8 +256,17 @@ export function aggregateCodexPoolCapacity(
     : []);
   const quota: CodexCapacityQuota = {
     ...(fiveHour ? { fiveHourPercent: fiveHour.usedPercent } : {}),
+    ...(fiveHour && currentAccount?.quota?.fiveHourResetAt !== undefined
+      ? { fiveHourResetAt: currentAccount.quota.fiveHourResetAt }
+      : {}),
     ...(weekly ? { weeklyPercent: weekly.usedPercent } : {}),
+    ...(weekly && currentAccount?.quota?.weeklyResetAt !== undefined
+      ? { weeklyResetAt: currentAccount.quota.weeklyResetAt }
+      : {}),
     ...(monthly ? { monthlyPercent: monthly.usedPercent } : {}),
+    ...(monthly && currentAccount?.quota?.monthlyResetAt !== undefined
+      ? { monthlyResetAt: currentAccount.quota.monthlyResetAt }
+      : {}),
     ...(customWindows.length > 0 ? {
       customWindows: customWindows.map(window => ({ label: window.label, percent: window.usedPercent })),
     } : {}),

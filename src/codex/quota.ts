@@ -4,7 +4,9 @@ import { atomicWriteFile, getConfigDir } from "../config";
 import { captureConfigGeneration, type GenerationContext } from "../lib/state-store-sweeper";
 
 export type StoredAccountQuota = {
+  fiveHourPercent?: number;
   weeklyPercent?: number;
+  fiveHourResetAt?: number;
   monthlyPercent?: number;
   weeklyResetAt?: number;
   monthlyResetAt?: number;
@@ -41,13 +43,15 @@ export type WhamUsageResponse = {
 };
 
 type WhamUsageWindow = {
-  used_percent?: number;
-  reset_at?: number;
-  limit_window_seconds?: number;
+  used_percent?: number | string | null;
+  reset_at?: number | string | null;
+  limit_window_seconds?: number | string | null;
 };
 
 const MONTHLY_WINDOW_MIN_SECONDS = 28 * 24 * 60 * 60;
 const MONTHLY_WINDOW_MIN_MINUTES = MONTHLY_WINDOW_MIN_SECONDS / 60;
+const FIVE_HOUR_WINDOW_MIN_SECONDS = 2 * 60 * 60;
+const FIVE_HOUR_WINDOW_MAX_SECONDS = 12 * 60 * 60;
 
 const accountQuota = new Map<string, StoredAccountQuota>();
 let lastReconciledGeneration = 0;
@@ -62,15 +66,26 @@ function mayCommitAccountQuota(accountId: string, writerGeneration: number): boo
 export const CODEX_UNKNOWN_USAGE_SCORE = 101;
 export const CODEX_EXHAUSTED_USAGE_PERCENT = 100;
 
+/** Plans whose WHAM payloads expose a separate rolling five-hour window. */
+export function isCodexFiveHourQuotaPlan(plan: string | null | undefined): boolean {
+  const normalized = plan?.trim().toLowerCase();
+  // Business is the current name for the older Team workspace plan.
+  return normalized === "plus" || normalized === "team" || normalized === "business";
+}
+
 export function isCodexQuotaExhausted(
-  quota: Pick<StoredAccountQuota, "weeklyPercent" | "monthlyPercent"> | null,
+  quota: Pick<StoredAccountQuota, "fiveHourPercent" | "weeklyPercent" | "monthlyPercent"> | null,
   plan?: string | null,
 ): boolean {
   if (!quota) return false;
   const normalizedPlan = plan?.trim().toLowerCase();
   const values = normalizedPlan === "go" || normalizedPlan === "free"
     ? [quota.monthlyPercent]
-    : [quota.weeklyPercent, quota.monthlyPercent];
+    : [
+        ...(isCodexFiveHourQuotaPlan(plan) ? [quota.fiveHourPercent] : []),
+        quota.weeklyPercent,
+        quota.monthlyPercent,
+      ];
   return values.some(value => typeof value === "number"
     && Number.isFinite(value)
     && value >= CODEX_EXHAUSTED_USAGE_PERCENT);
@@ -97,15 +112,23 @@ function normalizeResetAt(value: unknown): number | undefined {
 }
 
 function hasKnownQuotaValue(quota: Omit<StoredAccountQuota, "updatedAt">): boolean {
-  return [quota.weeklyPercent, quota.monthlyPercent]
+  return [quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]
     .some(value => typeof value === "number" && Number.isFinite(value));
 }
 
+function windowDurationSeconds(window: WhamUsageWindow | null | undefined): number | undefined {
+  const raw: unknown = window?.limit_window_seconds;
+  const seconds = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && raw.trim() !== ""
+      ? Number(raw)
+      : undefined;
+  return typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
+
 function isExplicitMonthlyWindow(window: WhamUsageWindow | null | undefined): boolean {
-  const seconds = window?.limit_window_seconds;
-  return typeof seconds === "number"
-    && Number.isFinite(seconds)
-    && seconds >= MONTHLY_WINDOW_MIN_SECONDS;
+  const seconds = windowDurationSeconds(window);
+  return seconds !== undefined && seconds >= MONTHLY_WINDOW_MIN_SECONDS;
 }
 
 function isExplicitMonthlyWindowMinutes(windowMinutes: unknown): boolean {
@@ -119,9 +142,31 @@ function isExplicitMonthlyWindowMinutes(windowMinutes: unknown): boolean {
     && minutes >= MONTHLY_WINDOW_MIN_MINUTES;
 }
 
+function isExplicitFiveHourWindow(window: WhamUsageWindow | null | undefined): boolean {
+  const seconds = windowDurationSeconds(window);
+  return seconds !== undefined
+    && seconds >= FIVE_HOUR_WINDOW_MIN_SECONDS
+    && seconds <= FIVE_HOUR_WINDOW_MAX_SECONDS;
+}
+
+function isExplicitFiveHourWindowMinutes(windowMinutes: unknown): boolean {
+  const minutes = typeof windowMinutes === "number"
+    ? windowMinutes
+    : typeof windowMinutes === "string" && windowMinutes.trim() !== ""
+      ? Number(windowMinutes)
+      : undefined;
+  return typeof minutes === "number"
+    && Number.isFinite(minutes)
+    && minutes >= FIVE_HOUR_WINDOW_MIN_SECONDS / 60
+    && minutes <= FIVE_HOUR_WINDOW_MAX_SECONDS / 60;
+}
 
 function snapshotHasWeekly(quota: Omit<StoredAccountQuota, "updatedAt">): boolean {
   return quota.weeklyPercent !== undefined || quota.weeklyResetAt !== undefined;
+}
+
+function snapshotHasFiveHour(quota: Omit<StoredAccountQuota, "updatedAt">): boolean {
+  return quota.fiveHourPercent !== undefined || quota.fiveHourResetAt !== undefined;
 }
 
 function snapshotHasMonthly(quota: Omit<StoredAccountQuota, "updatedAt">): boolean {
@@ -129,7 +174,7 @@ function snapshotHasMonthly(quota: Omit<StoredAccountQuota, "updatedAt">): boole
 }
 
 function snapshotHasUsage(quota: Omit<StoredAccountQuota, "updatedAt">): boolean {
-  return snapshotHasWeekly(quota) || snapshotHasMonthly(quota);
+  return snapshotHasFiveHour(quota) || snapshotHasWeekly(quota) || snapshotHasMonthly(quota);
 }
 export function setAccountQuotaFromParsed(
   accountId: string,
@@ -143,6 +188,8 @@ export function setAccountQuotaFromParsed(
   const creditsOnly = quota.resetCredits !== undefined && !snapshotHasUsage(quota);
 
   if (creditsOnly) {
+    if (existing?.fiveHourPercent !== undefined) next.fiveHourPercent = existing.fiveHourPercent;
+    if (existing?.fiveHourResetAt !== undefined) next.fiveHourResetAt = existing.fiveHourResetAt;
     if (existing?.weeklyPercent !== undefined) next.weeklyPercent = existing.weeklyPercent;
     if (existing?.weeklyResetAt !== undefined) next.weeklyResetAt = existing.weeklyResetAt;
     if (existing?.monthlyPercent !== undefined) next.monthlyPercent = existing.monthlyPercent;
@@ -153,20 +200,32 @@ export function setAccountQuotaFromParsed(
     return;
   }
 
-  if (snapshotHasWeekly(quota)) {
-    if (quota.weeklyPercent !== undefined) next.weeklyPercent = quota.weeklyPercent;
-    if (quota.weeklyResetAt !== undefined) next.weeklyResetAt = quota.weeklyResetAt;
-  } else if (snapshotHasMonthly(quota) && !snapshotHasWeekly(quota)) {
-    // Monthly-only snapshots intentionally clear stale weekly values (issue #382).
-  } else if (existing?.weeklyPercent !== undefined) {
-    next.weeklyPercent = existing.weeklyPercent;
-    if (existing.weeklyResetAt !== undefined) next.weeklyResetAt = existing.weeklyResetAt;
+  const hasFiveHour = snapshotHasFiveHour(quota);
+  const hasWeekly = snapshotHasWeekly(quota);
+  const hasMonthly = snapshotHasMonthly(quota);
+
+  if (hasFiveHour) {
+    if (quota.fiveHourPercent !== undefined) next.fiveHourPercent = quota.fiveHourPercent;
+    if (quota.fiveHourResetAt !== undefined) next.fiveHourResetAt = quota.fiveHourResetAt;
+    // A five-hour-only response can be a partial snapshot; retain a known
+    // weekly value until a later response supplies that window.
+    if (!hasWeekly && existing?.weeklyPercent !== undefined) {
+      next.weeklyPercent = existing.weeklyPercent;
+      if (existing.weeklyResetAt !== undefined) next.weeklyResetAt = existing.weeklyResetAt;
+    }
   }
 
-  if (snapshotHasMonthly(quota)) {
+  if (hasWeekly) {
+    if (quota.weeklyPercent !== undefined) next.weeklyPercent = quota.weeklyPercent;
+    if (quota.weeklyResetAt !== undefined) next.weeklyResetAt = quota.weeklyResetAt;
+  } else if (hasMonthly && !hasFiveHour) {
+    // Monthly-only snapshots intentionally clear stale weekly values (issue #382).
+  }
+
+  if (hasMonthly) {
     if (quota.monthlyPercent !== undefined) next.monthlyPercent = quota.monthlyPercent;
     if (quota.monthlyResetAt !== undefined) next.monthlyResetAt = quota.monthlyResetAt;
-  } else if (snapshotHasWeekly(quota) && existing?.monthlyPercent !== undefined) {
+  } else if ((hasWeekly || hasFiveHour) && existing?.monthlyPercent !== undefined) {
     next.monthlyPercent = existing.monthlyPercent;
     if (existing.monthlyResetAt !== undefined) next.monthlyResetAt = existing.monthlyResetAt;
   }
@@ -178,7 +237,10 @@ export function setAccountQuotaFromParsed(
   schedulePersistAccountQuotas();
 }
 
-export function parseUpstreamQuotaHeaders(headers: Headers): Omit<StoredAccountQuota, "updatedAt"> | null {
+export function parseUpstreamQuotaHeaders(
+  headers: Headers,
+  plan?: string | null,
+): Omit<StoredAccountQuota, "updatedAt"> | null {
   const primaryRaw = headers.get("x-codex-primary-used-percent");
   const secondaryRaw = headers.get("x-codex-secondary-used-percent");
   const tertiaryRaw = headers.get("x-codex-tertiary-used-percent");
@@ -196,24 +258,51 @@ export function parseUpstreamQuotaHeaders(headers: Headers): Omit<StoredAccountQ
   const secondaryResetAt = normalizeResetAt(secondaryResetRaw);
   const tertiaryResetAt = normalizeResetAt(tertiaryResetRaw);
   const primaryIsMonthly = primaryRaw !== null && isExplicitMonthlyWindowMinutes(primaryWindowMinutes);
+  const trackFiveHour = plan == null || isCodexFiveHourQuotaPlan(plan);
+  const primaryIsFiveHour = trackFiveHour && primaryRaw !== null && isExplicitFiveHourWindowMinutes(primaryWindowMinutes);
+  const secondaryIsFiveHour = trackFiveHour && secondaryRaw !== null && isExplicitFiveHourWindowMinutes(secondaryWindowMinutes);
 
   if (primaryIsMonthly) {
     if (primaryPercent !== undefined) {
       quota.monthlyPercent = primaryPercent;
       if (primaryResetAt !== undefined) quota.monthlyResetAt = primaryResetAt;
     }
-    if (secondaryPercent !== undefined) {
+    if (secondaryIsFiveHour && secondaryPercent !== undefined) {
+      quota.fiveHourPercent = secondaryPercent;
+      if (secondaryResetAt !== undefined) quota.fiveHourResetAt = secondaryResetAt;
+    } else if (secondaryPercent !== undefined) {
       quota.weeklyPercent = secondaryPercent;
       if (secondaryResetAt !== undefined) quota.weeklyResetAt = secondaryResetAt;
     }
   } else {
-    const weeklyPercent = primaryPercent ?? secondaryPercent;
-    const weeklyResetAt = primaryPercent !== undefined
-      ? primaryResetAt
-      : secondaryResetAt;
+    if (primaryIsFiveHour && primaryPercent !== undefined) {
+      quota.fiveHourPercent = primaryPercent;
+      if (primaryResetAt !== undefined) quota.fiveHourResetAt = primaryResetAt;
+    }
+    if (secondaryIsFiveHour && secondaryPercent !== undefined) {
+      quota.fiveHourPercent ??= secondaryPercent;
+      if (quota.fiveHourResetAt === undefined && secondaryResetAt !== undefined) {
+        quota.fiveHourResetAt = secondaryResetAt;
+      }
+    }
+    const weeklyPercent = primaryIsFiveHour ? secondaryPercent : primaryPercent ?? secondaryPercent;
+    const weeklyResetAt = primaryIsFiveHour
+      ? secondaryResetAt
+      : primaryPercent !== undefined ? primaryResetAt : secondaryResetAt;
     if (weeklyPercent !== undefined) {
       quota.weeklyPercent = weeklyPercent;
       if (weeklyResetAt !== undefined) quota.weeklyResetAt = weeklyResetAt;
+    }
+    if (trackFiveHour
+      && !primaryIsFiveHour
+      && primaryPercent !== undefined
+      && secondaryPercent !== undefined
+      && primaryWindowMinutes === null
+      && secondaryWindowMinutes === null) {
+      quota.fiveHourPercent = primaryPercent;
+      if (primaryResetAt !== undefined) quota.fiveHourResetAt = primaryResetAt;
+      quota.weeklyPercent = secondaryPercent;
+      if (secondaryResetAt !== undefined) quota.weeklyResetAt = secondaryResetAt;
     }
   }
 
@@ -229,8 +318,9 @@ export function applyAccountQuotaFromUpstreamHeaders(
   accountId: string,
   headers: Headers,
   writerGeneration = captureConfigGeneration(),
+  plan?: string | null,
 ): void {
-  const quota = parseUpstreamQuotaHeaders(headers);
+  const quota = parseUpstreamQuotaHeaders(headers, plan);
   if (!quota) return;
   setAccountQuotaFromParsed(accountId, quota, writerGeneration);
 }
@@ -251,7 +341,9 @@ export function updateAccountQuota(
   if (nextWeekly === undefined && nextMonthly === undefined && resetCredits === undefined) return;
 
   const quota: StoredAccountQuota = {
+    ...(existing?.fiveHourPercent !== undefined ? { fiveHourPercent: existing.fiveHourPercent } : {}),
     ...(existing?.weeklyPercent !== undefined ? { weeklyPercent: existing.weeklyPercent } : {}),
+    ...(existing?.fiveHourResetAt !== undefined ? { fiveHourResetAt: existing.fiveHourResetAt } : {}),
     ...(existing?.monthlyPercent !== undefined ? { monthlyPercent: existing.monthlyPercent } : {}),
     ...(existing?.weeklyResetAt !== undefined ? { weeklyResetAt: existing.weeklyResetAt } : {}),
     ...(existing?.monthlyResetAt !== undefined ? { monthlyResetAt: existing.monthlyResetAt } : {}),
@@ -378,20 +470,43 @@ export function parseUsageQuota(data: WhamUsageResponse): Omit<StoredAccountQuot
   const secondaryResetAt = normalizeResetAt(secondaryWindow?.reset_at);
   const tertiaryResetAt = normalizeResetAt(tertiaryWindow?.reset_at);
   const primaryIsMonthly = isExplicitMonthlyWindow(primaryWindow);
+  const primaryIsFiveHour = isExplicitFiveHourWindow(primaryWindow);
+  const secondaryIsFiveHour = isExplicitFiveHourWindow(secondaryWindow);
 
-  // [Decision Log]
-  // - 목적과 의도: distinguish weekly and roughly monthly WHAM primary windows without plan-name guesses.
-  // - 기존 구현 및 제약 조건: primary meant weekly, and older responses omit limit_window_seconds.
-  // - 검토한 주요 대안: exact-duration matching, plan-specific mapping, and a duration lower bound.
-  // - 선택한 방식: only an explicit primary duration of at least 28 days changes it to monthly.
-  // - 다른 대안 대신 이 방식을 선택한 이유: it accepts calendar-month variance and preserves legacy payloads.
-  // - 장점, 단점 및 영향: Team monthly quotas classify correctly; unknown durations remain weekly by design.
-  const weeklyPercent = primaryIsMonthly ? secondaryPercent : primaryPercent ?? secondaryPercent;
-  const weeklyResetAt = primaryIsMonthly
+  // Explicit durations win over positional assumptions. This matters because
+  // WHAM has shipped both a legacy primary=weekly shape and a dual-window
+  // primary=5h, secondary=weekly shape over time.
+  let weeklyPercent = primaryIsMonthly ? secondaryPercent : primaryPercent ?? secondaryPercent;
+  let weeklyResetAt = primaryIsMonthly
     ? secondaryResetAt
     : primaryPercent !== undefined ? primaryResetAt : secondaryResetAt;
   const monthlyPercent = primaryIsMonthly ? primaryPercent ?? tertiaryPercent : tertiaryPercent;
   const monthlyResetAt = primaryIsMonthly && primaryPercent !== undefined ? primaryResetAt : tertiaryResetAt;
+  const trackFiveHour = !thirtyDayOnly
+    && (isCodexFiveHourQuotaPlan(data.plan_type)
+      // If WHAM omitted plan_type, an explicit 5h duration is still
+      // unambiguous and should not be discarded from the display contract.
+      || (data.plan_type == null && (primaryIsFiveHour || secondaryIsFiveHour)));
+  let fiveHourPercent = trackFiveHour && primaryIsFiveHour ? primaryPercent : undefined;
+  let fiveHourResetAt = trackFiveHour && primaryIsFiveHour ? primaryResetAt : undefined;
+  if (trackFiveHour && secondaryIsFiveHour && fiveHourPercent === undefined) {
+    fiveHourPercent = secondaryPercent;
+    fiveHourResetAt = secondaryResetAt;
+  }
+  // Older dual-window payloads omitted durations. For Plus/Team/Business,
+  // the primary+secondary pair is the legacy positional 5h+weekly shape.
+  if (trackFiveHour && !primaryIsMonthly && !primaryIsFiveHour
+    && primaryPercent !== undefined && secondaryPercent !== undefined
+    && windowDurationSeconds(primaryWindow) === undefined
+    && windowDurationSeconds(secondaryWindow) === undefined) {
+    fiveHourPercent = primaryPercent;
+    fiveHourResetAt = primaryResetAt;
+    weeklyPercent = secondaryPercent;
+    weeklyResetAt = secondaryResetAt;
+  } else if (trackFiveHour && primaryIsFiveHour) {
+    weeklyPercent = secondaryPercent;
+    weeklyResetAt = secondaryResetAt;
+  }
   if (thirtyDayOnly) {
     if (monthlyPercent !== undefined) {
       quota.monthlyPercent = monthlyPercent;
@@ -400,6 +515,10 @@ export function parseUsageQuota(data: WhamUsageResponse): Omit<StoredAccountQuot
   } else if (weeklyPercent !== undefined) {
     quota.weeklyPercent = weeklyPercent;
     if (weeklyResetAt !== undefined) quota.weeklyResetAt = weeklyResetAt;
+  }
+  if (trackFiveHour && fiveHourPercent !== undefined) {
+    quota.fiveHourPercent = fiveHourPercent;
+    if (fiveHourResetAt !== undefined) quota.fiveHourResetAt = fiveHourResetAt;
   }
   if (!thirtyDayOnly && monthlyPercent !== undefined) {
     quota.monthlyPercent = monthlyPercent;

@@ -21,7 +21,7 @@ import {
   selectPriorityTier,
   seedPoolRotationAccount,
 } from "./pool-rotation";
-import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota } from "./quota";
+import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota, isCodexFiveHourQuotaPlan } from "./quota";
 import { MAIN_CODEX_ACCOUNT_ID, getMainAccountPlan } from "./main-account";
 import { isSelectableCodexPoolAccount } from "./account-id";
 import type { OcxConfig } from "../types";
@@ -287,6 +287,7 @@ function deleteScopedHealth(accountId: string, scope: CodexQuotaScope): void {
 }
 
 export function computeCodexUsageScore(quota: {
+  fiveHourPercent?: number;
   weeklyPercent?: number;
   monthlyPercent?: number;
 } | null, plan?: string | null): number {
@@ -297,7 +298,11 @@ export function computeCodexUsageScore(quota: {
       ? quota.monthlyPercent
       : CODEX_UNKNOWN_USAGE_SCORE;
   }
-  const values = [quota.weeklyPercent, quota.monthlyPercent]
+  const values = [
+    ...(isCodexFiveHourQuotaPlan(plan) ? [quota.fiveHourPercent] : []),
+    quota.weeklyPercent,
+    quota.monthlyPercent,
+  ]
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   return values.length > 0 ? Math.max(...values) : CODEX_UNKNOWN_USAGE_SCORE;
 }

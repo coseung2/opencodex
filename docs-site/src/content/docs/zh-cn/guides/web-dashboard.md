@@ -80,8 +80,12 @@ Dashboard 的 **Sub-agent delegation** 选择器会保存 `injectionModel`，以
 - Thread affinity 可避免每个请求都来回切换账号。启用配额自动切换后，长时间运行的 thread 会被
   定期重新评估；当相关 usage 达到阈值，并且存在使用率确实更低的可用账号时，该 thread 可能会
   重新绑定。
-- 新 session 可以选择 usage 最低的可用账号。付费计划按已知 5h、每周、30d 窗口中的最高使用率
-  评分；Go/Free 计划只使用 30d 窗口。
+- 新 session 可以选择 usage 最低的可用账号。提供 5h 窗口的计划（目前为 Plus/Team/Business）按
+  已知 5h、每周、30d 窗口中的最高使用率评分；Pro/ProLite 使用其提供的窗口，Go/Free 计划只使用
+  30d 窗口。
+- WHAM 提供 `limit_window_seconds` 时，Codex Auth 会把不小于 28 天的 primary window 分类为 30d，
+  而不是每周。单窗口且没有时长时仍按旧规则视为每周；Plus/Team/Business 的双窗口响应保留
+  旧的 primary=5h、secondary=每周顺序。
 - **Refresh quotas** 会立即重新读取账号 usage，使路由逻辑与页面上的账号卡片使用同一份数据。
 - 池账号的请求日志使用 `p3fa91c` 这类不透明标签，不会记录账号邮箱。
 
