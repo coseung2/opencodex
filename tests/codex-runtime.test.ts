@@ -511,7 +511,7 @@ describe("resolveCodexRuntime", () => {
           `  echo "codex-cli ${version}"`,
           "  exit 0",
           "fi",
-          `cat "$(dirname "$0")/catalog.json"`,
+          `printf '%s\\n' '${catalog}'`,
           "",
         ].join("\n"), "utf8");
         chmodSync(path, 0o755);
