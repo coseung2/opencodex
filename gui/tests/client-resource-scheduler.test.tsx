@@ -33,9 +33,13 @@ beforeEach(() => {
     .IS_REACT_ACT_ENVIRONMENT = true;
 });
 
-afterEach(() => {
-  for (const root of mountedRoots.splice(0)) act(() => root.unmount());
+afterEach(async () => {
+  await act(async () => {
+    for (const root of mountedRoots.splice(0)) root.unmount();
+    await new Promise<void>((resolve) => testWindow.setTimeout(resolve, 0));
+  });
   clearClientResourceStoresForTests();
+  await new Promise<void>((resolve) => testWindow.setTimeout(resolve, 0));
   testWindow.close();
   for (const key of globals) {
     Object.defineProperty(globalThis, key, { configurable: true, value: previousGlobals[key] });
