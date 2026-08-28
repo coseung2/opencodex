@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 
 export const WINDOWS_BUN_BATCH_SIZE = 48;
 export const WINDOWS_BUN_PARALLELISM = 2;
+export const FULL_SUITE_TEST_TIMEOUT_MS = 15_000;
 
 // Keep fresh-process batching for the bundled 1.4.0 Windows runtime. A measured
 // unbatched run remained active past ten minutes and reached ~1.97 GiB private
@@ -188,6 +189,7 @@ if (import.meta.main) {
             process.execPath,
             "test",
             "--isolate",
+            `--timeout=${FULL_SUITE_TEST_TIMEOUT_MS}`,
             `--parallel=${WINDOWS_BUN_PARALLELISM}`,
             ...batch,
           ],
@@ -206,7 +208,13 @@ if (import.meta.main) {
       }
     } else {
       const child = Bun.spawnSync(
-        [process.execPath, "test", "--isolate", ...(requestedTests.length > 0 ? requestedTests : ["./tests/"])],
+        [
+          process.execPath,
+          "test",
+          "--isolate",
+          `--timeout=${FULL_SUITE_TEST_TIMEOUT_MS}`,
+          ...(requestedTests.length > 0 ? requestedTests : ["./tests/"]),
+        ],
         {
           env: isolated.env,
           stdin: "inherit",

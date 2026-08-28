@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   createIsolatedTestEnvironment,
   deterministicTestBatches,
+  FULL_SUITE_TEST_TIMEOUT_MS,
   discoverTestFiles,
   shouldBatchFullSuite,
   WINDOWS_BUN_BATCH_SIZE,
@@ -31,6 +32,10 @@ describe("test runner isolation", () => {
 });
 
 describe("Windows Bun full-suite batching", () => {
+  test("full-suite cases have headroom above Bun's 5 second default", () => {
+    expect(FULL_SUITE_TEST_TIMEOUT_MS).toBe(15_000);
+  });
+
   test("covers the legacy and bundled Windows runtimes only for a full suite", () => {
     expect(shouldBatchFullSuite("win32", "1.3.14", [])).toBe(true);
     expect(shouldBatchFullSuite("win32", "1.3.14+canary.1", [])).toBe(true);
