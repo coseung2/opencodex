@@ -269,6 +269,13 @@ fn http_error(status: u32, body: &[u8]) -> String {
     }
 }
 
+pub fn is_http_status(error: &str, status: u32) -> bool {
+    let prefix = format!("OCX returned HTTP {status}");
+    error
+        .strip_prefix(&prefix)
+        .is_some_and(|remainder| remainder.is_empty() || remainder.starts_with(':'))
+}
+
 fn management_token() -> Option<String> {
     // OPENCODEX_API_AUTH_TOKEN protects the data plane and is deliberately not an
     // admin credential. Treating it as one hides every management-backed Notch
@@ -551,6 +558,17 @@ mod tests {
         assert_eq!(http_error(500, b"not json"), "OCX returned HTTP 500");
         let long = format!(r#"{{"error":"{}"}}"#, "x".repeat(600));
         assert_eq!(http_error(400, long.as_bytes()).len(), 23 + 512);
+    }
+
+    #[test]
+    fn http_status_detection_requires_an_exact_status_boundary() {
+        assert!(is_http_status(
+            "OCX returned HTTP 409: login already in progress",
+            409
+        ));
+        assert!(is_http_status("OCX returned HTTP 409", 409));
+        assert!(!is_http_status("OCX returned HTTP 4090", 409));
+        assert!(!is_http_status("upstream returned HTTP 409", 409));
     }
 
     #[test]

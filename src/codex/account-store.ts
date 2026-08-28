@@ -179,6 +179,7 @@ export function markCodexAccountQuotaValidationPending(
   id: string,
   reason: string,
   retryAtMs: number | undefined,
+  pauseOwned = true,
 ): void {
   withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
@@ -189,7 +190,7 @@ export function markCodexAccountQuotaValidationPending(
       lastCodexValidationStatus: "quota_pending",
       lastCodexValidationError: reason,
       ...(retryAtMs !== undefined ? { codexQuotaRetryAt: retryAtMs } : {}),
-      codexQuotaPauseOwned: true,
+      codexQuotaPauseOwned: pauseOwned ? true : undefined,
     };
     persist(store);
   });

@@ -299,14 +299,14 @@ Catalog sync makes the selected sub-agent models available to Codex; see [Codex 
 
 ## Codex account warmup
 
-When a ChatGPT account is added to the Codex account pool, opencodex verifies it before persistence
+When a ChatGPT account is added to or reauthenticated in the Codex account pool, opencodex verifies it before persistence
 with a small streaming request to the Codex Responses backend. The request uses a real Responses
 item array (`input: [{ type: "message", ... }]`), waits for `response.completed`, and defaults to
 `gpt-5.4-mini`. If that model returns HTTP 400, it retries with `gpt-5.5`; structured upstream error
 details are surfaced without exposing raw response bodies. Background revalidation is separate and
 off by default; it runs only when Token Guardian is enabled, the `chatgpt` refresh policy is
 `proactive`, and `tokenGuardian.codexWarmupEnabled` is true. One exception is an account whose
-fresh usage report confirms that its quota is exhausted: opencodex saves it in a paused,
+fresh usage report confirms that its quota is exhausted: opencodex saves new or replacement credentials in a paused,
 quota-pending state and automatically retries warmup after the reported reset. Authentication and
 other warmup failures still reject the account.
 

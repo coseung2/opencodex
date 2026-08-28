@@ -1302,6 +1302,27 @@ fn cancel_codex_flow(flow_id: &str) -> Result<(), String> {
     api::post_empty("/api/codex-auth/login/cancel", &codex_cancel_body(flow_id))
 }
 
+fn retry_codex_login_after_conflict<T>(
+    mut start: impl FnMut() -> Result<T, String>,
+    mut cancel: impl FnMut() -> Result<(), String>,
+) -> Result<T, String> {
+    match start() {
+        Err(error) if api::is_http_status(&error, 409) => {
+            cancel()?;
+            start()
+        }
+        result => result,
+    }
+}
+
+fn start_codex_reauth(control: &ReauthControl) -> Result<AuthFlowResponse, String> {
+    let body = serde_json::json!({"id": control.id, "reauth": true});
+    retry_codex_login_after_conflict(
+        || api::post_json("/api/codex-auth/login", &body),
+        || api::post_empty("/api/codex-auth/login/cancel", &serde_json::json!({})),
+    )
+}
+
 fn cancel_codex_if_requested(cancel: &AuthCancellation) -> Result<(), String> {
     if !cancel.is_requested() {
         return Ok(());
@@ -1429,10 +1450,7 @@ fn launch_reauth(hwnd: HWND, control: ReauthControl) {
     thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(300);
         let result = if control.provider == "openai" {
-            let flow: Result<AuthFlowResponse, String> = api::post_json(
-                "/api/codex-auth/login",
-                &serde_json::json!({"id": control.id, "reauth": true}),
-            );
+            let flow = start_codex_reauth(&control);
             flow.and_then(|flow| {
                 let flow_id = flow
                     .flow_id
@@ -5211,6 +5229,53 @@ mod account_control_tests {
             codex_cancel_body("flow/a"),
             serde_json::json!({"flowId": "flow/a"})
         );
+    }
+
+    #[test]
+    fn codex_reauth_cancels_a_stale_login_and_retries_once() {
+        let mut starts = 0;
+        let mut cancels = 0;
+        let result = retry_codex_login_after_conflict(
+            || {
+                starts += 1;
+                if starts == 1 {
+                    Err("OCX returned HTTP 409: login already in progress".into())
+                } else {
+                    Ok("flow-ready")
+                }
+            },
+            || {
+                cancels += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result.as_deref(), Ok("flow-ready"));
+        assert_eq!(starts, 2);
+        assert_eq!(cancels, 1);
+    }
+
+    #[test]
+    fn codex_reauth_surfaces_a_second_conflict_without_looping() {
+        let mut starts = 0;
+        let mut cancels = 0;
+        let result = retry_codex_login_after_conflict::<()>(
+            || {
+                starts += 1;
+                Err("OCX returned HTTP 409: login already in progress".into())
+            },
+            || {
+                cancels += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err("OCX returned HTTP 409: login already in progress".into())
+        );
+        assert_eq!(starts, 2);
+        assert_eq!(cancels, 1);
     }
 
     #[test]

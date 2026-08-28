@@ -1622,8 +1622,7 @@ export async function handleCodexAuthAPI(
 
                 const warmup = await verifyCodexAccountWarmup(accountId, cred.access, oauthAccountId);
                 const freshRegistrationQuota = quota ? { quota, ...(plan ? { plan } : {}) } : null;
-                const quotaDeferred = !reauth
-                  && !warmup.ok
+                const quotaDeferred = !warmup.ok
                   && mayDeferQuotaWarmup(warmup, freshRegistrationQuota);
                 if (!warmup.ok && !quotaDeferred) {
                   const body = await warmup.response.json().catch(() => ({})) as { error?: string; reason?: string };
@@ -1657,6 +1656,9 @@ export async function handleCodexAuthAPI(
 
                 const releaseOwnedQuotaPause = reauth
                   && readCodexAccountRecord(accountId)?.codexQuotaPauseOwned === true;
+                const quotaPauseOwned = !reauth
+                  || releaseOwnedQuotaPause
+                  || !isCodexAccountPaused(latestConfig, accountId);
                 const credentialGeneration = saveCodexAccountCredential(accountId, {
                   accessToken: cred.access,
                   refreshToken: cred.refresh,
@@ -1693,6 +1695,7 @@ export async function handleCodexAuthAPI(
                     accountId,
                     codexWarmupFailureReason(warmup.error),
                     exhaustedQuotaRetryAt(freshRegistrationQuota.quota, freshRegistrationQuota.plan),
+                    quotaPauseOwned,
                   );
                 } else if (warmup.ok) {
                   markCodexAccountValidated(accountId, warmup.validatedAt, credentialGeneration);

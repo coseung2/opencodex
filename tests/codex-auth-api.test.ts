@@ -3352,6 +3352,126 @@ describe("codex-auth API", () => {
     });
   });
 
+  test("OAuth reauth persists replacement credentials while exhausted quota delays warmup", async () => {
+    const resetAt = Math.floor(Date.now() / 1000) + 600;
+    const config = makeConfig({
+      codexAccounts: [{ id: "reauth-quota-full", email: "reauth-full@example.test", plan: "pro", isMain: false }],
+    });
+    saveCodexAccountCredential("reauth-quota-full", {
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      expiresAt: Date.now() + 60_000,
+      chatgptAccountId: "acct-reauth-quota-full",
+    });
+
+    const result = await completeMockCodexOAuth({
+      config,
+      requestBody: { id: "reauth-quota-full", reauth: true },
+      oauthAccountId: "acct-reauth-quota-full",
+      email: "reauth-full@example.test",
+      onWarmup: () => {},
+      usageResponse: () => new Response(JSON.stringify({
+        email: "reauth-full@example.test",
+        plan_type: "pro",
+        rate_limit: { primary_window: { used_percent: 100, reset_at: resetAt } },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      warmupResponse: () => new Response(JSON.stringify({ error: { message: "rate limit reached" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }),
+    });
+
+    expect(result.state).toMatchObject({ status: "done" });
+    expect(config.pausedCodexAccountIds).toContain("reauth-quota-full");
+    expect(getCodexAccountCredential("reauth-quota-full")).toMatchObject({
+      accessToken: "access-reauth-quota-full",
+      refreshToken: "refresh-reauth-quota-full",
+    });
+    expect(getAccountQuota("reauth-quota-full")).toMatchObject({
+      weeklyPercent: 100,
+      weeklyResetAt: resetAt,
+    });
+    expect(readCodexAccountRecord("reauth-quota-full")).toMatchObject({
+      lastCodexValidationStatus: "quota_pending",
+      codexQuotaRetryAt: resetAt * 1000,
+      codexQuotaPauseOwned: true,
+    });
+  });
+
+  test("OAuth reauth rejects exhausted quota without a future reset and preserves old credentials", async () => {
+    const config = makeConfig({
+      codexAccounts: [{ id: "reauth-quota-no-reset", email: "reauth-no-reset@example.test", plan: "pro", isMain: false }],
+    });
+    saveCodexAccountCredential("reauth-quota-no-reset", {
+      accessToken: "old-access-no-reset",
+      refreshToken: "old-refresh-no-reset",
+      expiresAt: Date.now() + 60_000,
+      chatgptAccountId: "acct-reauth-quota-no-reset",
+    });
+
+    const result = await completeMockCodexOAuth({
+      config,
+      requestBody: { id: "reauth-quota-no-reset", reauth: true },
+      oauthAccountId: "acct-reauth-quota-no-reset",
+      email: "reauth-no-reset@example.test",
+      onWarmup: () => {},
+      usageResponse: () => new Response(JSON.stringify({
+        email: "reauth-no-reset@example.test",
+        plan_type: "pro",
+        rate_limit: { primary_window: { used_percent: 100 } },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      warmupResponse: () => new Response(JSON.stringify({ error: { message: "rate limit reached" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }),
+    });
+
+    expect(result.state).toMatchObject({ status: "error" });
+    expect(getCodexAccountCredential("reauth-quota-no-reset")).toMatchObject({
+      accessToken: "old-access-no-reset",
+      refreshToken: "old-refresh-no-reset",
+    });
+    expect(config.pausedCodexAccountIds ?? []).not.toContain("reauth-quota-no-reset");
+  });
+
+  test("OAuth reauth does not claim ownership of an existing manual pause", async () => {
+    const resetAt = Math.floor(Date.now() / 1000) + 600;
+    const config = makeConfig({
+      codexAccounts: [{ id: "reauth-manual-pause", email: "manual-pause@example.test", plan: "pro", isMain: false }],
+      pausedCodexAccountIds: ["reauth-manual-pause"],
+    });
+    saveCodexAccountCredential("reauth-manual-pause", {
+      accessToken: "old-manual-pause-access",
+      refreshToken: "old-manual-pause-refresh",
+      expiresAt: Date.now() + 60_000,
+      chatgptAccountId: "acct-reauth-manual-pause",
+    });
+
+    const result = await completeMockCodexOAuth({
+      config,
+      requestBody: { id: "reauth-manual-pause", reauth: true },
+      oauthAccountId: "acct-reauth-manual-pause",
+      email: "manual-pause@example.test",
+      onWarmup: () => {},
+      usageResponse: () => new Response(JSON.stringify({
+        email: "manual-pause@example.test",
+        plan_type: "pro",
+        rate_limit: { primary_window: { used_percent: 100, reset_at: resetAt } },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      warmupResponse: () => new Response(JSON.stringify({ error: { message: "rate limit reached" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }),
+    });
+
+    expect(result.state).toMatchObject({ status: "done" });
+    expect(config.pausedCodexAccountIds).toContain("reauth-manual-pause");
+    expect(readCodexAccountRecord("reauth-manual-pause")).toMatchObject({
+      lastCodexValidationStatus: "quota_pending",
+    });
+    expect(readCodexAccountRecord("reauth-manual-pause")).not.toHaveProperty("codexQuotaPauseOwned");
+  });
+
   test("successful OAuth reauth releases a quota-owned pause", async () => {
     const config = makeConfig({
       codexAccounts: [{ id: "reauth-quota-pause", email: "reauth@example.test", plan: "pro", isMain: false }],
