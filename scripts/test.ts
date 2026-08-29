@@ -1,10 +1,19 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
 export const WINDOWS_BUN_BATCH_SIZE = 48;
 export const WINDOWS_BUN_PARALLELISM = 2;
 export const FULL_SUITE_TEST_TIMEOUT_MS = 15_000;
+
+export type TestScope = "all" | "backend" | "gui";
+
+/** Root tests which execute GUI modules belong to the GUI gate, not the backend gate. */
+export function testFileScope(source: string): "backend" | "gui" {
+  return /(?:from\s+|import\s*\()\s*["'](?:\.\.\/)+gui\/src\//.test(source)
+    ? "gui"
+    : "backend";
+}
 
 // Keep fresh-process batching for the bundled 1.4.0 Windows runtime. A measured
 // unbatched run remained active past ten minutes and reached ~1.97 GiB private
@@ -37,14 +46,17 @@ export function deterministicTestBatches(
   return batches;
 }
 
-export function discoverTestFiles(root: string): string[] {
+export function discoverTestFiles(root: string, scope: TestScope = "all"): string[] {
   const files: string[] = [];
   const walk = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) walk(path);
-      else if (entry.isFile() && entry.name.endsWith(".test.ts")) {
-        files.push(relative(root, path).replaceAll("\\", "/"));
+      else if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx"))) {
+        const relativePath = relative(root, path).replaceAll("\\", "/");
+        if (scope === "all" || testFileScope(readFileSync(path, "utf8")) === scope) {
+          files.push(relativePath);
+        }
       }
     }
   };
@@ -165,12 +177,17 @@ async function waitForExclusiveRun(selfPid: number): Promise<void> {
 if (import.meta.main) {
   const isolated = createIsolatedTestEnvironment();
   try {
-    const requestedTests = process.argv.slice(2);
+    const scopeArg = process.argv.find(argument => argument.startsWith("--scope="));
+    const scope = (scopeArg?.slice("--scope=".length) || "all") as TestScope;
+    if (scope !== "all" && scope !== "backend" && scope !== "gui") {
+      throw new Error(`unknown test scope: ${scope}`);
+    }
+    const requestedTests = process.argv.slice(2).filter(argument => !argument.startsWith("--scope="));
     await waitForExclusiveRun(process.pid);
     const startedAt = Date.now();
     let exitCode = 1;
     if (shouldBatchFullSuite(process.platform, Bun.version, requestedTests)) {
-      const files = discoverTestFiles(process.cwd());
+      const files = discoverTestFiles(process.cwd(), scope);
       const batches = deterministicTestBatches(files);
       if (batches.length === 0) throw new Error("no test files discovered under tests/");
       console.warn(
@@ -213,7 +230,9 @@ if (import.meta.main) {
           "test",
           "--isolate",
           `--timeout=${FULL_SUITE_TEST_TIMEOUT_MS}`,
-          ...(requestedTests.length > 0 ? requestedTests : ["./tests/"]),
+          ...(requestedTests.length > 0
+            ? requestedTests
+            : scope === "all" ? ["./tests/"] : discoverTestFiles(process.cwd(), scope)),
         ],
         {
           env: isolated.env,

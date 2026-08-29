@@ -7,6 +7,7 @@ import {
   FULL_SUITE_TEST_TIMEOUT_MS,
   discoverTestFiles,
   shouldBatchFullSuite,
+  testFileScope,
   WINDOWS_BUN_BATCH_SIZE,
   WINDOWS_BUN_PARALLELISM,
 } from "../scripts/test";
@@ -68,5 +69,16 @@ describe("Windows Bun full-suite batching", () => {
     expect(batches.flat()).toEqual(files);
     expect(batches.every(batch => batch.length <= WINDOWS_BUN_BATCH_SIZE)).toBe(true);
     expect(WINDOWS_BUN_PARALLELISM).toBe(2);
+  });
+
+  test("keeps GUI-importing root tests out of the backend scope", () => {
+    expect(testFileScope('import { render } from "../gui/src/test";')).toBe("gui");
+    expect(testFileScope('import { loadConfig } from "../src/config";')).toBe("backend");
+
+    const backend = discoverTestFiles(process.cwd(), "backend");
+    const gui = discoverTestFiles(process.cwd(), "gui");
+    expect(backend).not.toContain("tests/provider-payload.test.ts");
+    expect(gui).toContain("tests/provider-payload.test.ts");
+    expect(new Set([...backend, ...gui]).size).toBe(discoverTestFiles(process.cwd()).length);
   });
 });

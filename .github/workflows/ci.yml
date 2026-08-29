@@ -215,7 +215,10 @@ jobs:
           bun install --frozen-lockfile
 
       - name: Test
-        run: bun run test
+        # Root tests that import GUI modules run in the GUI matrix below. Keeping
+        # them out of the backend process prevents React/happy-dom scheduler work
+        # from contaminating backend timing and module resolution on three OSes.
+        run: bun run test -- --scope=backend
 
   gui:
     name: ${{ matrix.name }}
@@ -264,7 +267,10 @@ jobs:
         # count equals the runner's CPU count; on the ubuntu-24.04 image that
         # starves the per-worker event loop and makes act()/flush races flaky.
         # Cap workers and isolate each file so every test gets a stable CPU slice.
-        run: cd gui && bun test tests --isolate --parallel=2
+        run: |
+          bun run test -- --scope=gui
+          cd gui
+          bun test tests --isolate --parallel=2
 
   build-notch-windows:
     name: build ocx-notch (Windows x64)

@@ -103,7 +103,7 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093");
     expect(workflow).toContain("cargo build --locked --release --manifest-path packages/ocx-notch/Cargo.toml");
     expect(workflow).toContain("name: ocx-notch-win32-x64");
-    expect(workflow).toContain("run: bun run test");
+    expect(workflow).toContain("run: bun run test -- --scope=backend");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
   });
 
@@ -154,7 +154,7 @@ describe("GitHub Actions hardening", () => {
       "macos-latest",
     ]);
     const backendSource = runSource(backend);
-    expect(count(backendSource, "bun run test")).toBe(1);
+    expect(count(backendSource, "bun run test -- --scope=backend")).toBe(1);
     expect(count(backendSource, "bun install --frozen-lockfile")).toBe(2);
     for (const check of [
       "bun x tsc --noEmit",
@@ -183,7 +183,8 @@ describe("GitHub Actions hardening", () => {
       "macos-latest",
     ]);
     const guiSource = runSource(gui);
-    expect(guiSource).toContain("cd gui && bun test tests --isolate --parallel=2");
+    expect(guiSource).toContain("bun run test -- --scope=gui");
+    expect(guiSource).toContain("bun test tests --isolate --parallel=2");
     expect(guiSource).toContain("bun install --frozen-lockfile");
     expect(count(guiSource, "bun install --frozen-lockfile")).toBe(2);
     for (const check of [
@@ -193,7 +194,6 @@ describe("GitHub Actions hardening", () => {
       "bun run lint",
       "bun run build",
       "bun run src/cli/index.ts help",
-      "bun run test",
     ]) {
       expect(guiSource).not.toContain(check);
     }
@@ -202,8 +202,9 @@ describe("GitHub Actions hardening", () => {
     // while each OS-specific suite owns exactly one kind of test.
     expect(count(workflow, "- name: GUI lint")).toBe(1);
     expect(count(workflow, "- name: GUI build")).toBe(1);
-    expect(count(workflow, "run: bun run test")).toBe(1);
-    expect(count(workflow, "run: cd gui && bun test tests --isolate --parallel=2")).toBe(1);
+    expect(count(workflow, "run: bun run test -- --scope=backend")).toBe(1);
+    expect(count(workflow, "bun run test -- --scope=gui")).toBe(1);
+    expect(count(workflow, "bun test tests --isolate --parallel=2")).toBe(1);
   });
 
   test("PR checks reach every branch the target gate accepts", async () => {
