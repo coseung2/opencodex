@@ -155,6 +155,7 @@ describe("GitHub Actions hardening", () => {
     ]);
     const backendSource = runSource(backend);
     expect(count(backendSource, "bun run test")).toBe(1);
+    expect(count(backendSource, "bun install --frozen-lockfile")).toBe(2);
     for (const check of [
       "bun x tsc --noEmit",
       "bun run privacy:scan",
@@ -183,6 +184,8 @@ describe("GitHub Actions hardening", () => {
     ]);
     const guiSource = runSource(gui);
     expect(guiSource).toContain("cd gui && bun test tests --isolate --parallel=2");
+    expect(guiSource).toContain("bun install --frozen-lockfile");
+    expect(count(guiSource, "bun install --frozen-lockfile")).toBe(2);
     for (const check of [
       "bun x tsc --noEmit",
       "bun run privacy:scan",
