@@ -111,6 +111,47 @@ jobs:
             echo 'label=windows-latest' >> "$GITHUB_OUTPUT"
           fi
 
+  common:
+    name: common checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun x tsc --noEmit
+
+      - name: Privacy scan
+        run: bun run privacy:scan
+
+      - name: Check release helper syntax
+        run: bun build scripts/release.ts --target=bun --outdir=.tmp/ci-release-script-check
+
+      - name: GUI lint
+        run: |
+          cd gui
+          bun run lint
+
+      - name: GUI build
+        run: |
+          cd gui
+          bun run build
+
+      - name: CLI help smoke
+        run: bun run src/cli/index.ts help
+
   test:
     name: ${{ matrix.name }}
     needs: select-windows-runner
@@ -168,16 +209,49 @@ jobs:
           bun-version: 1.4.0
 
       - name: Install dependencies
-        run: |
-          bun install --frozen-lockfile
-          cd gui
-          bun install --frozen-lockfile
-
-      - name: Typecheck
-        run: bun x tsc --noEmit
+        run: bun install --frozen-lockfile
 
       - name: Test
         run: bun run test
+
+  gui:
+    name: ${{ matrix.name }}
+    needs: select-windows-runner
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gui-ubuntu
+            runner: ubuntu-latest
+          - name: gui-windows
+            runner: ${{ fromJSON(needs.select-windows-runner.outputs.runner) }}
+          - name: gui-macos
+            runner: macos-latest
+    steps:
+      - name: Show selected runner
+        if: matrix.name == 'gui-windows'
+        shell: bash
+        run: echo "windows GUI leg on ${{ needs.select-windows-runner.outputs.label }}"
+
+      # Keep the self-hosted workspace honest for the GUI leg too. The selector is
+      # shared with the backend matrix, but each job gets its own checkout.
+      - name: Clean workspace (self-hosted only)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: git clean -xffd . || true
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install GUI dependencies
+        run: cd gui && bun install --frozen-lockfile
 
       - name: GUI tests
         # The GUI suite is timing-sensitive (React/happy-dom). bun's default worker
@@ -185,25 +259,6 @@ jobs:
         # starves the per-worker event loop and makes act()/flush races flaky.
         # Cap workers and isolate each file so every test gets a stable CPU slice.
         run: cd gui && bun test tests --isolate --parallel=2
-
-      - name: Privacy scan
-        run: bun run privacy:scan
-
-      - name: Check release helper syntax
-        run: bun build scripts/release.ts --target=bun --outdir=.tmp/ci-release-script-check
-
-      - name: GUI lint
-        run: |
-          cd gui
-          bun run lint
-
-      - name: GUI build
-        run: |
-          cd gui
-          bun run build
-
-      - name: CLI help smoke
-        run: bun run src/cli/index.ts help
 
   build-notch-windows:
     name: build ocx-notch (Windows x64)

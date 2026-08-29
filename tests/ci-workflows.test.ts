@@ -27,6 +27,41 @@ function count(text: string, fragment: string): number {
   return text.split(fragment).length - 1;
 }
 
+type CiWorkflowStep = {
+  name?: string;
+  if?: string | boolean;
+  run?: string;
+  uses?: string;
+};
+
+type CiMatrixEntry = {
+  name?: string;
+  runner?: string;
+};
+
+type CiWorkflowJob = {
+  name?: string;
+  needs?: string | string[];
+  "runs-on"?: unknown;
+  "timeout-minutes"?: number;
+  strategy?: {
+    "fail-fast"?: boolean;
+    matrix?: { include?: CiMatrixEntry[] };
+  };
+  steps?: CiWorkflowStep[];
+};
+
+type CiWorkflowShape = {
+  name?: string;
+  permissions?: Record<string, string>;
+  concurrency?: { group?: string; "cancel-in-progress"?: boolean };
+  jobs?: Record<string, CiWorkflowJob>;
+};
+
+function runSource(job: CiWorkflowJob | undefined): string {
+  return (job?.steps ?? []).map(step => step.run ?? "").join("\n");
+}
+
 describe("GitHub Actions hardening", () => {
   test("all Bun-enabled workflows use the package runtime pin", async () => {
     const pkg = JSON.parse(await readText("package.json")) as { dependencies?: { bun?: string } };
@@ -47,20 +82,20 @@ describe("GitHub Actions hardening", () => {
 
   test("cross-platform CI keeps bounded jobs and immutable action references", async () => {
     const workflow = await readText(".github/workflows/ci.yml");
-    const ci = Bun.YAML.parse(workflow) as {
-      jobs?: Record<string, { "timeout-minutes"?: number } | undefined>;
-    };
+    const ci = Bun.YAML.parse(workflow) as CiWorkflowShape;
 
     // Job-scoped: a global count still passes if values are swapped between jobs.
     // Pin ownership explicitly. `test` is 30m for Windows isolate margin on #827
     // after state-store admission — do not raise again; fix hung tests instead
     // (unref'd oauth waitMs / shell kill-grace). Selector stays at 2; smoke at 8.
     expect(ci.jobs?.["select-windows-runner"]?.["timeout-minutes"]).toBe(2);
+    expect(ci.jobs?.common?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.test?.["timeout-minutes"]).toBe(30);
+    expect(ci.jobs?.gui?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.["build-notch-windows"]?.["timeout-minutes"]).toBe(12);
     expect(ci.jobs?.["npm-global-smoke"]?.["timeout-minutes"]).toBe(8);
     // Every job must stay bounded — an unbounded job can hang a queue for hours.
-    expect(count(workflow, "timeout-minutes:")).toBe(4);
+    expect(count(workflow, "timeout-minutes:")).toBe(6);
     expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0");
     expect(workflow).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
     expect(workflow).toContain("actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e");
@@ -70,6 +105,102 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("name: ocx-notch-win32-x64");
     expect(workflow).toContain("run: bun run test");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
+  });
+
+  test("cross-platform CI splits common, backend, and GUI coverage with stable checks", async () => {
+    const workflow = await readText(".github/workflows/ci.yml");
+    const ci = Bun.YAML.parse(workflow) as CiWorkflowShape;
+    const common = ci.jobs?.common;
+    const backend = ci.jobs?.test;
+    const gui = ci.jobs?.gui;
+
+    expect(ci.name).toBe("Cross-platform CI");
+    expect(ci.permissions).toEqual({ contents: "read" });
+    expect(ci.concurrency).toEqual({
+      group: "cross-platform-ci-${{ github.ref }}",
+      "cancel-in-progress": true,
+    });
+
+    // Common checks run once on a fixed runner and do not depend on the Windows
+    // cost-control selector or a matrix.
+    expect(common?.name).toBe("common checks");
+    expect(common?.["runs-on"]).toBe("ubuntu-latest");
+    expect(common?.strategy).toBeUndefined();
+    const commonSource = runSource(common);
+    for (const check of [
+      "bun x tsc --noEmit",
+      "bun run privacy:scan",
+      "bun build scripts/release.ts --target=bun --outdir=.tmp/ci-release-script-check",
+      "bun run lint",
+      "bun run build",
+      "bun run src/cli/index.ts help",
+    ]) {
+      expect(count(commonSource, check)).toBe(1);
+    }
+
+    // The backend display names remain the existing required check names even
+    // when the Windows selector chooses the self-hosted runner.
+    expect(backend?.name).toBe("${{ matrix.name }}");
+    expect(backend?.needs).toBe("select-windows-runner");
+    expect(backend?.strategy?.["fail-fast"]).toBe(false);
+    expect(backend?.strategy?.matrix?.include?.map(entry => entry.name)).toEqual([
+      "ubuntu",
+      "windows",
+      "macos",
+    ]);
+    expect(backend?.strategy?.matrix?.include?.map(entry => entry.runner)).toEqual([
+      "ubuntu-latest",
+      "${{ fromJSON(needs.select-windows-runner.outputs.runner) }}",
+      "macos-latest",
+    ]);
+    const backendSource = runSource(backend);
+    expect(count(backendSource, "bun run test")).toBe(1);
+    for (const check of [
+      "bun x tsc --noEmit",
+      "bun run privacy:scan",
+      "bun build scripts/release.ts",
+      "bun run lint",
+      "bun run build",
+      "bun run src/cli/index.ts help",
+    ]) {
+      expect(backendSource).not.toContain(check);
+    }
+
+    // GUI jobs have explicit names, but share the same selector and platform
+    // coverage as the backend jobs.
+    expect(gui?.name).toBe("${{ matrix.name }}");
+    expect(gui?.needs).toBe("select-windows-runner");
+    expect(gui?.strategy?.["fail-fast"]).toBe(false);
+    expect(gui?.strategy?.matrix?.include?.map(entry => entry.name)).toEqual([
+      "gui-ubuntu",
+      "gui-windows",
+      "gui-macos",
+    ]);
+    expect(gui?.strategy?.matrix?.include?.map(entry => entry.runner)).toEqual([
+      "ubuntu-latest",
+      "${{ fromJSON(needs.select-windows-runner.outputs.runner) }}",
+      "macos-latest",
+    ]);
+    const guiSource = runSource(gui);
+    expect(guiSource).toContain("cd gui && bun test tests --isolate --parallel=2");
+    for (const check of [
+      "bun x tsc --noEmit",
+      "bun run privacy:scan",
+      "bun build scripts/release.ts",
+      "bun run lint",
+      "bun run build",
+      "bun run src/cli/index.ts help",
+      "bun run test",
+    ]) {
+      expect(guiSource).not.toContain(check);
+    }
+
+    // GUI lint/build and the other common checks are present only in `common`,
+    // while each OS-specific suite owns exactly one kind of test.
+    expect(count(workflow, "- name: GUI lint")).toBe(1);
+    expect(count(workflow, "- name: GUI build")).toBe(1);
+    expect(count(workflow, "run: bun run test")).toBe(1);
+    expect(count(workflow, "run: cd gui && bun test tests --isolate --parallel=2")).toBe(1);
   });
 
   test("PR checks reach every branch the target gate accepts", async () => {
@@ -226,6 +357,7 @@ describe("GitHub Actions hardening", () => {
 
   test("release workflow gates the exact SHA, channel, and service surface without injection", async () => {
     const workflow = await readText(".github/workflows/release.yml");
+    const release = Bun.YAML.parse(workflow) as CiWorkflowShape;
 
     // Least privilege + never cancel a publish mid-flight.
     expect(workflow).toContain("actions: read");
@@ -233,7 +365,27 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("id-token: write");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("timeout-minutes: 12");
-    expect(workflow).toContain("timeout-minutes: 15");
+    expect(release.jobs?.publish?.["timeout-minutes"]).toBe(20);
+
+    // A successful release still requires the Cross-platform CI workflow for
+    // the exact commit being published.
+    expect(workflow).toContain("--workflow ci.yml");
+    expect(workflow).toContain('--commit "$GITHUB_SHA"');
+    expect(workflow).toContain("--status success");
+
+    // npm may keep a just-published version in "being processed" for roughly
+    // ten minutes. The smoke remains real-publish-only, bounded, and fail-closed.
+    const smoke = release.jobs?.publish?.steps?.find(step => step.name === "Post-publish registry smoke");
+    expect(smoke?.if).toBe("${{ inputs.dry-run != true }}");
+    const smokeRun = smoke?.run ?? "";
+    expect(smokeRun).toContain("for attempt in $(seq 1 60); do");
+    expect(smokeRun).toContain('attempt $attempt/60');
+    expect(smokeRun).toContain('echo "::error::npm registry smoke failed after 60 attempts"');
+    expect(smokeRun).toContain('test "$VERSION" = "$RELEASE_VERSION"');
+    expect(smokeRun).toContain("exit 0");
+    expect(smokeRun).toContain("exit 1");
+    expect(smokeRun).not.toContain("seq 1 30");
+    expect(60 * 10).toBeLessThan(20 * 60);
 
     // Dry-run first by default; tokenless trusted publishing only.
     expect(workflow).toMatch(/dry-run:[\s\S]*?default: true/);
