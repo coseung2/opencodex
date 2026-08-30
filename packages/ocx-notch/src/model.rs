@@ -110,6 +110,7 @@ pub struct RequestLogEntry {
     pub resolved_model: Option<String>,
     pub status: u16,
     pub duration_ms: u64,
+    pub display_metrics: Option<LogDisplayMetrics>,
     pub total_tokens: Option<u64>,
     pub usage_status: Option<String>,
     pub error_code: Option<String>,
@@ -119,6 +120,20 @@ pub struct RequestLogEntry {
     pub requested_service_tier: Option<String>,
     pub configured_service_tier: Option<String>,
     pub response_service_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LogDisplayMetrics {
+    pub tok_per_second: Option<TokPerSecondMetric>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TokPerSecondMetric {
+    pub kind: String,
+    pub value: Option<f64>,
+    pub estimated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -164,6 +179,24 @@ impl RequestLogEntry {
             }
         }
         has_signal.then_some(false)
+    }
+}
+
+pub fn format_tok_per_second(metric: Option<&TokPerSecondMetric>) -> String {
+    let Some(metric) = metric.filter(|metric| metric.kind == "value") else {
+        return "—".into();
+    };
+    let Some(value) = metric
+        .value
+        .filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return "—".into();
+    };
+    let prefix = if metric.estimated { "~" } else { "" };
+    if value >= 100.0 {
+        format!("{prefix}{value:.0} tok/s")
+    } else {
+        format!("{prefix}{value:.1} tok/s")
     }
 }
 
@@ -796,14 +829,57 @@ mod tests {
     #[test]
     fn request_logs_accept_current_wrapper_and_legacy_array() {
         let wrapped: RequestLogsResponse = serde_json::from_str(
-            r#"{"timeZone":"Asia/Seoul","total":1,"logs":[{"timestamp":2,"model":"new"}]}"#,
+            r#"{"timeZone":"Asia/Seoul","total":1,"logs":[{"timestamp":2,"model":"new","displayMetrics":{"tokPerSecond":{"kind":"value","value":42.25,"estimated":true}}}]}"#,
         )
         .expect("wrapped logs parse");
         let legacy: RequestLogsResponse =
             serde_json::from_str(r#"[{"timestamp":1,"model":"old"}]"#).expect("legacy logs parse");
 
-        assert_eq!(wrapped.into_logs()[0].model, "new");
+        let wrapped = wrapped.into_logs();
+        assert_eq!(wrapped[0].model, "new");
+        let metric = wrapped[0]
+            .display_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.tok_per_second.as_ref())
+            .expect("nested tok/s metric is preserved");
+        assert_eq!(metric.value, Some(42.25));
+        assert!(metric.estimated);
         assert_eq!(legacy.into_logs()[0].model, "old");
+    }
+
+    #[test]
+    fn formats_tok_per_second_like_the_gui() {
+        let metric = |value, estimated| TokPerSecondMetric {
+            kind: "value".into(),
+            value: Some(value),
+            estimated,
+        };
+
+        assert_eq!(
+            format_tok_per_second(Some(&metric(99.94, false))),
+            "99.9 tok/s"
+        );
+        assert_eq!(
+            format_tok_per_second(Some(&metric(100.4, false))),
+            "100 tok/s"
+        );
+        assert_eq!(
+            format_tok_per_second(Some(&metric(42.26, true))),
+            "~42.3 tok/s"
+        );
+
+        let unavailable = TokPerSecondMetric {
+            kind: "unavailable".into(),
+            value: Some(20.0),
+            estimated: false,
+        };
+        assert_eq!(format_tok_per_second(None), "—");
+        assert_eq!(format_tok_per_second(Some(&unavailable)), "—");
+        assert_eq!(format_tok_per_second(Some(&metric(0.0, false))), "—");
+        assert_eq!(
+            format_tok_per_second(Some(&metric(f64::INFINITY, false))),
+            "—"
+        );
     }
 
     #[test]

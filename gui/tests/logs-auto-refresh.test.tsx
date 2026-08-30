@@ -453,3 +453,40 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
 
   await act(async () => { root.unmount(); });
 });
+
+test("Logs: overview uses one tok/s performance column and keeps duration in details", async () => {
+  const performanceLog = {
+    ...sampleLog,
+    durationMs: 2500,
+    usageStatus: "estimated",
+    displayMetrics: {
+      ...sampleLog.displayMetrics,
+      tokPerSecond: { kind: "value", value: 12.5, estimated: true },
+    },
+  };
+  globalThis.fetch = (async (input) => {
+    if (!String(input).includes("/api/logs")) return new Response(null, { status: 404 });
+    return jsonResponse([performanceLog]);
+  }) as typeof fetch;
+
+  const { root, container } = await mountLogs();
+  await flushMicrotasks();
+
+  const table = container.querySelector<HTMLTableElement>(".logs-table")!;
+  const headers = [...table.querySelectorAll("thead th")].map(cell => cell.textContent?.trim());
+  expect(headers).toHaveLength(9);
+  expect(headers.filter(label => label === "tok/s")).toHaveLength(1);
+  expect(headers).not.toContain("Duration");
+  expect(headers.at(-1)).toBe("tok/s");
+  expect(table.querySelector("tbody tr")?.lastElementChild?.textContent?.trim()).toBe("~12.5");
+
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>(".log-detail-btn")!.click();
+  });
+  const performanceSection = container.querySelector<HTMLElement>("[aria-labelledby='log-detail-performance']")!;
+  expect(performanceSection.textContent).toContain("Duration");
+  expect(performanceSection.textContent).toContain("2500ms");
+  expect(performanceSection.textContent).toContain("~12.5");
+
+  await act(async () => { root.unmount(); });
+});

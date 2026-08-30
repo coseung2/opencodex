@@ -432,6 +432,43 @@ describe("request log metadata", () => {
     expect(entries[0]!.usage).toMatchObject({ inputTokens: 44000, outputTokens: 98, estimated: true });
   });
 
+  test("authoritative Kiro usage wins over the request-time input estimate", () => {
+    const entries: RequestLogEntry[] = [];
+    addFinalRequestLog(
+      "ocx-test-kiro-authoritative",
+      Date.now(),
+      {
+        model: "claude-sonnet-4.5",
+        provider: "kiro-pb51d9b",
+        providerAdapter: "kiro",
+        usage: {
+          inputTokens: 15,
+          outputTokens: 4,
+          totalTokens: 19,
+          cachedInputTokens: 3,
+          cacheReadInputTokens: 3,
+          cacheCreationInputTokens: 2,
+        },
+        usageLogInputTokens: 200,
+      },
+      200,
+      { closeReason: "terminal" },
+      entry => entries.push(entry),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.usageStatus).toBe("reported");
+    expect(entries[0]!.usage).toEqual({
+      inputTokens: 15,
+      outputTokens: 4,
+      totalTokens: 19,
+      cachedInputTokens: 3,
+      cacheReadInputTokens: 3,
+      cacheCreationInputTokens: 2,
+    });
+    expect(entries[0]!.totalTokens).toBe(19);
+  });
+
   test("accurate providers stay untouched when no input estimate is stashed", () => {
     const entries: RequestLogEntry[] = [];
     addFinalRequestLog(
@@ -689,7 +726,7 @@ describe("request log metadata", () => {
     });
   });
 
-  test("deferred SSE logging marks Kiro usage as estimated without changing SSE payload", async () => {
+  test("deferred SSE logging preserves authoritative Kiro usage without changing SSE payload", async () => {
     const entries: RequestLogEntry[] = [];
     const payload = "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"model\":\"kiro/claude-sonnet-4.5\",\"usage\":{\"input_tokens\":9,\"output_tokens\":4}}}";
     const body = new ReadableStream<Uint8Array>({
@@ -712,9 +749,9 @@ describe("request log metadata", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
       terminalStatus: "completed",
-      usageStatus: "estimated",
+      usageStatus: "reported",
       totalTokens: 13,
-      usage: { inputTokens: 9, outputTokens: 4, estimated: true },
+      usage: { inputTokens: 9, outputTokens: 4 },
     });
   });
 
@@ -897,7 +934,7 @@ describe("request log metadata", () => {
     expect(entries[0].upstreamError).toBe("provider says nope");
   });
 
-  test("deferred SSE logging uses adapter-provided Kiro log input tokens", async () => {
+  test("deferred SSE logging does not replace authoritative Kiro usage with a request estimate", async () => {
     const entries: RequestLogEntry[] = [];
     const payload = "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"model\":\"kiro/claude-sonnet-4.5\",\"usage\":{\"input_tokens\":9,\"output_tokens\":4}}}";
     const body = new ReadableStream<Uint8Array>({
@@ -918,9 +955,9 @@ describe("request log metadata", () => {
     expect(text).toContain("\"input_tokens\":9");
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
-      usageStatus: "estimated",
-      totalTokens: 240_004,
-      usage: { inputTokens: 240_000, outputTokens: 4, estimated: true },
+      usageStatus: "reported",
+      totalTokens: 13,
+      usage: { inputTokens: 9, outputTokens: 4 },
     });
   });
 
@@ -932,7 +969,6 @@ describe("request log metadata", () => {
         inputTokens: 58,
         outputTokens: 100,
         contextTotalTokens: 50_000,
-        estimated: true,
       },
     }]), "kiro/claude-opus-5");
     const response = responseWithDeferredRequestLog(
@@ -948,9 +984,9 @@ describe("request log metadata", () => {
     expect(text).toContain('"total_tokens":50000');
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
-      usageStatus: "estimated",
+      usageStatus: "reported",
       totalTokens: 50_000,
-      usage: { inputTokens: 49_900, outputTokens: 100, totalTokens: 50_000, estimated: true },
+      usage: { inputTokens: 49_900, outputTokens: 100, totalTokens: 50_000 },
     });
   });
 

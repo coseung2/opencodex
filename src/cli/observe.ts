@@ -21,7 +21,16 @@ const USAGE = `Usage:
   ocx observe claude-inbound [--limit <n>] [--json]
   ocx observe injection [--limit <n>] [--json]`;
 
-type LogEntry = Record<string, unknown> & { id?: string | number; timestamp?: string; provider?: string; model?: string; status?: number };
+type LogEntry = Record<string, unknown> & {
+  id?: string | number;
+  timestamp?: string;
+  provider?: string;
+  model?: string;
+  status?: number;
+  displayMetrics?: {
+    tokPerSecond?: { kind?: string; value?: number; estimated?: boolean };
+  };
+};
 
 function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
@@ -43,8 +52,14 @@ function formatLog(row: LogEntry): string {
   const time = String(row.timestamp ?? row.createdAt ?? "");
   const route = [row.provider, row.model].filter(Boolean).join("/");
   const status = row.status ?? row.statusCode ?? "?";
-  const duration = row.durationMs !== undefined ? `${String(row.durationMs)}ms` : "";
-  return [time, String(status), route, duration].filter(Boolean).join("  ");
+  const metric = row.displayMetrics?.tokPerSecond;
+  const rate = metric?.kind === "value"
+    && typeof metric.value === "number"
+    && Number.isFinite(metric.value)
+    && metric.value > 0
+    ? `${metric.estimated ? "~" : ""}${metric.value.toLocaleString("en-US", { maximumFractionDigits: 1 })} tok/s`
+    : "— tok/s";
+  return [time, String(status), route, rate].filter(Boolean).join("  ");
 }
 
 async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {

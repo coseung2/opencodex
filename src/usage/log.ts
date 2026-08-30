@@ -147,8 +147,7 @@ export function usageTotalTokens(usage: OcxUsage | undefined): number | undefine
  * fallback for paths that only know the configured provider name (e.g. "cursor-mykey").
  */
 function isEstimatedUsageProvider(providerOrAdapter: string): boolean {
-  return providerOrAdapter === "kiro" || providerOrAdapter.startsWith("kiro-")
-    || providerOrAdapter === "cursor" || providerOrAdapter.startsWith("cursor-");
+  return providerOrAdapter === "cursor" || providerOrAdapter.startsWith("cursor-");
 }
 
 export function usageForFinalLog(provider: string, usage: OcxUsage | undefined): OcxUsage | undefined {

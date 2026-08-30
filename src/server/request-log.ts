@@ -939,7 +939,7 @@ function finalizedUsage(
   const usageFallback = !finalUsage && estimate !== undefined
     ? { inputTokens: estimate, outputTokens: 0, estimated: true }
     : undefined;
-  const loggedUsage = finalUsage && estimate !== undefined
+  const loggedUsage = finalUsage?.estimated && estimate !== undefined
     ? {
         ...finalUsage,
         inputTokens: Math.max(finalUsage.inputTokens, estimate),

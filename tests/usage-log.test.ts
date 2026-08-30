@@ -584,10 +584,15 @@ describe("usage log", () => {
     expect(usageTotalTokens({ inputTokens: 4, outputTokens: 6, totalTokens: 50_000 })).toBe(50_000);
   });
 
-  test("marks Kiro final log usage as estimated without changing other providers", () => {
+  test("preserves authoritative Kiro usage and marks only explicit Kiro fallbacks estimated", () => {
     const usage = { inputTokens: 4, outputTokens: 6 };
-    expect(usageForFinalLog("kiro", usage)).toEqual({ ...usage, estimated: true });
-    expect(usageForFinalLog("kiro-p9d8524", usage)).toEqual({ ...usage, estimated: true });
+    expect(usageForFinalLog("kiro", usage)).toEqual(usage);
+    expect(usageStatusForFinalLog(usageForFinalLog("kiro", usage))).toBe("reported");
+    expect(usageForFinalLog("kiro-p9d8524", usage)).toEqual(usage);
+
+    const fallback = { ...usage, estimated: true };
+    expect(usageForFinalLog("kiro", fallback)).toEqual(fallback);
+    expect(usageStatusForFinalLog(usageForFinalLog("kiro", fallback))).toBe("estimated");
     // cursor: adapter name AND configured-provider-name prefixes both count (devlog 130 B2 —
     // "cursor-pb51d9b" rows previously logged as accurately "reported").
     expect(usageForFinalLog("cursor", usage)).toEqual({ ...usage, estimated: true });

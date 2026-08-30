@@ -45,7 +45,7 @@ Startup failures and Rust panics are written to the bounded diagnostic log `%LOC
 - Online shutdown uses OCX's authenticated `POST /api/stop` graceful-stop endpoint directly, with CLI fallback for older OCX versions. Power transitions probe health immediately and then every ~75ms with a short timeout so the control reflects the real listener state quickly.
 - The header keeps Private and WS on separate rows, with fixed 0-to-Max segmented gauges beside them. The unboxed power and minus controls retain generous invisible hit areas and show hover/pressed feedback.
 - Click the notch to expand provider details.
-- Use the inline Providers and Logs tabs below the memory header to switch content. Logs show only the latest 10 requests with status, duration, relative time, reasoning effort, Fast state, and token usage.
+- Use the inline Providers and Logs tabs below the memory header to switch content. Logs show only the latest 10 requests with status, output tok/s, relative time, reasoning effort, Fast state, and token usage. Estimated rates are prefixed with `~`; unavailable rates use an em dash.
 - When expanded, click the top-right minus control to collapse back to the 58px notch.
 - Drag either side edge to resize the notch width. Position and width are restored on the next launch.
 - Drag anywhere on the notch to move it; its chosen position is preserved while it expands, collapses, or refreshes.

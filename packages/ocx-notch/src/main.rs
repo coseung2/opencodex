@@ -3691,7 +3691,11 @@ unsafe fn draw_log_list(
             } else {
                 log.status.to_string()
             };
-            let summary = format!("{}  {}", status, format_duration(log.duration_ms));
+            let tok_per_second = log
+                .display_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.tok_per_second.as_ref());
+            let summary = format!("{}  {}", status, format_tok_per_second(tok_per_second));
             let mut metadata = vec![format_log_age(log.timestamp)];
             metadata.push(format!(
                 "추론 {}",
@@ -3772,14 +3776,6 @@ fn log_status_color(status: u16) -> u32 {
         400..=499 => 0x0024bffb,
         500..=599 => 0x006c70ff,
         _ => 0x008e949e,
-    }
-}
-
-fn format_duration(duration_ms: u64) -> String {
-    if duration_ms < 1_000 {
-        format!("{duration_ms}ms")
-    } else {
-        format!("{:.1}s", duration_ms as f64 / 1_000.0)
     }
 }
 
