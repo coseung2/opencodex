@@ -160,25 +160,36 @@ impl RequestLogEntry {
     }
 
     pub fn fast_state(&self) -> Option<bool> {
-        let values = [
+        // Fast is request-scoped. Configured tier metadata is only the current
+        // global/default diagnostic and may belong to another task, so it must
+        // never paint this request as Fast. Prefer the outbound request fields,
+        // then use the response tier for older persisted log rows.
+        let requested_values = [
             self.requested_speed_label.as_deref(),
-            self.configured_speed_label.as_deref(),
             self.requested_service_tier.as_deref(),
-            self.configured_service_tier.as_deref(),
-            self.response_service_tier.as_deref(),
         ];
-        let mut has_signal = false;
-        for value in values.into_iter().flatten() {
+        let mut has_requested_signal = false;
+        for value in requested_values.into_iter().flatten() {
             let value = value.trim();
             if value.is_empty() {
                 continue;
             }
-            has_signal = true;
+            has_requested_signal = true;
             if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
                 return Some(true);
             }
         }
-        has_signal.then_some(false)
+        if has_requested_signal {
+            return Some(false);
+        }
+
+        self.response_service_tier
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority")
+            })
     }
 }
 
@@ -549,14 +560,23 @@ pub fn merge_providers(
             let report = report_by_name.get(config.name.as_str()).copied();
             let usage = usage_by_name.get(config.name.as_str()).copied();
             let pool = pools_by_name.get(config.name.as_str()).copied();
+            let accounts = pool.map_or_else(Vec::new, |p| p.accounts.clone());
+            // The OpenAI provider report is pool-wide capacity. The header names
+            // the selected account, so its quota must come from that same account
+            // snapshot or the collapsed and expanded rows visibly disagree.
+            let quota = accounts
+                .iter()
+                .find(|account| account.active)
+                .and_then(|account| account.quota.clone())
+                .or_else(|| report.map(|r| r.quota.clone()));
             ProviderView {
                 name: config.name.clone(),
                 label: report
                     .and_then(|r| r.label.clone())
                     .unwrap_or_else(|| config.name.clone()),
-                quota: report.map(|r| r.quota.clone()),
+                quota,
                 tokens: usage.map_or(0, |u| u.total_tokens),
-                accounts: pool.map_or_else(Vec::new, |p| p.accounts.clone()),
+                accounts,
             }
         })
         .collect()
@@ -827,6 +847,32 @@ mod tests {
     }
 
     #[test]
+    fn request_fast_state_ignores_the_global_configured_tier() {
+        let standard = RequestLogEntry {
+            configured_speed_label: Some("fast".into()),
+            configured_service_tier: Some("fast".into()),
+            response_service_tier: Some("default".into()),
+            ..Default::default()
+        };
+        let fast = RequestLogEntry {
+            requested_speed_label: Some("fast".into()),
+            requested_service_tier: Some("priority".into()),
+            configured_service_tier: Some("fast".into()),
+            response_service_tier: Some("default".into()),
+            ..Default::default()
+        };
+        let configured_elsewhere = RequestLogEntry {
+            configured_speed_label: Some("fast".into()),
+            configured_service_tier: Some("fast".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(standard.fast_state(), Some(false));
+        assert_eq!(fast.fast_state(), Some(true));
+        assert_eq!(configured_elsewhere.fast_state(), None);
+    }
+
+    #[test]
     fn request_logs_accept_current_wrapper_and_legacy_array() {
         let wrapped: RequestLogsResponse = serde_json::from_str(
             r#"{"timeZone":"Asia/Seoul","total":1,"logs":[{"timestamp":2,"model":"new","displayMetrics":{"tokPerSecond":{"kind":"value","value":42.25,"estimated":true}}}]}"#,
@@ -951,6 +997,49 @@ mod tests {
 
         assert!(!pools[0].accounts[0].active);
         assert!(pools[0].accounts[1].active);
+    }
+
+    #[test]
+    fn provider_summary_uses_the_selected_accounts_quota() {
+        let configs = vec![ProviderConfig {
+            name: "openai".into(),
+            ..Default::default()
+        }];
+        let reports = vec![QuotaReport {
+            provider: "openai".into(),
+            quota: Quota {
+                weekly_percent: Some(72.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let pools = vec![AccountPool {
+            provider: "openai".into(),
+            accounts: vec![
+                AccountView {
+                    id: "first".into(),
+                    quota: Some(Quota {
+                        weekly_percent: Some(45.0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                AccountView {
+                    id: "selected".into(),
+                    active: true,
+                    quota: Some(Quota {
+                        weekly_percent: Some(18.0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        }];
+
+        let providers = merge_providers(&configs, &reports, &[], &pools);
+
+        assert_eq!(providers[0].quota.as_ref().and_then(|quota| quota.weekly_percent), Some(18.0));
+        assert_eq!(providers[0].accounts[1].quota.as_ref().and_then(|quota| quota.weekly_percent), Some(18.0));
     }
 
     #[test]

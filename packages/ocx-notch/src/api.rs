@@ -328,7 +328,7 @@ fn valid_handle(handle: *mut c_void) -> Result<*mut c_void, String> {
 
 pub fn fetch_account_pool(config: &ProviderConfig) -> AccountPool {
     if config.name == "openai" {
-        return fetch_codex_account_pool().unwrap_or_else(|_| AccountPool {
+        return fetch_codex_account_pool(false).unwrap_or_else(|_| AccountPool {
             provider: config.name.clone(),
             accounts: Vec::new(),
         });
@@ -447,8 +447,13 @@ pub fn set_active_account(provider: &str, kind: &str, id: &str) -> Result<(), St
     Ok(())
 }
 
-pub fn fetch_codex_account_pool() -> Result<AccountPool, String> {
-    let accounts = get_json::<CodexAccountsResponse>("/api/codex-auth/accounts", 20_000)
+pub fn fetch_codex_account_pool(refresh_quotas: bool) -> Result<AccountPool, String> {
+    let path = if refresh_quotas {
+        "/api/codex-auth/accounts?refresh=1"
+    } else {
+        "/api/codex-auth/accounts"
+    };
+    let accounts = get_json::<CodexAccountsResponse>(path, 20_000)
         .map(codex_account_views)?;
     Ok(AccountPool {
         provider: "openai".into(),

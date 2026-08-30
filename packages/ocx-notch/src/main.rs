@@ -786,11 +786,11 @@ fn start_workers(
                 );
                 last_logs = Instant::now();
             }
-            if forced || last_openai_pool.elapsed() >= Duration::from_secs(5) {
+            if forced || last_openai_pool.elapsed() >= account_quota_refresh_interval() {
                 send_update(
                     hwnd,
                     &api_tx,
-                    Update::OpenAiPool(api::fetch_codex_account_pool()),
+                    Update::OpenAiPool(api::fetch_codex_account_pool(true)),
                 );
                 last_openai_pool = Instant::now();
             }
@@ -859,6 +859,10 @@ fn refresh_seed(now: Instant, age: Duration) -> Instant {
 
 fn logs_refresh_interval(visible: bool) -> Duration {
     Duration::from_secs(if visible { 2 } else { 30 })
+}
+
+fn account_quota_refresh_interval() -> Duration {
+    Duration::from_secs(2)
 }
 
 fn provider_refresh_interval(last_fetch_succeeded: bool) -> Duration {
@@ -5017,6 +5021,7 @@ mod account_control_tests {
     fn background_logs_stay_warm_and_failed_provider_fetches_retry_quickly() {
         assert_eq!(logs_refresh_interval(false), Duration::from_secs(30));
         assert_eq!(logs_refresh_interval(true), Duration::from_secs(2));
+        assert_eq!(account_quota_refresh_interval(), Duration::from_secs(2));
         assert_eq!(provider_refresh_interval(false), Duration::from_secs(5));
         assert_eq!(provider_refresh_interval(true), Duration::from_secs(300));
     }
