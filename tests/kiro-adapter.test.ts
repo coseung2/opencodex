@@ -12,7 +12,8 @@ import { saveCredential } from "../src/oauth/store";
 import { normalizeKiroModelId } from "../src/providers/kiro-models";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../src/reasoning-effort";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
-import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
+import { routeModel } from "../src/router";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
 
 const origHome = process.env.HOME;
 const origLocalAppData = process.env.LOCALAPPDATA;
@@ -832,6 +833,31 @@ describe("kiro adapter — buildRequest", () => {
 
 describe("kiro adapter — native and emulated reasoning effort", () => {
   const kiro = PROVIDER_REGISTRY.find(p => p.id === "kiro") as unknown as OcxProviderConfig;
+
+  test("kiro preset keeps parallel tool calls disabled in routing and the Codex catalog", () => {
+    expect(kiro.parallelToolCalls).toBe(false);
+
+    const config = {
+      defaultProvider: "kiro",
+      providers: {
+        kiro: {
+          adapter: "kiro",
+          baseUrl: "https://runtime.us-east-1.kiro.dev",
+          authMode: "oauth",
+          models: ["gpt-5.6-sol"],
+        },
+      },
+    } as OcxConfig;
+    expect(routeModel(config, "kiro/gpt-5.6-sol").provider.parallelToolCalls).toBe(false);
+
+    const model = applyProviderConfigHints(
+      "kiro",
+      kiro,
+      { provider: "kiro", id: "gpt-5.6-sol" },
+    );
+    const entry = buildCatalogEntries(null, [], [model]).find(candidate => candidate.slug === "kiro/gpt-5.6-sol");
+    expect(entry?.supports_parallel_tool_calls).toBe(false);
+  });
 
   test("kiro advertises Codex-compatible reasoning efforts", async () => {
     expect(kiro).toBeTruthy();

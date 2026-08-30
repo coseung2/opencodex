@@ -233,6 +233,9 @@ export function deriveEntry(
   };
   if (isRouted) {
     applyReasoningLevels(entry, model?.reasoningEfforts, model?.defaultReasoningEffort, preserveExact);
+    // The no-template fallback does not pass through normalizeRoutedCatalogEntry, so pin the
+    // capability before strict defaults would otherwise advertise parallel calls unconditionally.
+    entry.supports_parallel_tool_calls = model?.provider === "cursor" || model?.parallelToolCalls === true;
   }
   else {
     applyReasoningLevels(entry, isGpt56NativeSlug(slug) ? undefined : ["low", "medium", "high", "xhigh"]);

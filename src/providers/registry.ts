@@ -808,6 +808,9 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // catalog authoritative so a spurious 2xx from runtime.../models cannot drop seeded ids
     // (e.g. newly listed GPT-5.6 tiers) via live-discovery reconciliation.
     liveModels: false,
+    // Kiro rejects request-level parallel tool calls; keep persisted presets and the Codex
+    // catalog aligned with the adapter's single-call capability guard.
+    parallelToolCalls: false,
     // Per-model context metadata is maintained next to the Kiro model list.
     modelContextWindows: KIRO_MODEL_CONTEXT_WINDOWS,
     modelReasoningEfforts: KIRO_MODEL_REASONING_EFFORTS,
