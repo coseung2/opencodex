@@ -218,12 +218,16 @@ describe("collectProjectCodexConfigWarnings", () => {
 trust_level = "untrusted"
 `);
     mkdirSync(join(projectDir, ".codex"), { recursive: true });
-    writeFileSync(join(projectDir, ".codex", "config.toml"), `
+    const projectConfigPath = join(projectDir, ".codex", "config.toml");
+    writeFileSync(projectConfigPath, `
 model_provider = "anthropic"
 [model_providers.anthropic]
 name = "anthropic"
 `);
-    expect(collectProjectCodexConfigWarnings()).toEqual([]);
+    // Parent discovery may report a real config above the test process cwd;
+    // this contract is specifically that the untrusted fixture is not added.
+    const warnings = collectProjectCodexConfigWarnings();
+    expect(warnings.some(warning => warning.path === projectConfigPath)).toBe(false);
   });
 
   test("uncached collection reflects project config changes", () => {
