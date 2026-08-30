@@ -108,12 +108,17 @@ describe("vertex parseResponse fail-closed truncation (non-streaming)", () => {
 });
 
 describe("usage status for google-vertex stays reported", () => {
-  test("usageForFinalLog does not force-estimate google-vertex (but does for kiro)", async () => {
+  test("usageForFinalLog keeps authoritative google-vertex and Kiro usage reported", async () => {
     const { usageForFinalLog, usageStatusForFinalLog } = await import("../src/usage/log");
     const usage = { inputTokens: 5, outputTokens: 2 };
     const vertex = usageForFinalLog("google-vertex", usage);
     expect(vertex?.estimated).toBeUndefined();
     expect(usageStatusForFinalLog(vertex)).toBe("reported");
-    expect(usageForFinalLog("kiro", usage)?.estimated).toBe(true);
+    const kiro = usageForFinalLog("kiro", usage);
+    expect(kiro?.estimated).toBeUndefined();
+    expect(usageStatusForFinalLog(kiro)).toBe("reported");
+    const fallback = usageForFinalLog("kiro", { ...usage, estimated: true });
+    expect(fallback?.estimated).toBe(true);
+    expect(usageStatusForFinalLog(fallback)).toBe("estimated");
   });
 });
