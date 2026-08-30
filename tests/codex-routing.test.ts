@@ -39,7 +39,7 @@ import {
   parseUsageQuota,
   updateAccountQuota,
 } from "../src/codex/auth-api";
-import { CODEX_UNKNOWN_USAGE_SCORE, isCodexQuotaExhausted } from "../src/codex/quota";
+import { CODEX_UNKNOWN_USAGE_SCORE, isCodexQuotaExhausted, setAccountQuotaFromParsed } from "../src/codex/quota";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
 import { routeModel } from "../src/router";
 import { consumeForInspection } from "../src/server/relay";
@@ -112,11 +112,16 @@ describe("codex routing", () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   });
 
-  test("usage score uses the hottest known quota window", () => {
+  test("usage score prefers the five-hour window for Plus/Team when present", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 81 })).toBe(81);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 })).toBe(91);
     expect(computeCodexUsageScore({ weeklyPercent: 15 })).toBe(15);
     expect(computeCodexUsageScore({ fiveHourPercent: 94, weeklyPercent: 15 }, "plus")).toBe(94);
+    expect(computeCodexUsageScore({ fiveHourPercent: 20, weeklyPercent: 90 }, "team")).toBe(20);
+    expect(computeCodexUsageScore({ fiveHourPercent: 20, weeklyPercent: 90 }, "business")).toBe(20);
+    expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 }, "plus")).toBe(91);
+    expect(computeCodexUsageScore({ fiveHourPercent: 101, weeklyPercent: 15 }, "plus")).toBe(15);
+    expect(computeCodexUsageScore({ fiveHourPercent: -1, weeklyPercent: 15 }, "plus")).toBe(15);
     expect(computeCodexUsageScore({ fiveHourPercent: 94, weeklyPercent: 15 }, "pro")).toBe(15);
     expect(computeCodexUsageScore({ fiveHourPercent: 94, weeklyPercent: 15 }, "prolite")).toBe(15);
   });
@@ -152,6 +157,32 @@ describe("codex routing", () => {
     updateAccountQuota("a", 85);
     updateAccountQuota("b", 20);
     expect(resolveCodexAccountForThread("new-thread", config)).toBe("b");
+  });
+
+  test.each(["plus", "team", "business"] as const)("%s rotation uses five-hour allocation instead of weekly allocation", (plan) => {
+    const config = makeConfig({
+      codexAccounts: [
+        { id: "a", email: "a@test", plan, isMain: false },
+        { id: "b", email: "b@test", plan, isMain: false },
+      ],
+    });
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 85, weeklyPercent: 10, monthlyPercent: 15 });
+    setAccountQuotaFromParsed("b", { fiveHourPercent: 20, weeklyPercent: 90, monthlyPercent: 95 });
+
+    expect(resolveCodexAccountForThread(`${plan}-five-hour-rotation`, config)).toBe("b");
+  });
+
+  test("Plus rotation keeps an under-threshold five-hour account despite hotter weekly and monthly windows", () => {
+    const config = makeConfig({
+      codexAccounts: [
+        { id: "a", email: "a@test", plan: "plus", isMain: false },
+        { id: "b", email: "b@test", plan: "plus", isMain: false },
+      ],
+    });
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 20, weeklyPercent: 90, monthlyPercent: 95 });
+    setAccountQuotaFromParsed("b", { fiveHourPercent: 10, weeklyPercent: 5, monthlyPercent: 5 });
+
+    expect(resolveCodexAccountForThread("plus-five-hour-under-threshold", config)).toBe("a");
   });
 
   test("known 100% weekly usage is exhausted, not unknown, and switches accounts", () => {

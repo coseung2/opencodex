@@ -106,8 +106,9 @@ The **Codex Auth** page manages the native ChatGPT/Codex route:
   thread is periodically re-evaluated and may rebind after its relevant usage reaches the threshold
   and a strictly lower-usage eligible account exists.
 - New sessions can choose the lowest-usage eligible account. Plans that expose a rolling 5h meter
-  (currently Plus/Team/Business) score the hottest known 5h, weekly, or 30d window; Pro/ProLite
-  use the windows they expose, and Go/Free plans use the 30d window only.
+  (currently Plus/Team/Business) use that 5h meter for rotation when it is available, falling back
+  to their known weekly or 30d window until it is available. Pro/ProLite use the windows they expose,
+  and Go/Free plans use the 30d window only.
 - When WHAM supplies `limit_window_seconds`, Codex Auth classifies a primary window of at least 28
   days as 30d instead of assuming every primary window is weekly. Responses without a duration keep
   the legacy weekly interpretation for a single window; Plus/Team/Business dual-window responses

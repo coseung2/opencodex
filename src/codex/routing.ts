@@ -298,8 +298,14 @@ export function computeCodexUsageScore(quota: {
       ? quota.monthlyPercent
       : CODEX_UNKNOWN_USAGE_SCORE;
   }
+  if (isCodexFiveHourQuotaPlan(plan)
+    && typeof quota.fiveHourPercent === "number"
+    && Number.isFinite(quota.fiveHourPercent)
+    && quota.fiveHourPercent >= 0
+    && quota.fiveHourPercent <= 100) {
+    return quota.fiveHourPercent;
+  }
   const values = [
-    ...(isCodexFiveHourQuotaPlan(plan) ? [quota.fiveHourPercent] : []),
     quota.weeklyPercent,
     quota.monthlyPercent,
   ]

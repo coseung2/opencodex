@@ -81,8 +81,8 @@ Dashboard 的 **Sub-agent delegation** 选择器会保存 `injectionModel`，以
   定期重新评估；当相关 usage 达到阈值，并且存在使用率确实更低的可用账号时，该 thread 可能会
   重新绑定。
 - 新 session 可以选择 usage 最低的可用账号。提供 5h 窗口的计划（目前为 Plus/Team/Business）按
-  已知 5h、每周、30d 窗口中的最高使用率评分；Pro/ProLite 使用其提供的窗口，Go/Free 计划只使用
-  30d 窗口。
+  可用的 5h 窗口进行轮换；如果该窗口尚不可用，则回退到已知的每周或 30d 窗口。Pro/ProLite 使用其
+  提供的窗口，Go/Free 计划只使用 30d 窗口。
 - WHAM 提供 `limit_window_seconds` 时，Codex Auth 会把不小于 28 天的 primary window 分类为 30d，
   而不是每周。单窗口且没有时长时仍按旧规则视为每周；Plus/Team/Business 的双窗口响应保留
   旧的 primary=5h、secondary=每周顺序。

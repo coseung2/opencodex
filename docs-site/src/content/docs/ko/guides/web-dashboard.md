@@ -87,8 +87,8 @@ Dashboard의 **Sub-agent delegation** 선택기는 `injectionModel`과 선택적
   실행되는 thread도 주기적으로 다시 평가합니다. 관련 사용량이 임계값 이상이고 사용량이 확실히 더 낮은
   정상 계정이 있으면 그 계정으로 다시 묶일 수 있습니다.
 - 새 세션은 사용량이 가장 낮은 정상 계정을 고를 수 있습니다. 현재 5시간 창을 제공하는
-  Plus/Team/Business 플랜은 알려진 5시간·주간·30일 창 중 가장 높은 사용률로 점수를 매깁니다.
-  Pro/ProLite는 제공되는 창만 사용하고, Go/Free 플랜은 30일 창만 사용합니다.
+  Plus/Team/Business 플랜은 5시간 값이 있으면 그 창을 로테이션 기준으로 사용하고, 아직 없으면 알려진
+  주간 또는 30일 창으로 대체합니다. Pro/ProLite는 제공되는 창만 사용하고, Go/Free 플랜은 30일 창만 사용합니다.
 - WHAM이 `limit_window_seconds`를 제공하면 Codex Auth는 28일 이상인 primary window를 주간이 아닌
   30일 창으로 분류합니다. 단일 창에서 기간이 없으면 이전과 동일하게 주간으로 해석하고,
   Plus/Team/Business의 이중 창 응답은 기존 primary=5시간, secondary=주간 순서를 유지합니다.
