@@ -255,6 +255,44 @@ function normalizeConfiguredReasoningSummaryDelivery(
  * - Drops tool_search_call/tool_search_output input items
  * - Sets parallel_tool_calls to false
  */
+const MUSE_SPARK_WEB_SEARCH_STRICT_MODELS = new Set(["muse-spark-1.3-contributor", "muse-spark-1.2-contributor"]);
+
+function stripMuseSparkUnsupportedWebSearchFields(body: unknown, modelId: unknown): unknown {
+  if (!isPlainObject(body) || typeof modelId !== "string"
+    || !MUSE_SPARK_WEB_SEARCH_STRICT_MODELS.has(modelId.trim().toLowerCase())) return body;
+  const rewrite = (tools: unknown[]) => {
+    let changed = false;
+    const next = tools.map(tool => {
+      if (!isPlainObject(tool) || tool.type !== "web_search") return tool;
+      const copy = { ...tool };
+      let toolChanged = false;
+      for (const field of ["search_content_types", "indexed_web_access"]) {
+        if (Object.hasOwn(copy, field)) { delete copy[field]; toolChanged = true; }
+      }
+      if (toolChanged) changed = true;
+      return toolChanged ? copy : tool;
+    });
+    return changed ? next : tools;
+  };
+  let changed = false;
+  const next: Record<string, unknown> = { ...body };
+  if (Array.isArray(body.tools)) {
+    const tools = rewrite(body.tools);
+    if (tools !== body.tools) { next.tools = tools; changed = true; }
+  }
+  if (Array.isArray(body.input)) {
+    const input = body.input.map(item => {
+      if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) return item;
+      const tools = rewrite(item.tools);
+      if (tools === item.tools) return item;
+      changed = true;
+      return { ...item, tools };
+    });
+    if (changed) next.input = input;
+  }
+  return changed ? next : body;
+}
+
 function stripSparkCompatibility(body: unknown): unknown {
   if (!isPlainObject(body)) return body;
   const model = typeof body.model === "string" ? body.model : "";
@@ -1024,7 +1062,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (parsed._compactionRequest === true && !isCanonicalOpenAiForwardProvider(provider)) {
         outBody = buildRoutedCompactionBody(outBody);
       }
-      const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))));
+      const sanitizedBody = normalizeToolSchemas(stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.model));
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
         provider,

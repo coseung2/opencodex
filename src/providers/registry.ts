@@ -865,6 +865,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     id: "opencode-go", label: "opencode go", adapter: "openai-chat", baseUrl: "https://opencode.ai/zen/go/v1",
     authKind: "key", featured: true, dashboardUrl: "https://opencode.ai/auth", defaultModel: "kimi-k2.7-code",
     jawcodeBundle: "opencode-go", note: "GLM, DeepSeek, Kimi, Qwen, MiMo…",
+    modelWireDefaults: {
+      "muse-spark-1.3-contributor": "openai-responses",
+      "muse-spark-1.2-contributor": "openai-responses",
+    },
     modelContextWindows: {
       "kimi-k3": KIMI_K3_STANDARD_CONTEXT_WINDOW,
       [OPENCODE_OX_ALPHA_FREE_MODEL]: OX_ALPHA_CONTEXT_WINDOW,
