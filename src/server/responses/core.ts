@@ -100,7 +100,8 @@ import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve"
 import type { InboundWire } from "../../providers/registry";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
-import { resolveProviderTransport } from "../../providers/xai-transport";
+import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
+import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
 import type { WsData } from "../ws-bridge";
 import { trackActiveTurnLease, trackStreamLifetime } from "../lifecycle";
 import { redactSecretString } from "../../lib/redact";
@@ -130,6 +131,8 @@ import {
 import {
   conversationIdFromResponsesRequest,
   normalizeLogConversationId,
+  reasoningReplayConversationIdFromResponsesRequest,
+  sessionLaneIdFromRequest,
   sessionIdHeaderFromRequest,
 } from "../request-log-conversation";
 import type { AttemptRecoveryKind } from "../../usage/log";
@@ -826,6 +829,7 @@ async function applyFinalRouteRequestNormalization(args: {
   }
   // Settle the wire once so logging, fast-mode, auth, and sidecars read the adapter
   // this request will actually use (#404).
+  route.provider = resolveOpenCodeGoTransport(route.provider, sessionLaneIdFromRequest(req.headers));
   route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   logCtx.model = route.modelId;
   logCtx.provider = route.providerName;

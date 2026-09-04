@@ -33,6 +33,115 @@ within their route; neither route falls through to the other. See
 and before the `/v1/*` guard. Unknown `/v1/*` paths return JSON 404 errors instead of falling through
 to GUI static serving.
 
+[Decision Log]
+- 목적과 의도: Complete Cursor turns at the protocol terminal instead of waiting for a separate HTTP-body EOF that may never arrive.
+- 기존 구현 및 제약 조건: Cursor can send turnEnded followed by a clean Connect END_STREAM envelope while RunSSE remains open or later closes through an abort-shaped transport error. The adapter logged the clean envelope but did not settle its terminal owner, so a completed-looking turn could remain open until the Responses stall watchdog.
+- 검토한 주요 대안: Shorten the global stall timeout; treat every later abort as success; settle only when the HTTP stream emits end; make the clean Connect envelope authoritative.
+- 선택한 방식: Process preceding frames in order, preserve an already-emitted terminal, run any already-armed drained client-tool finalizer before protocol cleanup clears its grace timer only while the call set is still drained, otherwise finalize once through the existing fail-closed tool-call logic, and settle the transport successfully on a clean Connect END_STREAM.
+- 다른 대안 대신 이 방식을 선택한 이유: The protocol envelope is upstream's explicit terminal signal. Timeout changes only hide the race, and globally swallowing aborts would mask genuine mid-turn cancellation.
+- 장점, 단점 및 영향: Completed Cursor responses no longer wait for the 300-second watchdog when the HTTP body stays open; incomplete tool calls still emit their existing truncation error, and error-bearing Connect terminals remain failures.
+
+A replayed compaction item carries an `encrypted_content` blob only its minting backend can decode,
+and the client replays it on every later turn. The proxy's own `ocx1:` envelopes are transparent
+base64, so they always lower to plain user messages. A native blob is relayed only when there is no
+known serving-identity mismatch and the destination is known to decode native blobs — the canonical
+ChatGPT forward surface, the official OpenAI API, or a provider with the explicit
+`decodesNativeCompactionBlobs` capability. The destination gate alone is insufficient because more
+than one backend, including OpenAI and xAI, mints native blobs: a destination can decode its own blob
+without being able to decode the previous backend's. The same serving-identity mismatch signal
+therefore strips reasoning `encrypted_content` and degrades native compaction blobs through the
+existing opaque-note path. When the thread has no recorded identity, the destination-only behavior
+is deliberately unchanged. Forward auth alone is not evidence: noncanonical forward providers
+receive no caller credentials and may point at any backend. On any other routed destination the blob
+also degrades to the same opaque note the bridged parser uses, because forwarding it there fails the
+turn and the item outlives the failure in the client transcript, repeating on every later turn
+including the compaction turn the proxy itself drives. With `store: false`, request sanitization
+strips ids from every input item, including compact-wire items, matching codex-rs
+(`core/src/client.rs:918-925`). Compact-wire items remain exempt from response-side field backfill.
+
+[Decision Log]
+- 목적과 의도: Keep a session usable after its history crosses backends, instead of wedging it on a
+  compaction blob the current upstream cannot decode.
+- 기존 구현 및 제약 조건: Compaction handling was binary — `ocx1:` envelopes were ours, everything
+  else was treated as a native blob and gated only by the destination, even though multiple backends
+  mint mutually incompatible blobs. Response-side field backfill exempted only `compaction`, so its
+  two sibling types received synthesized ids the client then replayed.
+- 검토한 주요 대안: Tag every compaction item with its minting provider/credential/model identity;
+  drop compaction items on any route change; gate relay on the destination that would decode them.
+- 선택한 방식: Reuse the thread's recorded serving identity to degrade native blobs after a known
+  route change; otherwise retain the destination capability gate, and treat the compact wire family
+  as one enumeration so id-bearing passes cannot diverge per type.
+- 다른 대안 대신 이 방식을 선택한 이유: Full per-item provenance tagging is unnecessary when the
+  existing thread identity proves a route change, while dropping the item would silently discard
+  compacted context and widening unknown-identity behavior needs a separate decision.
+- 장점, 단점 및 영향: A cross-backend session degrades one compaction summary to a note instead of
+  failing every later turn. A self-hosted OpenAI relay keeps its blobs only when explicitly opted in;
+  other routed gateways see a note because routed compaction produces an `ocx1:` envelope.
+
+### Mixed-wire provider defaults
+
+Registry `modelWireDefaults` select an evidence-backed upstream protocol for an exact model without
+changing the provider-wide adapter. Explicit, allowed `modelAdapters` configuration always wins,
+including an entry that opts the model back into the provider-wide wire. Defaults are applied only
+while the configured provider still matches the registry transport, so reusing a preset name for a
+different custom destination does not inherit its upstream assumptions. Object-form defaults may
+also narrow the decision by inbound protocol and authentication mode; an auth-scoped default must
+not leak from a subscription transport into an API-key or forwarded-credential route.
+
+xAI keeps `openai-chat` as both its provider-wide compatibility wire and the default for Grok 4.5
+and 4.6 subscription traffic. The official Grok CLI catalog declares those models as Responses
+backends, but the current gateway rejects opaque reasoning continuation and compaction state on
+later turns. Operators may still select `openai-responses` with an explicit model adapter override
+while that compatibility work continues. The OAuth route drops caller-owned `service_tier` even
+when an override selects Responses, and native Responses OAuth 401 replay remains available to
+explicit opt-ins. API-key requests, translated Chat/Anthropic callers, and other Grok models retain
+their existing wire and tier policy.
+
+The dashboard's xAI Responses opt-in switch is the GUI surface of this same `modelAdapters` lane,
+not a separate tier policy. One write sets or clears the Grok 4.5 and 4.6 entries together while
+preserving unrelated overrides; a pre-existing one-entry state is reported as mixed until the next
+switch write normalizes both.
+
+[Decision Log]
+- 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.
+- 기존 구현 및 제약 조건: Codex emits `external_web_access`, `search_context_size`, `search_content_types`, and `user_location`; xAI documents a live-only `web_search` tool with domain filters and image flags, while Codex cached mode explicitly forbids external access.
+- 검토한 주요 대안: Strip only the first rejected field; pass every hosted-search field unchanged; disable web search for all xAI turns; normalize only the exact official xAI API destination.
+- 선택한 방식: On `https://api.x.ai` Responses traffic, lower live search to xAI's public shape, map image content requests to `enable_image_search`, remove unsupported OpenAI-private fields, and omit cached/index-only search plus stale selectors because xAI has no non-live equivalent.
+- 다른 대안 대신 이 방식을 선택한 이유: One-field stripping exposes the next schema mismatch and turning `external_web_access:false` into xAI live search widens the caller's network policy; destination scoping leaves custom gateways and canonical OpenAI byte-shape native.
+- 장점, 단점 및 영향: Grok 4.5/4.6 no longer fail every default Codex turn with an unsupported-argument 400; live search remains available when explicitly enabled, while cached search degrades to no hosted search on xAI rather than silently going live.
+
+OpenCode Go documents `gpt-5.6-luna` on `/zen/go/v1/responses` while sibling models use its Chat or
+Anthropic endpoints. The built-in preset therefore selects `openai-responses` only for Luna and
+keeps the provider-wide `openai-chat` default for other non-pinned models. This endpoint correction
+does not set `modelResponsesUpstreamStreaming`: client `stream: true` remains real upstream
+streaming until a current-runtime reproduction justifies a separate bounded-JSON compatibility
+policy.
+
+The canonical OpenCode Go transport also derives `x-opencode-session` from the existing hashed
+session lane before per-model wire selection. One conversation keeps one opaque affinity value
+across Responses, Chat, retries, and key rotation, while sibling subagents remain distinct. An
+operator-supplied header wins case-insensitively. Renamed providers are covered only when their
+fixed key-auth destination still matches the registry; custom and lookalike URLs receive nothing.
+Muse Spark's Responses sanitizer also drops the provider-rejected `search_content_types` and
+`indexed_web_access` fields from plain `web_search` tools while preserving preview tools and
+unrelated models.
+
+[Decision Log]
+- 목적과 의도: Match OpenCode Go's model-specific Luna endpoint without changing sibling model behavior.
+- 기존 구현 및 제약 조건: The preset had one Chat default even though the upstream publishes a mixed Chat, Responses, and Anthropic matrix; operators must retain explicit override precedence.
+- 검토한 주요 대안: Move the whole preset to Responses; infer from the model name; declare one exact registry default; also force bounded JSON from an older conditional terminal report.
+- 선택한 방식: Use one exact Luna wire default and leave upstream streaming unchanged.
+- 다른 대안 대신 이 방식을 선택한 이유: The endpoint mismatch is reproducible from current code and upstream documentation, whereas a current-dev live canary has not established the separate terminal-delivery policy.
+- 장점, 단점 및 영향: Luna reaches its documented endpoint across inbound surfaces and explicit opt-out still works; any future stream workaround remains a separately reviewed compatibility decision.
+
+[Decision Log]
+- 목적과 의도: Give OpenCode Go the stable per-conversation header it requires for prompt-cache routing without exposing raw Codex identifiers.
+- 기존 구현 및 제약 조건: Codex already supplies task and subagent identity, but Go requests reached every adapter without `x-opencode-session`; one static provider header would collapse unrelated conversations.
+- 검토한 주요 대안: Forward a raw thread header; reuse `prompt_cache_key`; configure one global value; inject separately in Chat and Responses adapters; enrich the canonical provider before wire selection.
+- 선택한 방식: Hash the existing parent-qualified session lane with a provider-specific domain, attach it as runtime-only provider metadata before wire selection, and preserve an explicit operator override.
+- 다른 대안 대신 이 방식을 선택한 이유: The lane already separates sibling subagents, while cache keys may represent shared cohorts and adapter-local changes would drift across Go's mixed wire matrix.
+- 장점, 단점 및 영향: Go requests gain stable opaque affinity across normal retries and key rotation without persisted config changes; requests with no stable lane remain headerless rather than receiving a per-request value that defeats affinity.
+
 ### Passthrough SSE stream shapes (#314)
 
 Native passthrough SSE has TWO shapes, selected per request in
