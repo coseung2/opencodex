@@ -36,17 +36,20 @@ import type { RawEntry } from "./parsing";
 import { readCurrentCatalogOrCache, unique } from "./bundled";
 
 export const NATIVE_DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
+export const NATIVE_GPT6_ASTRA_MODEL = "gpt-6-astra";
 
 export const NATIVE_OPENAI_MODELS = [
   "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_ASTRA_MODEL,
 ];
 
 export const DOCUMENTED_NATIVE_OPENAI_ADDITIONS = [
   "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_ASTRA_MODEL,
 ];
 
 export const SUPPORTED_NATIVE_OPENAI_SLUGS = new Set(NATIVE_OPENAI_MODELS);
@@ -69,6 +72,7 @@ export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: n
   "gpt-5.6-terra": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
   "gpt-5.6-luna": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
   [NATIVE_DAYBREAK_BLUE_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  [NATIVE_GPT6_ASTRA_MODEL]: { contextWindow: 272_000, maxContextWindow: 872_000, maxInputTokens: 872_000 },
 };
 
 export function nativeOpenAiContextWindow(slug: string): number | undefined {

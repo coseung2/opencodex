@@ -121,6 +121,17 @@ describe("registry per-model wire defaults", () => {
       .toBe("anthropic");
   });
 
+  test("routes OpenCode Go Muse Spark contributor models through Responses", () => {
+    const provider = {
+      ...gateway(),
+      baseUrl: "https://opencode.ai/zen/go/v1",
+    };
+    expect(resolveWireProtocolOverride("opencode-go", "muse-spark-1.3-contributor", provider).adapter)
+      .toBe("openai-responses");
+    expect(resolveWireProtocolOverride("opencode-go", "glm-5.2", provider).adapter)
+      .toBe("openai-chat");
+  });
+
   test("keeps provider credentials and destination untouched", () => {
     const provider = deepseek({ apiKey: "test-key" });
     const resolved = resolveWireProtocolOverride("deepseek", "deepseek-v4-flash", provider);

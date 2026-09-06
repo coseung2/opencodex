@@ -34,6 +34,10 @@ describe("identity neutralization — central helper", () => {
     expect(neutralizeIdentity("You are Codex, an agent based on GPT-5.4.1.")).toBe(NEUTRAL_IDENTITY_LINE);
   });
 
+  test("replaces GPT-6 Astra identity wording", () => {
+    expect(neutralizeIdentity("You are Codex, an agent based on GPT-6.")).toBe(NEUTRAL_IDENTITY_LINE);
+  });
+
   test("never emits the opencodex proxy identity", () => {
     const out = neutralizeIdentity(`${SYS}\n\nmore context`);
     expect(out).not.toMatch(/opencodex proxy/i);
