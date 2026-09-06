@@ -96,7 +96,12 @@ streams the response back **untranslated**.
 **Auth:** Kiro OAuth access token as Bearer, with region/profile metadata from the Kiro credential.
 
 - Builds Kiro `conversationState`, maps Codex tools and tool results, and sends image blocks supported
-  by the Kiro wire.
+  by the Kiro wire. Multiple immediately adjacent outputs from one custom-tool invocation are
+  coalesced into one Kiro result in source order; the match uses the original call id, so lossy
+  wire-id normalization cannot authorize a different result.
+- AWS Builder ID requests use Kiro's fixed service profile only at request construction time while
+  retaining the CLI wire envelope. The fallback is never persisted as account identity or used for
+  region selection; enterprise accounts keep their own profile ARN.
 - On locally expanded `previous_response_id` turns, replayed text and tool structure remain in
   history, but image bytes from completed earlier turns are omitted. Images attached to the current
   user/tool-result suffix, including its bounded completion retry, are preserved. Attach an image

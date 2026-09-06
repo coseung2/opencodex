@@ -276,6 +276,63 @@ describe("kiro adapter — buildRequest", () => {
     expect(results[0].status).toBe("success");
   });
 
+  test("adjacent outputs for one original tool id coalesce in source order", async () => {
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-group", name: "bash", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call-group", toolName: "bash", content: "first", isError: false },
+      { role: "toolResult", toolCallId: "call-group", toolName: "bash", content: "second", isError: false },
+      { role: "toolResult", toolCallId: "call-group", toolName: "bash", content: "final", isError: false },
+    ];
+    const { body } = await createKiroAdapter(provider).buildRequest(parsedWith(messages, [bashTool]));
+    const results = JSON.parse(body).conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults;
+    expect(results).toEqual([{
+      content: [{ text: "first" }, { text: "second" }, { text: "final" }],
+      status: "success",
+      toolUseId: "call-group",
+    }]);
+  });
+
+  test("coalesced outputs retain images and an earlier error state", async () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-sticky", name: "bash", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call-sticky", toolName: "bash", content: [{ type: "text", text: "caption" }, { type: "image", imageUrl: `data:image/png;base64,${png}` }], isError: true },
+      { role: "toolResult", toolCallId: "call-sticky", toolName: "bash", content: "later-ok", isError: false },
+    ];
+    const { body } = await createKiroAdapter(provider).buildRequest(parsedWith(messages, [bashTool]));
+    const current = JSON.parse(body).conversationState.currentMessage.userInputMessage;
+    expect(current.userInputMessageContext.toolResults).toEqual([{
+      content: [{ text: "caption" }, { text: "later-ok" }],
+      status: "error",
+      toolUseId: "call-sticky",
+    }]);
+    expect(current.images).toEqual([{ format: "png", source: { bytes: png } }]);
+  });
+
+  test("lossy normalized ids never authorize a different raw tool result", async () => {
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call|raw", name: "bash", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call_raw", toolName: "bash", content: "nope", isError: false },
+    ];
+    await expect(createKiroAdapter(provider).buildRequest(parsedWith(messages, [bashTool])))
+      .rejects.toThrow("orphaned tool result");
+  });
+
+  test("a non-result barrier prevents a later same-id output from joining the prior result", async () => {
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-x", name: "bash", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call-x", toolName: "bash", content: "before", isError: false },
+      { role: "user", content: "steer" },
+      { role: "toolResult", toolCallId: "call-x", toolName: "bash", content: "after", isError: false },
+    ];
+    await expect(createKiroAdapter(provider).buildRequest(parsedWith(messages, [bashTool])))
+      .rejects.toThrow(/matching tool use|tool result/i);
+  });
+
   // Kiro's own client replays the encrypted reasoning blob on the assistant turn it belongs to;
   // dropping it makes every turn start without the previous turn's reasoning.
   test("assistant history replays the Kiro redacted reasoning blob", async () => {

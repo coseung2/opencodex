@@ -488,7 +488,12 @@ unsupported wire control. Kiro accepts the hint without sending any parallel-con
 The existing Kiro preset and catalog still advertise serialized execution. Plain text output
 controls are likewise tolerated; actual schema-constrained output remains unsupported.
 The current fork's commentary/image replay retirement and private completion contract are
-independent of these input compatibility rules and must remain intact.
+independent of these input compatibility rules and must remain intact. Adjacent outputs from one
+custom-tool invocation are collapsed into a single Kiro result only when their original caller ids
+match exactly; normalized wire ids are never used as the ownership proof. Any non-result message is
+a grouping barrier. Builder ID uses Kiro's public service profile only as request-scoped transport
+metadata and remains on the CLI envelope; the fallback never becomes stored account identity or a
+region source.
 
 ## Kiro reasoning round-trip (`redactedContent`)
 

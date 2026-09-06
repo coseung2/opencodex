@@ -476,7 +476,7 @@ export function buildKiroPayload(
   }
   const systemPrefix = systemParts.length > 0 ? `${systemParts.join("\n\n")}\n\n` : "";
   const turns: KiroTurn[] = [];
-  const priorCalls = new Map<string, { wireName: string }>();
+  const priorCalls = new Map<string, { wireName: string; rawId: string }>();
   const pushUser = (content: string, images: KiroImage[] = [], toolResults: KiroToolResult[] = []): void => {
     const last = turns.at(-1);
     if (last?.kind === "user") {
@@ -499,6 +499,29 @@ export function buildKiroPayload(
     }
   };
 
+  // Codex custom tools may emit several adjacent output items for one invocation (for example
+  // progress notifications followed by the final value). Kiro accepts one result per tool use, so
+  // coalesce only immediately adjacent outputs whose ORIGINAL ids are identical. The raw-id check
+  // is important: normalizeToolId is lossy (`|`, whitespace, truncation), and must never authorize a
+  // different result merely because two caller-controlled ids normalize to the same wire id.
+  let adjacentResult: {
+    rawId: string;
+    result: KiroToolResult;
+    texts: string[];
+    count: number;
+    hasImages: boolean;
+  } | undefined;
+  const finishAdjacentResult = (): void => {
+    if (adjacentResult && adjacentResult.count > 1) {
+      if (adjacentResult.texts.some(text => text.trim())) {
+        adjacentResult.result.content = adjacentResult.texts.map(text => ({ text }));
+      } else if (adjacentResult.hasImages || adjacentResult.result.status === "error") {
+        adjacentResult.result.content = [{ text: KIRO_EMPTY_TOOL_RESULT_MESSAGE }];
+      }
+    }
+    adjacentResult = undefined;
+  };
+
   const payloadMessages = kiroPayloadMessages(parsed);
   const replayMessagePrefixLength = Math.min(
     Math.max(0, parsed._replayMessagePrefixLen ?? 0),
@@ -507,6 +530,9 @@ export function buildKiroPayload(
   for (let messageIndex = 0; messageIndex < payloadMessages.length; messageIndex++) {
     const msg = payloadMessages[messageIndex];
     const isReplayedMessage = messageIndex < replayMessagePrefixLength;
+    // Preserve source-message adjacency even when the turn normalization below would collapse or
+    // skip a structural message.
+    if (msg.role !== "toolResult") finishAdjacentResult();
     if (msg.role === "user" || msg.role === "developer") {
       const text = userContentText((msg as { content: string | OcxContentPart[] }).content);
       // Historical text/tool structure remains replayable, but image bytes are scoped to the turn
@@ -539,7 +565,7 @@ export function buildKiroPayload(
         if (priorCalls.has(toolUseId)) throw new Error(`Kiro history contains duplicate tool call id ${JSON.stringify(tc.id)}`);
         const wireName = namespacedToolName(tc.namespace, tc.name);
         const name = registry.alias(wireName);
-        priorCalls.set(toolUseId, { wireName });
+        priorCalls.set(toolUseId, { wireName, rawId: tc.id });
         return { name, input: (tc.arguments ?? {}) as Record<string, unknown>, toolUseId };
       });
       if (!text && toolUses.length === 0) {
@@ -556,20 +582,44 @@ export function buildKiroPayload(
       const resultText = text.trim() ? text : KIRO_EMPTY_TOOL_RESULT_MESSAGE;
       const images = isReplayedMessage ? [] : extractKiroImages(tr.content);
       const toolUseId = normalizeToolId(tr.toolCallId);
-      if (!priorCalls.has(toolUseId)) {
+      const call = priorCalls.get(toolUseId);
+      if (!call || call.rawId !== tr.toolCallId) {
         throw new Error(`Kiro history contains an orphaned tool result for call ${JSON.stringify(tr.toolCallId)}`);
       }
+      const last = turns.at(-1);
+      if (
+        adjacentResult?.rawId === tr.toolCallId
+        && last?.kind === "user"
+        && last.toolResults.at(-1) === adjacentResult.result
+      ) {
+        adjacentResult.count += 1;
+        adjacentResult.hasImages ||= images.length > 0;
+        if (text.length > 0) adjacentResult.texts.push(text);
+        last.images.push(...images);
+        if (tr.isError) adjacentResult.result.status = "error";
+        continue;
+      }
+      finishAdjacentResult();
       // Carrier text is a placeholder for an OTHERWISE EMPTY tool-result turn, not a prefix.
       // Passing it here would push proxy filler AHEAD of a human instruction that Claude Code
       // sends in the same turn (mid-turn steering / queued_command, issue #543), burying the
       // newest user intent behind boilerplate. Backfill below only when nothing else speaks.
-      pushUser("", images, [{
+      const result: KiroToolResult = {
         content: [{ text: resultText }],
         status: tr.isError ? "error" : "success",
         toolUseId,
-      }]);
+      };
+      pushUser("", images, [result]);
+      adjacentResult = {
+        rawId: tr.toolCallId,
+        result,
+        texts: text.length > 0 ? [text] : [],
+        count: 1,
+        hasImages: images.length > 0,
+      };
     }
   }
+  finishAdjacentResult();
 
   if (turns.length === 0 || turns[0].kind === "assistant") {
     turns.unshift({ kind: "user", content: KIRO_CONTINUATION_MESSAGE, images: [], toolResults: [] });
