@@ -890,8 +890,11 @@ async function applyFinalRouteRequestNormalization(args: {
   // Virtual model rewriting: Pro aliases → base model + reasoning.mode="pro".
   applyOpenAiVirtualModel(parsed, route, logCtx);
 
-  // Fast mode override for OpenAI-routed models.
-  if (config.fastMode !== undefined && route.provider.adapter === "openai-responses") {
+  // Fast mode override for OpenAI-shaped routes. xAI OAuth's subscription Responses lane has no
+  // caller-owned Priority/Fast contract, so switching Grok to its native wire must not make a
+  // global OpenAI fastMode leak service_tier upstream.
+  const callerFastTierAllowed = !(route.providerName === "xai" && route.provider.authMode === "oauth");
+  if (config.fastMode !== undefined && route.provider.adapter === "openai-responses" && callerFastTierAllowed) {
     const tier = config.fastMode ? "priority" : undefined;
     if (parsed._rawBody && typeof parsed._rawBody === "object") {
       if (tier) (parsed._rawBody as Record<string, unknown>).service_tier = tier;
@@ -1719,6 +1722,66 @@ async function handleResponsesInner(
       return transportFailureResponse(err);
     } finally {
       request.releaseBodyObservation?.();
+    }
+
+    // Native Responses providers return from this passthrough branch before the generic recovery
+    // loop below. Preserve the same OAuth contract here: one pre-stream 401 forces one credential
+    // refresh and one rebuilt replay. This is required for xAI now that Grok 4.6/4.5 subscription
+    // traffic uses the provider's native Responses wire.
+    if (upstreamResponse.status === 401 && isOAuth401ReplayProvider && sentOAuthSnapshot) {
+      try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed */ }
+      let refreshed: OAuthAccessSnapshot;
+      try {
+        refreshed = await forceRefreshOAuthAccessSnapshot(sentOAuthSnapshot);
+      } catch (err) {
+        upstream.abort();
+        releaseCodexAuthContextProbeLease(authCtx);
+        return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
+      }
+      sentOAuthSnapshot = refreshed;
+      if (route.providerName === "kiro") parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
+      const refreshedProvider = resolveProviderTransport(
+        route.providerName,
+        { ...route.provider, apiKey: refreshed.accessToken },
+        parsed.options.promptCacheKey,
+        route.providerName === "github-copilot" ? getOAuthCredentialApiBaseUrl(route.providerName) : undefined,
+      );
+      route.provider = refreshedProvider;
+      const refreshedAdapter = resolveAdapter(
+        resolveWireProtocolOverride(route.providerName, route.modelId, refreshedProvider, inboundWire),
+        config.cacheRetention,
+      );
+      if (!("passthrough" in refreshedAdapter) || !refreshedAdapter.passthrough) {
+        upstream.abort();
+        return formatErrorResponse(502, "upstream_error", "OAuth refresh changed the provider wire unexpectedly");
+      }
+      logCtx.providerAdapter = refreshedAdapter.name;
+      sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, refreshedAdapter.name, logCtx.accountLogLabel);
+      try {
+        request = await refreshedAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+        recordAdapterReasoning(logCtx, request);
+      } catch (err) {
+        upstream.abort();
+        if (options.abortSignal?.aborted) return clientCancelledResponse();
+        return formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err)));
+      }
+      try {
+        upstreamResponse = await fetchWithTransientRetry(
+          recovery => {
+            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery ?? "oauth-401");
+            return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
+              method: request.method,
+              headers: request.headers,
+              body: request.body,
+            }, recovery), upstream.signal, connectMs, parsed.stream, providerFetch(route.provider, options.codexWsRuntimeIdentity));
+          },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+        );
+      } catch (err) {
+        return transportFailureResponse(err);
+      } finally {
+        request.releaseBodyObservation?.();
+      }
     }
 
     if (usesCodexForwardPoolAuth(authCtx, route.provider) && !authCtx.fixedAccount) {

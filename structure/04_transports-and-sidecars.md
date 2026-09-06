@@ -88,19 +88,13 @@ different custom destination does not inherit its upstream assumptions. Object-f
 also narrow the decision by inbound protocol and authentication mode; an auth-scoped default must
 not leak from a subscription transport into an API-key or forwarded-credential route.
 
-xAI keeps `openai-chat` as both its provider-wide compatibility wire and the default for Grok 4.5
-and 4.6 subscription traffic. The official Grok CLI catalog declares those models as Responses
-backends, but the current gateway rejects opaque reasoning continuation and compaction state on
-later turns. Operators may still select `openai-responses` with an explicit model adapter override
-while that compatibility work continues. The OAuth route drops caller-owned `service_tier` even
-when an override selects Responses, and native Responses OAuth 401 replay remains available to
-explicit opt-ins. API-key requests, translated Chat/Anthropic callers, and other Grok models retain
-their existing wire and tier policy.
-
-The dashboard's xAI Responses opt-in switch is the GUI surface of this same `modelAdapters` lane,
-not a separate tier policy. One write sets or clears the Grok 4.5 and 4.6 entries together while
-preserving unrelated overrides; a pre-existing one-entry state is reported as mixed until the next
-switch write normalizes both.
+xAI keeps `openai-chat` as its provider-wide compatibility wire, but Grok 4.5 and 4.6 OAuth
+Responses clients use the native `openai-responses` wire declared by the Grok subscription
+catalog. The registry default is scoped by both inbound protocol and auth mode: API-key requests,
+translated Chat/Anthropic callers, and other Grok models retain their existing wire. An explicit
+`modelAdapters` entry still wins and can opt either model back into Chat. The OAuth Responses route
+never forwards caller-owned `service_tier` and strips stale OpenAI `text.verbosity`; one pre-stream
+401 performs the same singleflight refresh plus one rebuilt replay as the translated adapter path.
 
 [Decision Log]
 - 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.

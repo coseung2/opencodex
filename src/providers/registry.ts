@@ -29,7 +29,12 @@ export type InboundWire = "responses" | "chat" | "anthropic";
  * A per-model wire default: a bare string applies to every inbound, while the object
  * form applies only to the listed inbound protocols.
  */
-export type ModelWireDefault = string | { wire: string; inbound: readonly InboundWire[] };
+export type ModelWireDefault = string | {
+  wire: string;
+  inbound: readonly InboundWire[];
+  /** Optional auth-mode gate for providers whose subscription and API-key products use different wires. */
+  authModes?: readonly ProviderAuthKind[];
+};
 
 export type ProviderModelDiscoveryScalar = string | number | boolean;
 
@@ -700,6 +705,13 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // transport returns 400 ("Multi Agent requests are not allowed on chat completions").
     models: ["grok-4.6", "grok-4.5", "grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning", "grok-build-0.1", "grok-composer-2.5-fast"],
     defaultModel: "grok-4.5",
+    // Grok's subscription gateway exposes 4.6/4.5 natively on Responses. Scope the default to
+    // OAuth Codex traffic: API-key and Chat/Anthropic callers keep their existing wire, while an
+    // explicit modelAdapters override still wins over this registry-only default.
+    modelWireDefaults: {
+      "grok-4.6": { wire: "openai-responses", inbound: ["responses"], authModes: ["oauth"] },
+      "grok-4.5": { wire: "openai-responses", inbound: ["responses"], authModes: ["oauth"] },
+    },
     // Vision lineup per docs.x.ai model-capabilities/images/understanding: the grok-4.x chat
     // models accept image input (JPEG/PNG, URL or base64). Without this the catalog leaves
     // inputModalities undefined, and deriveComboCatalogModel defaults an undefined member to
@@ -1807,8 +1819,12 @@ export function providerModelWireDefault(
   if (!entry?.modelWireDefaults || !providerMatchesRegistryTransport(id, provider)) return undefined;
   const declared = entry.modelWireDefaults[modelId.trim().toLowerCase()];
   if (declared === undefined) return undefined;
-  // A bare string applies to every inbound; the object form only to the listed ones.
-  if (typeof declared !== "string" && !declared.inbound.includes(inbound)) return undefined;
+  // A bare string applies to every inbound/auth mode; the object form may narrow either.
+  if (typeof declared !== "string") {
+    if (!declared.inbound.includes(inbound)) return undefined;
+    const authMode = provider.authMode ?? entry.authKind;
+    if (declared.authModes && !declared.authModes.includes(authMode)) return undefined;
+  }
   const wire = typeof declared === "string" ? declared : declared.wire;
   return wire !== undefined && allowedWires.has(wire) ? wire : undefined;
 }

@@ -132,6 +132,31 @@ describe("registry per-model wire defaults", () => {
       .toBe("openai-chat");
   });
 
+  test("routes Grok 4.6/4.5 OAuth Responses clients through the native wire only", () => {
+    const oauth = gateway({
+      baseUrl: "https://cli-chat-proxy.grok.com/v1",
+      authMode: "oauth",
+    });
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", oauth, "responses").adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride("xai", "grok-4.5", oauth, "responses").adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", oauth, "chat").adapter).toBe("openai-chat");
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", oauth, "anthropic").adapter).toBe("openai-chat");
+
+    const apiKey = gateway({ baseUrl: "https://api.x.ai/v1", authMode: "key" });
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", apiKey, "responses").adapter).toBe("openai-chat");
+    // Older siblings are not silently moved just because the provider supports Responses.
+    expect(resolveWireProtocolOverride("xai", "grok-4.3", oauth, "responses").adapter).toBe("openai-chat");
+  });
+
+  test("an explicit Grok Chat override opts out of the OAuth Responses default", () => {
+    const provider = gateway({
+      baseUrl: "https://cli-chat-proxy.grok.com/v1",
+      authMode: "oauth",
+      modelAdapters: { "grok-4.6": "openai-chat" },
+    });
+    expect(resolveWireProtocolOverride("xai", "grok-4.6", provider, "responses").adapter).toBe("openai-chat");
+  });
+
   test("keeps provider credentials and destination untouched", () => {
     const provider = deepseek({ apiKey: "test-key" });
     const resolved = resolveWireProtocolOverride("deepseek", "deepseek-v4-flash", provider);

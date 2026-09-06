@@ -4,6 +4,7 @@ import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxP
 import { catalogModelSupportsReasoningSummaries } from "../codex/catalog";
 import { COMPACT_PROMPT, decodeCompactionSummary, SUMMARY_PREFIX } from "../responses/compaction";
 import { isOpenCodeMuseResponses } from "../providers/opencode-go-transport";
+import { isXaiResponsesDestination } from "../providers/xai-transport";
 import { collectResponsesToolGroups } from "../responses/tool-groups";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
@@ -385,6 +386,24 @@ function stripSparkCompatibility(body: unknown): unknown {
   return changed
     ? { ...body, ...(tools !== body.tools ? { tools } : {}), ...(input !== body.input ? { input } : {}), ...extraOverrides }
     : body;
+}
+
+function stripXaiOAuthOnlyParams(body: unknown, provider: OcxProviderConfig): unknown {
+  if (provider.authMode !== "oauth" || !isXaiResponsesDestination(provider) || !isPlainObject(body)) return body;
+  let changed = false;
+  const next: Record<string, unknown> = { ...body };
+  // The Grok subscription gateway has no caller-owned Priority/Fast contract. A global fastMode or
+  // stale client may still send the OpenAI service_tier parameter after the model switches wires.
+  if (Object.hasOwn(next, "service_tier")) { delete next.service_tier; changed = true; }
+  // xAI does not document OpenAI's text.verbosity control; stale catalog clients can keep sending
+  // it after a metadata refresh, so fail soft at the destination boundary as well.
+  if (isPlainObject(next.text) && Object.hasOwn(next.text, "verbosity")) {
+    const text = { ...next.text };
+    delete text.verbosity;
+    next.text = text;
+    changed = true;
+  }
+  return changed ? next : body;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -1060,7 +1079,10 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (parsed._compactionRequest === true && !isCanonicalOpenAiForwardProvider(provider)) {
         outBody = buildRoutedCompactionBody(outBody);
       }
-      const sanitizedBody = normalizeToolSchemas(stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId, url));
+      const sanitizedBody = stripXaiOAuthOnlyParams(
+        normalizeToolSchemas(stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId, url)),
+        provider,
+      );
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
         provider,
