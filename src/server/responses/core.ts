@@ -395,7 +395,7 @@ async function retryCodexPoolOnAlternateAccount(
     if (outcomeStatus !== firstResponse.status && (outcomeStatus === 429 || outcomeStatus === 402)) {
       recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
         ...codexQuotaOutcomeMeta(firstResponse),
-        threadId: firstAuthCtx.affinityKey,
+        threadId: req.headers.get("x-codex-parent-thread-id"),
         modelId: route.modelId,
         probeLeaseId: codexProbeLeaseId(firstAuthCtx),
         probeQuotaScope: codexProbeQuotaScope(firstAuthCtx),
