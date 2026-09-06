@@ -78,7 +78,10 @@ describe("OpenCode Muse wire boundary", () => {
     for (const base of [go, "https://opencode.ai/zen/v1"]) {
       expect(isOpenCodeMuseResponses(model, `${base}/responses`)).toBe(true);
     }
-    for (const url of [`${go}/responses?q=1`, `${go}/responses#x`, "https://opencode.ai.evil.test/zen/go/v1/responses", "https://u:p@opencode.ai/zen/go/v1/responses", "not a URL"]) {
+    const credentialed = new URL(`${go}/responses`);
+    credentialed.username = "synthetic-user";
+    credentialed.password = "synthetic-password";
+    for (const url of [`${go}/responses?q=1`, `${go}/responses#x`, "https://opencode.ai.evil.test/zen/go/v1/responses", credentialed.href, "not a URL"]) {
       expect(isOpenCodeMuseResponses(model, url)).toBe(false);
     }
     expect(isOpenCodeMuseResponses("gpt-5.6-luna", `${go}/responses`)).toBe(false);
