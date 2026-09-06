@@ -101,7 +101,8 @@ import type { InboundWire } from "../../providers/registry";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import { resolveProviderTransport } from "../../providers/xai-transport";
-import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
+import { isOpenCodeMuseResponses, resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
+import { declaredNamespaceAliases } from "../../responses/namespace-aliases";
 import type { WsData } from "../ws-bridge";
 import { trackActiveTurnLease, trackStreamLifetime } from "../lifecycle";
 import { redactSecretString } from "../../lib/redact";
@@ -1636,9 +1637,6 @@ async function handleResponsesInner(
   }
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
-    const imageGenCallAliases = route.provider.authMode === "forward"
-      ? new Map<string, { namespace: string; name: string }>()
-      : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
     // Local continuation cache for the ChatGPT passthrough. Codex WS turns chain with
     // previous_response_id, ocx converts them to internal HTTP requests, and the ChatGPT Codex
     // REST backend rejects the parameter — the adapter strips it in forward mode, so the ONLY
@@ -1661,6 +1659,14 @@ async function handleResponsesInner(
       );
     }
     let request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    // Reuse the existing client-only namespace rewrite and its bounded SSE relay. The
+    // inspection/cache branch retains raw names for continuation replay. Resolve all
+    // declaration ownership before admitting a Muse dotted alias.
+    const imageGenCallAliases = route.provider.authMode === "forward"
+      ? new Map<string, { namespace: string; name: string }>()
+      : isOpenCodeMuseResponses(parsed.modelId, request.url)
+        ? declaredNamespaceAliases(parsed.context.tools ?? [], translatorBudget)
+        : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
     recordAdapterReasoning(logCtx, request);
     const passthroughEstimate = typeof request.usageLog?.inputTokens === "number"
       ? request.usageLog.inputTokens

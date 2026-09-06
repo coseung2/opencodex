@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 01 Persistence | Complete | Small snapshot-policy leaf; verified identical-write suppression, adaptive debounce and one-attempt background passes. |
 | 02 Astra | Complete | Exact final pin, native projection/limits, routed-field isolation, API metadata and scoped API-reference pricing. |
-| 03 OpenCode Muse | Pending | Core registry/transport changes already exist; inspect remaining guards and regression coverage. |
+| 03 OpenCode Muse | Complete | Completed missing metadata, exact-destination filtering, collision-safe client alias restoration and per-model enrichment. |
 | 04 Kiro compatibility | Pending | Text-control and parallel-hint rejection still use the older contract. |
 | 05 Kiro lifecycle | Pending | Per-account quota exists in the fork; compare lifecycle changes rather than replacing the quota subsystem. |
 | 06 Kiro calibration | Pending | Not present on baseline. |
@@ -45,3 +45,13 @@
 - Focused gate across Astra/catalog/sync/visibility/identity/price/API/registry: **256 pass / 0 fail**. Follow-up Astra/price tests after source cleanup: **48 pass / 0 fail**. Root typecheck and privacy scan passed.
 - Docs frozen install/build passed: **216 pages**. Added the Astra guide and updated catalog SOT.
 - Replaced an inherited literal NUL in the cost memo key with the equivalent TypeScript `\\u0000` escape so future source diffs stay readable; runtime key bytes are unchanged.
+
+## 03 — OpenCode Muse
+
+- Confirmed the fork had Responses routing and session affinity but **not** the initially assumed Muse image/window metadata. Added explicit image and 1,048,576-token metadata for both Contributor versions; the persisted-provider test exposed this omission before the addition.
+- Scoped the existing two-field web-search sanitizer by the exact effective Go/Zen Responses URL. Custom hosts, credentials/query/fragment URL variants and sibling models are not treated as the same contract.
+- Added a small declaration-ownership module for canonical/dotted namespace aliases. It resolves the complete catalog before publishing an alias, blocks collisions regardless of order, and accounts its maps under the existing translator budget.
+- The fork has no upstream global undeclared-tool-guard framework. Rather than importing that subsystem, Muse restoration is attached to the existing client-only JSON/SSE rewrite. Raw inspection/continuation names and bounded relay/lifetime behavior are preserved; unknown aliases are not guessed.
+- Registry enrichment now fills metadata per model key on cloned maps, preserving explicit user values and empty ladders. No Command Code ladder, Meta provider or new credential flow was added.
+- Focused gate: **215 pass / 0 fail** across Muse, session affinity, image-gen rewrite, registry, Responses passthrough and catalog suites. Typecheck/privacy scan and docs frozen install/build passed (**221 pages**).
+- The new tests exercise real `handleResponses` JSON and SSE paths plus raw continuation state, not only a synthetic alias map. Live vendor accounts were not called.

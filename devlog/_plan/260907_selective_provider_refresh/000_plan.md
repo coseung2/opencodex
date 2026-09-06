@@ -12,7 +12,7 @@ Only Astra, OpenCode Go/Zen Muse Spark compatibility, Kiro, xAI/Grok, and direct
 
 ## Findings which change the earlier proposal
 
-The fork baseline already includes Bun 1.4.0, bounded Windows test batches, GUI timer/resource coalescing, visibility-aware polling, OpenCode Go session affinity, Muse 1.2/1.3 routing and input metadata, a preliminary Astra registration, quota-window and Notch improvements, and bounded SSE framing. Preserve them and test the remaining deltas. In particular, do not remove Windows batching merely because Bun is now 1.4.0.
+The fork baseline already includes Bun 1.4.0, bounded Windows test batches, GUI timer/resource coalescing, visibility-aware polling, OpenCode Go session affinity, Muse 1.2/1.3 routing (the initially assumed image/window metadata was found missing during stage 03 and added there), a preliminary Astra registration, quota-window and Notch improvements, and bounded SSE framing. Preserve them and test the remaining deltas. In particular, do not remove Windows batching merely because Bun is now 1.4.0.
 
 ## Staged implementation and acceptance
 

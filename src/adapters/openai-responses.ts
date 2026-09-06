@@ -3,6 +3,7 @@ import type { IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage } from "../types";
 import { catalogModelSupportsReasoningSummaries } from "../codex/catalog";
 import { COMPACT_PROMPT, decodeCompactionSummary, SUMMARY_PREFIX } from "../responses/compaction";
+import { isOpenCodeMuseResponses } from "../providers/opencode-go-transport";
 import { collectResponsesToolGroups } from "../responses/tool-groups";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
@@ -255,11 +256,8 @@ function normalizeConfiguredReasoningSummaryDelivery(
  * - Drops tool_search_call/tool_search_output input items
  * - Sets parallel_tool_calls to false
  */
-const MUSE_SPARK_WEB_SEARCH_STRICT_MODELS = new Set(["muse-spark-1.3-contributor", "muse-spark-1.2-contributor"]);
-
-function stripMuseSparkUnsupportedWebSearchFields(body: unknown, modelId: unknown): unknown {
-  if (!isPlainObject(body) || typeof modelId !== "string"
-    || !MUSE_SPARK_WEB_SEARCH_STRICT_MODELS.has(modelId.trim().toLowerCase())) return body;
+function stripMuseSparkUnsupportedWebSearchFields(body: unknown, modelId: unknown, responseUrl: string): unknown {
+  if (!isPlainObject(body) || !isOpenCodeMuseResponses(modelId, responseUrl)) return body;
   const rewrite = (tools: unknown[]) => {
     let changed = false;
     const next = tools.map(tool => {
@@ -1062,7 +1060,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (parsed._compactionRequest === true && !isCanonicalOpenAiForwardProvider(provider)) {
         outBody = buildRoutedCompactionBody(outBody);
       }
-      const sanitizedBody = normalizeToolSchemas(stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId));
+      const sanitizedBody = normalizeToolSchemas(stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId, url));
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
         provider,

@@ -875,11 +875,15 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     },
     modelContextWindows: {
       "kimi-k3": KIMI_K3_STANDARD_CONTEXT_WINDOW,
+      "muse-spark-1.3-contributor": 1_048_576,
+      "muse-spark-1.2-contributor": 1_048_576,
       [OPENCODE_OX_ALPHA_FREE_MODEL]: OX_ALPHA_CONTEXT_WINDOW,
       [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576,
     },
     modelInputModalities: {
       "kimi-k3": ["text", "image"],
+      "muse-spark-1.3-contributor": ["text", "image"],
+      "muse-spark-1.2-contributor": ["text", "image"],
       [OPENCODE_OX_ALPHA_FREE_MODEL]: ["text", "image"],
       [DEEPSEEK_VISION_PREVIEW_MODEL]: ["text", "image"],
     },
