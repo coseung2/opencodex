@@ -61,6 +61,14 @@ export function sessionIdHeaderFromRequest(headers: Headers): string | null {
   return headers.get("session_id") ?? headers.get("session-id");
 }
 
+export function sessionLaneIdFromRequest(headers: Headers): string | undefined {
+  const parent = headers.get("x-codex-parent-thread-id")?.trim();
+  const thread = headers.get("thread-id")?.trim();
+  const session = sessionIdHeaderFromRequest(headers)?.trim();
+  const lane = [parent, thread, session].filter(Boolean);
+  return lane.length > 0 ? lane.join("\0") : undefined;
+}
+
 export function conversationIdFromResponsesRequest(input: {
   clientThreadId?: string;
   sessionIdHeader?: string | null;

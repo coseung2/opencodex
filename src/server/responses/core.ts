@@ -100,7 +100,7 @@ import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve"
 import type { InboundWire } from "../../providers/registry";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
-import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
+import { resolveProviderTransport } from "../../providers/xai-transport";
 import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
 import type { WsData } from "../ws-bridge";
 import { trackActiveTurnLease, trackStreamLifetime } from "../lifecycle";
@@ -131,7 +131,6 @@ import {
 import {
   conversationIdFromResponsesRequest,
   normalizeLogConversationId,
-  reasoningReplayConversationIdFromResponsesRequest,
   sessionLaneIdFromRequest,
   sessionIdHeaderFromRequest,
 } from "../request-log-conversation";
