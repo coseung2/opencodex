@@ -767,14 +767,14 @@ async function gatherRoutedModelsUncached(
     const disabled = disabledNativeSlugs(config);
     for (const slug of nativeOpenAiSlugs()) {
       if (disabled.has(slug)) continue;
-      const contextWindow = nativeOpenAiContextWindow(slug);
+      const contextWindow = nativeOpenAiContextWindow(slug, config);
       if (contextWindow === undefined) continue;
       const synthetic: CatalogModel = {
         provider: "openai",
         id: slug,
         owned_by: "openai",
         contextWindow,
-        maxInputTokens: nativeOpenAiMaxInputTokens(slug) ?? contextWindow,
+        maxInputTokens: nativeOpenAiMaxInputTokens(slug, config) ?? contextWindow,
         inputModalities: nativeInputModalities(slug),
         reasoningEfforts: nativeReasoningEfforts(slug),
         ...(nativeParallelToolCalls(slug) ? { parallelToolCalls: true } : {}),
@@ -854,7 +854,11 @@ export function augmentRoutedModelsWithRegistryOpenAiApiRows(
       ? Math.min(officialContext, userContext ?? officialContext, providerCap ?? officialContext)
       : undefined;
     const maxInputTokens = typeof officialMaxInput === "number"
-      ? Math.min(officialMaxInput, userMaxInput ?? officialMaxInput)
+      ? Math.min(officialMaxInput, userMaxInput ?? officialMaxInput, contextWindow ?? officialMaxInput)
+      : undefined;
+    const officialMaxOutput = entry.modelMaxOutputTokens?.[id];
+    const maxOutputTokens = typeof officialMaxOutput === "number"
+      ? Math.min(officialMaxOutput, configured.modelMaxOutputTokens?.[id] ?? officialMaxOutput, contextWindow ?? officialMaxOutput)
       : undefined;
     return {
       provider: OPENAI_API_PROVIDER_ID,
@@ -862,6 +866,8 @@ export function augmentRoutedModelsWithRegistryOpenAiApiRows(
       owned_by: OPENAI_API_PROVIDER_ID,
       ...(contextWindow ? { contextWindow } : {}),
       ...(maxInputTokens ? { maxInputTokens } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(entry.modelDefaultReasoningEfforts?.[id] ? { defaultReasoningEffort: entry.modelDefaultReasoningEfforts[id] } : {}),
       ...(entry.modelInputModalities?.[id] ? { inputModalities: [...entry.modelInputModalities[id]!] } : {}),
       ...(entry.modelReasoningEfforts?.[id] ? { reasoningEfforts: [...entry.modelReasoningEfforts[id]!] } : {}),
     };

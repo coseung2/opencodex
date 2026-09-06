@@ -2583,10 +2583,10 @@ describe("Codex catalog routed normalization", () => {
 describe("OpenAI API trusted catalog augmentation", () => {
   const exactIds = [
     "gpt-5.5", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-    "gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro",
+    "gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro", "gpt-6-astra",
   ];
 
-  test("rebuilds the exact eight rows after partial/conflicting successful discovery", () => {
+  test("rebuilds the exact registered rows after partial/conflicting successful discovery", () => {
     const rows = augmentRoutedModelsWithRegistryOpenAiApiRows([
       { provider: "openai-apikey", id: "gpt-5.6-sol", contextWindow: 1, maxInputTokens: 1, inputModalities: ["text"], reasoningEfforts: ["low"], owned_by: "live" },
       { provider: "openai-apikey", id: "unrelated-live-model", contextWindow: 999 },

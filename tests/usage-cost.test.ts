@@ -229,11 +229,13 @@ describe("resolveMatchedPrice", () => {
     expect(resolveMatchedPrice("openrouter", "anthropic-claude-3.5-sonnet")).toBeNull();
   });
 
-  test("16. shipped overlay membership: 48 keys, including Opus 5 and compatibility prices", () => {
-    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(48);
+  test("16. shipped overlay membership: 50 keys, including Astra and compatibility prices", () => {
+    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(50);
     expect(EXPECTED_PRICE_OVERLAYS.some(row => row.status === "unverified")).toBe(false);
     const keys = new Set(EXPECTED_PRICE_OVERLAYS.map(row => `${row.provider}/${row.modelId}`));
     for (const expected of [
+      "openai/gpt-6-astra",
+      "openai-apikey/gpt-6-astra",
       "anthropic/claude-opus-5",
       "cursor/claude-opus-5",
       "kiro/claude-opus-5",
@@ -495,7 +497,8 @@ describe("priority (Fast) service tier multiplier", () => {
   });
 
   test("P9. PRIORITY_MULTIPLIERS table has expected entries", () => {
-    expect(Object.keys(PRIORITY_MULTIPLIERS)).toHaveLength(6);
+    expect(Object.keys(PRIORITY_MULTIPLIERS)).toHaveLength(7);
+    expect(PRIORITY_MULTIPLIERS["gpt-6-astra"]).toBe(2);
     expect(PRIORITY_MULTIPLIERS["gpt-5.6-sol"]).toBe(2);
     expect(PRIORITY_MULTIPLIERS["gpt-5.6-terra"]).toBe(1.6);
     expect(PRIORITY_MULTIPLIERS["gpt-5.6-luna"]).toBe(0.4);

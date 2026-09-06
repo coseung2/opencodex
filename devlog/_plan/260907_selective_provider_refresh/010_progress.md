@@ -15,7 +15,7 @@
 | Stage | Status | Notes |
 | --- | --- | --- |
 | 01 Persistence | Complete | Small snapshot-policy leaf; verified identical-write suppression, adaptive debounce and one-attempt background passes. |
-| 02 Astra | Pending | Slug/window exist; pinned Astra row is absent from `UPSTREAM_NATIVE_ENTRIES`. |
+| 02 Astra | Complete | Exact final pin, native projection/limits, routed-field isolation, API metadata and scoped API-reference pricing. |
 | 03 OpenCode Muse | Pending | Core registry/transport changes already exist; inspect remaining guards and regression coverage. |
 | 04 Kiro compatibility | Pending | Text-control and parallel-hint rejection still use the older contract. |
 | 05 Kiro lifecycle | Pending | Per-account quota exists in the fork; compare lifecycle changes rather than replacing the quota subsystem. |
@@ -34,3 +34,14 @@
 - Focused gate: `./node_modules/.bin/bun run test tests/responses-state.test.ts tests/responses-state-write-amplification.test.ts tests/active-turn-lifecycle.test.ts` -> **101 pass / 0 fail**.
 - Root typecheck and privacy scan passed. Documentation frozen install/build passed (**211 pages**); existing chunk-size and 404-entry build warnings are non-fatal.
 - Preserved fork UTF-8 accounting, snapshot format v2, replay prefix/image behavior and spill ownership.
+
+## 02 — Astra
+
+- Imported only the pure Astra data-row addition from `d617a042b`, then applied the final Fast-description correction. A read-only deep comparison confirmed that the resulting Astra row equals the row at pinned `upstream-live/main` exactly.
+- Manually carried the relevant behavior of `c5671b670`, `c2870fb55` and `980a9fbed`: explicit Astra pin admission, derived base instructions, native low default/full ladder, native-only field stripping for routed clones, and per-request/config-aware Astra context resolution. The GPT-5.6 window policy, Daybreak alias and configured subagent roster remain unchanged.
+- Public API Astra registration is distinct from Codex-login metadata. Added exact OpenAI overlays and Astra-only long-input/Fast composition; native dollars are marked API-reference derived estimates, not subscription-credit billing.
+- API pricing/effort facts rechecked at `https://developers.openai.com/api/docs/models/gpt-6-astra` on 2026-09-07. The current upstream head's API-reference display semantics were used, not an intermediate commit's credit multiplier.
+- Eight new contract tests failed on the pre-implementation code, then passed. Existing exact membership assertions were updated to include the one new API row and two price overlays, without relaxing the expected sets.
+- Focused gate across Astra/catalog/sync/visibility/identity/price/API/registry: **256 pass / 0 fail**. Follow-up Astra/price tests after source cleanup: **48 pass / 0 fail**. Root typecheck and privacy scan passed.
+- Docs frozen install/build passed: **216 pages**. Added the Astra guide and updated catalog SOT.
+- Replaced an inherited literal NUL in the cost memo key with the equivalent TypeScript `\\u0000` escape so future source diffs stay readable; runtime key bytes are unchanged.

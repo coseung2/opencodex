@@ -75,15 +75,32 @@ export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: n
   [NATIVE_GPT6_ASTRA_MODEL]: { contextWindow: 272_000, maxContextWindow: 872_000, maxInputTokens: 872_000 },
 };
 
-export function nativeOpenAiContextWindow(slug: string): number | undefined {
-  return NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.contextWindow
+export type NativeModelConfig = Partial<Pick<OcxConfig, "providers" | "providerContextCaps">>;
+
+function positiveNativeWindow(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Astra has its own opt-in ceiling; do not change the fork's existing GPT-5.6 policy. */
+export function nativeOpenAiContextWindow(slug: string, config?: NativeModelConfig): number | undefined {
+  const raw = NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.contextWindow
     ?? (typeof UPSTREAM_NATIVE_ENTRIES.get(slug)?.context_window === "number"
       ? UPSTREAM_NATIVE_ENTRIES.get(slug)!.context_window as number
       : undefined);
+  if (slug !== NATIVE_GPT6_ASTRA_MODEL || raw === undefined) return raw;
+  const provider = config?.providers?.openai;
+  const canonical = provider && isCanonicalOpenAiForwardProvider(provider) ? provider : undefined;
+  const overlay = positiveNativeWindow(canonical?.modelContextWindows?.[slug])
+    ?? positiveNativeWindow(canonical?.contextWindow);
+  const cap = positiveNativeWindow(config?.providerContextCaps?.openai);
+  return Math.min(overlay ?? cap ?? raw, 872_000, cap ?? Number.POSITIVE_INFINITY);
 }
 
-export function nativeOpenAiMaxInputTokens(slug: string): number | undefined {
-  return NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.maxInputTokens;
+export function nativeOpenAiMaxInputTokens(slug: string, config?: NativeModelConfig): number | undefined {
+  const maximum = NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.maxInputTokens;
+  return slug === NATIVE_GPT6_ASTRA_MODEL && maximum !== undefined
+    ? Math.min(maximum, nativeOpenAiContextWindow(slug, config) ?? maximum)
+    : maximum;
 }
 
 export function nativeInputModalities(slug: string): string[] {
@@ -142,10 +159,10 @@ export function desktopVisibleNativeSlugs(config: Pick<OcxConfig, "claudeCode" |
   return visibleNativeSlugs(config);
 }
 
-export function nativeModelRows(config: Pick<OcxConfig, "disabledModels">): Array<{ slug: string; disabled: boolean; contextWindow?: number }> {
+export function nativeModelRows(config: Pick<OcxConfig, "disabledModels"> & NativeModelConfig): Array<{ slug: string; disabled: boolean; contextWindow?: number }> {
   const disabled = disabledNativeSlugs(config);
   return NATIVE_OPENAI_MODELS.map(slug => {
-    const contextWindow = nativeOpenAiContextWindow(slug);
+    const contextWindow = nativeOpenAiContextWindow(slug, config);
     return { slug, disabled: disabled.has(slug), ...(contextWindow !== undefined ? { contextWindow } : {}) };
   });
 }
@@ -164,8 +181,19 @@ export const UPSTREAM_NATIVE_ENTRIES: Map<string, RawEntry> = (() => {
     ((upstreamModelsSnapshot as unknown as { models?: RawEntry[] }).models ?? [])
       .filter(m => typeof m.slug === "string"
         && SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug as string)
-        && (m.slug as string).startsWith("gpt-5.6-"))
-      .map(m => [m.slug as string, m] as const),
+        && ((m.slug as string).startsWith("gpt-5.6-") || m.slug === NATIVE_GPT6_ASTRA_MODEL))
+      .map(m => {
+        // Astra ships the instructions template without base_instructions. Derive the
+        // catalog projection without changing the pinned prompt or widening replacement
+        // authority to older native models.
+        const messages = m.model_messages;
+        const template = messages && typeof messages === "object" && !Array.isArray(messages)
+          ? (messages as Record<string, unknown>).instructions_template : undefined;
+        const hasBase = typeof m.base_instructions === "string" && m.base_instructions.length > 0;
+        const projected = m.slug === NATIVE_GPT6_ASTRA_MODEL && !hasBase
+          && typeof template === "string" && template.length > 0 ? { ...m, base_instructions: template } : m;
+        return [m.slug as string, projected] as const;
+      }),
   );
   const sol = entries.get("gpt-5.6-sol");
   if (sol) {
@@ -189,7 +217,8 @@ export function upstreamNativeEntry(slug: string): RawEntry | null {
 export function shouldUpgradeToUpstreamEntry(entry: RawEntry): boolean {
   return typeof entry.slug === "string"
     && UPSTREAM_NATIVE_ENTRIES.has(entry.slug)
-    && entry.display_name === entry.slug;
+    && (entry.display_name === entry.slug
+      || (entry.slug === NATIVE_GPT6_ASTRA_MODEL && entry.display_name === "GPT-6 Astra"));
 }
 
 export function nativeOpenAiSlugs(): string[] {

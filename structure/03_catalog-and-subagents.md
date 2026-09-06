@@ -5,7 +5,7 @@
 `src/codex/catalog.ts` builds a shared Codex-shaped catalog for CLI, TUI, App, and SDK. It:
 
 - preserves native OpenAI entries from the live catalog or static fallback, and emits
-  gpt-5.6 natives from the pinned upstream models.json snapshot
+  gpt-5.6 natives and self-described GPT-6 Astra from the pinned upstream models.json snapshot
   (`src/codex/data/upstream-models.json` — exact per-slug ladders: luna has no ultra);
 - clones a native template for routed `provider/model` entries;
 - forces strict Codex catalog fields required by the current parser;
@@ -32,6 +32,18 @@ Provider live-model lists are cached with a configured TTL (`src/codex/model-cac
 deleting, or editing a provider's shape clears that per-provider cache; a disabled-only change
 deliberately does not, because a disabled provider is already excluded from the catalog gather
 instead. Codex's own `models_cache.json` is a different cache, invalidated by catalog refresh.
+
+## Astra-specific native policy
+
+Astra uses its own pin, not the Sol alias path. The projection derives `base_instructions` from
+its instruction template, preserves the native low default and six effort levels, and excludes
+native-only delegation fields from routed clones. Its native window is 272k by default and may
+rise to 872k through an explicit canonical OpenAI model/provider window or context cap; the
+resolved input allowance never exceeds that window. Catalog build, sync and management rows
+receive the current config rather than storing this choice in module-global state. The fork's
+existing policy for the other native models is unchanged, as is the configured featured roster.
+The separate API-key entry uses the public API window/ladder. Dollar estimates are API-reference
+comparisons, not native credit billing.
 
 ## Entry shape
 
