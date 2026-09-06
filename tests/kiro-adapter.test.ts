@@ -13,6 +13,7 @@ import { normalizeKiroModelId } from "../src/providers/kiro-models";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../src/reasoning-effort";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
 import { routeModel } from "../src/router";
+import { parseRequest } from "../src/responses/parser";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
 
 const origHome = process.env.HOME;
@@ -655,6 +656,16 @@ describe("kiro adapter — buildRequest", () => {
     const withDefs = await pick({ $defs: { X: { type: "string" } }, anyOf: [{ properties: { a: { $ref: "#/$defs/X" } } }] });
     expect(withDefs.$defs).toEqual({ X: { type: "string" } });
     expect(withDefs.properties).toEqual({ a: { $ref: "#/$defs/X" } });
+
+    // Property names remain data while flattening, even when they collide with rejected keywords.
+    const keywordNames = await pick({
+      properties: { format: { type: "string", format: "uuid" } },
+      required: ["format"],
+      oneOf: [{ properties: { pattern: { type: "string", pattern: "^x" } } }],
+    });
+    expect(keywordNames.properties.format).toEqual({ type: "string" });
+    expect(keywordNames.properties.pattern).toEqual({ type: "string" });
+    expect(keywordNames.required).toEqual(["format"]);
   });
 
   test("tool descriptions use deterministic model-specific caps without prompt injection", async () => {
@@ -816,7 +827,6 @@ describe("kiro adapter — buildRequest", () => {
     for (const options of [
       { toolChoice: "required" },
       { toolChoice: { name: "bash" } },
-      { parallelToolCalls: true },
       { serviceTier: "priority" },
     ]) {
       await expect(createKiroAdapter(provider).buildRequest({
@@ -825,9 +835,126 @@ describe("kiro adapter — buildRequest", () => {
       } as OcxParsedRequest)).rejects.toThrow(/Kiro (supports only|does not support)/);
     }
 
+    await expect(createKiroAdapter(provider).buildRequest({
+      ...parsedWith([{ role: "user", content: "hi" }], [bashTool]),
+      _structuredOutput: true,
+    } as OcxParsedRequest)).rejects.toThrow("Kiro does not support Responses structured output");
+
     const none = { ...parsedWith([{ role: "user", content: "hi" }], [bashTool]), options: { toolChoice: "none" } } as OcxParsedRequest;
     const current = JSON.parse((await createKiroAdapter(provider).buildRequest(none)).body).conversationState.currentMessage.userInputMessage;
     expect(current.userInputMessageContext?.tools).toBeUndefined();
+  });
+
+  test("tolerates non-structured Responses text controls and keeps them off the Kiro wire", async () => {
+    // Regression: the guard used to reject the PRESENCE of any \`text\` member, so a verbosity
+    // hint or a plain \`format: {type:"text"}\` produced HTTP 400 while the identical turn
+    // without \`text\` succeeded. Neither is structured output, and Kiro has no wire field for
+    // either, so both belong on the tolerated side of the guard.
+    for (const text of [
+      { verbosity: "medium" },
+      { format: { type: "text" } },
+      {},
+    ]) {
+      const parsed = parseRequest({
+        model: "kiro/claude-haiku-4.5",
+        input: "test",
+        stream: true,
+        text,
+        tools: [{
+          type: "function",
+          name: "bash",
+          description: "Run a shell command",
+          parameters: { type: "object" },
+        }],
+      } as never);
+      expect(parsed._structuredOutput ?? false).toBe(false);
+      expect((parsed._rawBody as Record<string, unknown>).text).toBeDefined();
+
+      const payload = JSON.parse((await createKiroAdapter(provider).buildRequest(parsed)).body) as {
+        text?: unknown;
+        verbosity?: unknown;
+        conversationState?: {
+          text?: unknown;
+          verbosity?: unknown;
+          currentMessage: {
+            userInputMessage: {
+              userInputMessageContext?: { text?: unknown; verbosity?: unknown };
+            };
+          };
+        };
+      };
+
+      // The turn reached the wire at all — the point of the fix.
+      expect(payload.conversationState).toBeDefined();
+      // ...but the control itself is not forwarded, at any level that exists on the payload.
+      const context = payload.conversationState?.currentMessage.userInputMessage.userInputMessageContext;
+      // The fixture advertises a tool so userInputMessageContext really exists here; without
+      // one the adapter omits it and this third assertion would pass vacuously.
+      expect(context).toBeDefined();
+      for (const level of [payload, payload.conversationState, context]) {
+        expect(level?.text).toBeUndefined();
+        expect(level?.verbosity).toBeUndefined();
+      }
+    }
+  });
+
+  test("still refuses genuine structured output", async () => {
+    for (const text of [
+      { format: { type: "json_schema", name: "answer", schema: { type: "object" } } },
+      { format: { type: "json_object" } },
+    ]) {
+      const parsed = parseRequest({
+        model: "kiro/claude-haiku-4.5",
+        input: "test",
+        stream: true,
+        text,
+      } as never);
+      expect(parsed._structuredOutput).toBe(true);
+      await expect(createKiroAdapter(provider).buildRequest(parsed))
+        .rejects.toThrow("Kiro does not support Responses structured output");
+    }
+  });
+
+  test("accepts Codex's permissive parallel-tool hint while keeping the Kiro wire serialized", async () => {
+    const parsed = parseRequest({
+      model: "kiro/claude-haiku-4.5",
+      input: "test",
+      stream: true,
+      parallel_tool_calls: true,
+      tools: [{
+        type: "function",
+        name: "bash",
+        description: "Run a shell command",
+        parameters: { type: "object" },
+      }],
+    });
+    expect(parsed.options.parallelToolCalls).toBe(true);
+
+    const payload = JSON.parse((await createKiroAdapter(provider).buildRequest(parsed)).body) as {
+      parallel_tool_calls?: boolean;
+      parallelToolCalls?: boolean;
+      conversationState: {
+        parallel_tool_calls?: boolean;
+        parallelToolCalls?: boolean;
+        currentMessage: {
+          userInputMessage: {
+            userInputMessageContext?: {
+              parallel_tool_calls?: boolean;
+              parallelToolCalls?: boolean;
+              tools?: Array<{ toolSpecification?: { name?: string } }>;
+            };
+          };
+        };
+      };
+    };
+    const context = payload.conversationState.currentMessage.userInputMessage.userInputMessageContext;
+    expect(context?.tools?.some(tool => tool.toolSpecification?.name === "bash")).toBe(true);
+    expect(payload.parallel_tool_calls).toBeUndefined();
+    expect(payload.parallelToolCalls).toBeUndefined();
+    expect(payload.conversationState.parallel_tool_calls).toBeUndefined();
+    expect(payload.conversationState.parallelToolCalls).toBeUndefined();
+    expect(context?.parallel_tool_calls).toBeUndefined();
+    expect(context?.parallelToolCalls).toBeUndefined();
   });
 });
 
@@ -1061,5 +1188,23 @@ describe("kiro adapter — per-model context windows (kiro.dev/docs/models)", ()
 
   test("Auto router has no fixed window (omitted)", () => {
     expect(cw["kiro-auto"]).toBeUndefined();
+  });
+});
+
+describe("boundedInjectedInstruction surrogate safety", () => {
+  test("a budget cut never ends on a lone high surrogate", async () => {
+    const { boundedInjectedInstructionForTests } = await import("../src/adapters/kiro");
+    const { MAX_KIRO_INJECTED_INSTRUCTION_CHARS } = await import("../src/adapters/kiro-constants");
+    // Place an astral character exactly at the budget boundary.
+    const prefix = "가".repeat(MAX_KIRO_INJECTED_INSTRUCTION_CHARS - 1);
+    const text = `${prefix}🎆tail`;
+    const used = { value: 0 };
+    const result = boundedInjectedInstructionForTests(text, used);
+    expect(result).toBeDefined();
+    const last = result!.charCodeAt(result!.length - 1);
+    // The astral pair is dropped whole rather than split into a broken half.
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    expect(result!.includes("\uFFFD")).toBe(false);
+    expect(Buffer.byteLength(result!, "utf8")).toBeGreaterThan(0);
   });
 });

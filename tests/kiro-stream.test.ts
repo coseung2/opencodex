@@ -14,6 +14,7 @@ import {
 } from "../src/adapters/kiro-constants";
 import { parseKiroEvent } from "../src/adapters/kiro-events";
 import { resetKiroThrottleStateForTests } from "../src/adapters/kiro-retry";
+import { buildResponseJSON } from "../src/bridge";
 import { encodeMessage } from "../src/lib/eventstream-decoder";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
@@ -1731,9 +1732,33 @@ describe("kiro adapter — parseStream", () => {
   });
 });
 
-describe("kiro adapter — parseResponse (web-search sidecar non-streaming path)", () => {
-  test("adapter exposes parseResponse so the web_search sidecar accepts kiro", async () => {
+describe("kiro adapter — non-streaming parseResponse", () => {
+  test("adapter exposes parseResponse for non-streaming Responses requests", async () => {
     expect(typeof createKiroAdapter(provider).parseResponse).toBe("function");
+  });
+
+  test("returning the outer parser cancels its active attempt and releases retained state", async () => {
+    const budget = createTranslatorBudget();
+    let bodyCancelled = false;
+    try {
+      const response = new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(eventFrame({ content: `<thinking>${"x".repeat(30)}` }));
+        },
+        cancel() {
+          bodyCancelled = true;
+        },
+      }));
+      const events = parseKiroStream(response, budget);
+      expect((await events.next()).done).toBe(false);
+      await events.return(undefined);
+
+      expect(bodyCancelled).toBe(true);
+      expect(budget.snapshot().currentBytes).toBe(0);
+      expect(budget.snapshot().activeCalls).toBe(0);
+    } finally {
+      budget.dispose();
+    }
   });
 
   test("drains the same CW eventstream into an AdapterEvent[] (parity with parseStream)", async () => {
@@ -1750,6 +1775,53 @@ describe("kiro adapter — parseResponse (web-search sidecar non-streaming path)
     ]);
     const start = events.find(e => e.type === "tool_call_start") as { id: string; name: string };
     expect(start).toMatchObject({ id: "t1", name: "bash" });
+  });
+
+  test("bounds events while collecting a non-streaming response", async () => {
+    const budget = createTranslatorBudget({ maxTurnBytes: 500 });
+    let bodyCancelled = false;
+    try {
+      const adapter = createKiroAdapterProduction(provider);
+      const response = new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let index = 0; index < 40; index++) {
+            controller.enqueue(eventFrame({ name: "bash", toolUseId: "pending-tool" }));
+          }
+        },
+        cancel() {
+          bodyCancelled = true;
+        },
+      }));
+
+      await expect(adapter.parseResponse!(response, budget)).rejects.toMatchObject({
+        code: "translation_buffer_limit",
+      });
+      expect(bodyCancelled).toBe(true);
+      expect(budget.snapshot().currentBytes).toBe(0);
+      expect(budget.snapshot().activeCalls).toBe(0);
+    } finally {
+      budget.dispose();
+    }
+  });
+
+  test("transfers collected event ownership to the non-streaming response builder", async () => {
+    const budget = createTranslatorBudget();
+    try {
+      const adapter = createKiroAdapterProduction(provider);
+      const events = await adapter.parseResponse!(
+        new Response(streamOf(eventFrame({ content: "bounded" }))),
+        budget,
+      );
+      expect(budget.snapshot().currentBytes).toBeGreaterThan(0);
+
+      const json = buildResponseJSON(events, "kiro/test", { translatorBudget: budget });
+      expect(json.status).toBe("completed");
+      const output = json.output as Array<Record<string, unknown>>;
+      const outputBytes = output.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0);
+      expect(budget.snapshot().currentBytes).toBe(outputBytes);
+    } finally {
+      budget.dispose();
+    }
   });
 
   // The parity test above never calls buildRequest(), so the contextInputEstimate closure that
@@ -1776,5 +1848,33 @@ describe("kiro adapter — parseResponse (web-search sidecar non-streaming path)
     // The absolute checkpoint reflects the whole conversation, not just this attempt's output.
     expect(usage?.contextTotalTokens).toBeGreaterThan(usage?.outputTokens ?? 0);
     expect(usage?.contextTotalTokens).toBeGreaterThanOrEqual(builtEstimate);
+  });
+});
+
+describe("surrogate safety at kiro boundaries", () => {
+  test("the reasoning carry never emits a delta ending on a lone high surrogate", async () => {
+    const { KiroThinkingParser } = await import("../src/adapters/kiro-thinking");
+    const parser = new KiroThinkingParser();
+    // An astral char exactly at the carry/send boundary.
+    const events = parser.feed("<thinking>🎆aaaaaaaaaaa");
+    const emitted = JSON.stringify(events);
+    expect(emitted.includes("\uFFFD")).toBe(false);
+    for (const event of events) {
+      const text = (event as { text?: string }).text ?? "";
+      if (text.length === 0) continue;
+      const last = text.charCodeAt(text.length - 1);
+      expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    }
+  });
+
+  test("a truncated tool description never ends on a lone high surrogate", async () => {
+    const { truncateDescriptionForTests } = await import("../src/adapters/kiro-tools");
+    const description = "a".repeat(1022) + "🎆cd";
+    const out = truncateDescriptionForTests(description, 1024);
+    expect(out.endsWith("…")).toBe(true);
+    const kept = out.slice(0, -1);
+    const last = kept.charCodeAt(kept.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    expect(out.includes("\uFFFD")).toBe(false);
   });
 });

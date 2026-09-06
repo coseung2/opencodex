@@ -481,6 +481,15 @@ Grounded in the open-sourced official client (xai-org/grok-build); unit + eviden
   `fetchWithHeaderTimeout` takes an executor so provider fetch wrappers stay inside the
   timeout race.
 
+## Kiro permissive client hints
+
+A Responses `parallel_tool_calls: true` value permits parallelism; it does not require an
+unsupported wire control. Kiro accepts the hint without sending any parallel-control field.
+The existing Kiro preset and catalog still advertise serialized execution. Plain text output
+controls are likewise tolerated; actual schema-constrained output remains unsupported.
+The current fork's commentary/image replay retirement and private completion contract are
+independent of these input compatibility rules and must remain intact.
+
 ## Parallel tool calls (default-on for chat providers)
 
 The openai-chat adapter buffers ALL streamed `tool_calls` deltas (keyed by `index`, falling back to

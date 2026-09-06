@@ -101,6 +101,14 @@ streams the response back **untranslated**.
   history, but image bytes from completed earlier turns are omitted. Images attached to the current
   user/tool-result suffix, including its bounded completion retry, are preserved. Attach an image
   again when a later turn must inspect its pixels again.
+- Treats a client `parallel_tool_calls: true` value as permission rather than a wire requirement.
+  Kiro remains serialized: the routed catalog advertises no parallel-tool capability and the
+  adapter sends no parallel-control field upstream, but ordinary Codex tool turns are not rejected
+  solely because the client permits parallel calls.
+- Accepts ordinary `text.verbosity` preferences and `text.format: { type: "text" }` without
+  forwarding unsupported controls. Schema-constrained JSON output remains explicitly rejected.
+- Non-streaming response collection and partial thinking/tool buffers use the same bounded
+  translation budget as streamed requests, including early cancellation cleanup.
 - Decodes `application/vnd.amazon.eventstream`, reconstructs text/thinking/tool events, detects
   truncated tool JSON, and estimates usage because the upstream does not return token counts.
 - Uses the configured `baseUrl` verbatim when it is custom. A canonical

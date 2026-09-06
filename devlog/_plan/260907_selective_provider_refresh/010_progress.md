@@ -17,7 +17,7 @@
 | 01 Persistence | Complete | Small snapshot-policy leaf; verified identical-write suppression, adaptive debounce and one-attempt background passes. |
 | 02 Astra | Complete | Exact final pin, native projection/limits, routed-field isolation, API metadata and scoped API-reference pricing. |
 | 03 OpenCode Muse | Complete | Completed missing metadata, exact-destination filtering, collision-safe client alias restoration and per-model enrichment. |
-| 04 Kiro compatibility | Pending | Text-control and parallel-hint rejection still use the older contract. |
+| 04 Kiro compatibility | Complete | Unicode/budget cleanup, permissive hints and genuine structured-output guard; 290 focused tests green. See `040_kiro_compatibility.md`. |
 | 05 Kiro lifecycle | Pending | Per-account quota exists in the fork; compare lifecycle changes rather than replacing the quota subsystem. |
 | 06 Kiro calibration | Pending | Not present on baseline. |
 | 07 Grok Responses | Pending | Grok 4.6 metadata already exists; inspect final defaults, schemas, search and retry compatibility. |

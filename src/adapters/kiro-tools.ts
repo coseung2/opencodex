@@ -103,7 +103,7 @@ function ensureRootObjectType(schema: unknown): Record<string, unknown> {
   // Seed with the root's own properties/required so a schema like
   // { type:"object", properties:{path}, required:["path"], oneOf:[...] } keeps them.
   if (obj.properties && typeof obj.properties === "object") {
-    Object.assign(props, sanitizeKiroSchema(obj.properties) as Record<string, unknown>);
+    Object.assign(props, sanitizeSchemaMap(obj.properties) as Record<string, unknown>);
   }
   if (Array.isArray(obj.required)) {
     for (const r of obj.required) if (typeof r === "string") required.add(r);
@@ -118,7 +118,7 @@ function ensureRootObjectType(schema: unknown): Record<string, unknown> {
       if (!variant || typeof variant !== "object" || Array.isArray(variant)) continue;
       const v = variant as Record<string, unknown>;
       if (v.properties && typeof v.properties === "object") {
-        Object.assign(props, sanitizeKiroSchema(v.properties) as Record<string, unknown>);
+        Object.assign(props, sanitizeSchemaMap(v.properties) as Record<string, unknown>);
       }
       if (mergeRequired && Array.isArray(v.required)) {
         for (const r of v.required) if (typeof r === "string") required.add(r);
@@ -149,7 +149,16 @@ function toolDescriptionLimit(modelId: string): number {
 function truncateDescription(description: string, limit: number): string {
   if (description.length <= limit) return description;
   if (limit <= 1) return description.slice(0, limit);
-  return `${description.slice(0, limit - 1)}…`;
+  let end = limit - 1;
+  // Never end the kept text on a lone high surrogate; one step back keeps
+  // the whole pair out instead of a U+FFFD-producing half.
+  if (description.charCodeAt(end - 1) >= 0xd800 && description.charCodeAt(end - 1) <= 0xdbff) end -= 1;
+  return `${description.slice(0, end)}…`;
+}
+
+/** Test-only: exercise the surrogate-safe description truncation directly. */
+export function truncateDescriptionForTests(description: string, limit: number): string {
+  return truncateDescription(description, limit);
 }
 
 function serializedToolCatalogBytes(tools: readonly unknown[]): number {
