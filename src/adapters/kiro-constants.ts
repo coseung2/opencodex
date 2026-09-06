@@ -1,4 +1,10 @@
 export const KIRO_COMPLETION_TOOL_NAME = "codex_kiro_final_answer";
+
+/** Kiro CLI's public service profile for Builder ID requests, NOT an account identity.
+ * Request construction only: never persist it or use it to infer account/region ownership.
+ * Upstream reference: 0209234e4 + 1241021d8. */
+export const KIRO_BUILDER_ID_SERVICE_PROFILE_ARN =
+  "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
 export const KIRO_CONTINUATION_MESSAGE =
   "Continue from the prior conversation. Do not quote or mention this instruction.";
 export const KIRO_COMPLETION_RETRY_MESSAGE =

@@ -27,6 +27,7 @@ import {
   type KiroImportDiagnostic,
 } from "./kiro-credentials";
 import { homedir } from "node:os";
+import { KIRO_BUILDER_ID_SERVICE_PROFILE_ARN } from "../adapters/kiro-constants";
 import { getAccountSet, saveAccountCredential } from "./store";
 
 const DEFAULT_REGION = "us-east-1";
@@ -215,6 +216,7 @@ function metadataFromImported(imported: ImportedKiroCredential): KiroOAuthMetada
     ...(imported.apiRegion ? { apiRegion: imported.apiRegion } : {}),
     ...(imported.clientId ? { clientId: imported.clientId } : {}),
     ...(imported.clientSecret ? { clientSecret: imported.clientSecret } : {}),
+    ...(imported.authType ? { authType: imported.authType } : {}),
   };
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
@@ -471,6 +473,25 @@ export function resolveKiroProfileArn(account?: Pick<KiroOAuthMetadata, "profile
   const env = process.env.KIRO_PROFILE_ARN;
   if (env) return env;
   return readImportedKiroCredential()?.profileArn;
+}
+
+/** Request profile and envelope choice are one decision; a fallback is never account identity. */
+export function resolveKiroRequestProfile(
+  account?: Pick<KiroOAuthMetadata, "profileArn" | "authType">,
+): { profileArn: string | undefined; builderIdFallback: boolean } {
+  const own = resolveKiroProfileArn(account);
+  if (own) return { profileArn: own, builderIdFallback: false };
+  // An explicitly selected account must never borrow a different active local CLI account.
+  const authType = account === undefined ? readImportedKiroCredential()?.authType : account.authType;
+  return authType === "aws_sso_oidc"
+    ? { profileArn: KIRO_BUILDER_ID_SERVICE_PROFILE_ARN, builderIdFallback: true }
+    : { profileArn: undefined, builderIdFallback: false };
+}
+
+export function resolveKiroRequestProfileArn(
+  account?: Pick<KiroOAuthMetadata, "profileArn" | "authType">,
+): string | undefined {
+  return resolveKiroRequestProfile(account).profileArn;
 }
 
 async function kiroTokenRefreshError(response: Response): Promise<KiroTokenRefreshError> {
