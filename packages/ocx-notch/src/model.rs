@@ -564,11 +564,22 @@ pub fn merge_providers(
             // The OpenAI provider report is pool-wide capacity. The header names
             // the selected account, so its quota must come from that same account
             // snapshot or the collapsed and expanded rows visibly disagree.
-            let quota = accounts
-                .iter()
-                .find(|account| account.active)
-                .and_then(|account| account.quota.clone())
-                .or_else(|| report.map(|r| r.quota.clone()));
+            let quota = if config.name == "openai" {
+                accounts
+                    .iter()
+                    .find(|account| account.active)
+                    .and_then(|account| account.quota.clone())
+                    .or_else(|| report.map(|r| r.quota.clone()))
+            } else {
+                report
+                    .map(|r| r.quota.clone())
+                    .or_else(|| {
+                        accounts
+                            .iter()
+                            .find(|account| account.active)
+                            .and_then(|account| account.quota.clone())
+                    })
+            };
             ProviderView {
                 name: config.name.clone(),
                 label: report
@@ -1040,6 +1051,67 @@ mod tests {
 
         assert_eq!(providers[0].quota.as_ref().and_then(|quota| quota.weekly_percent), Some(18.0));
         assert_eq!(providers[0].accounts[1].quota.as_ref().and_then(|quota| quota.weekly_percent), Some(18.0));
+    }
+
+    #[test]
+    fn opencode_go_header_keeps_provider_windows_instead_of_monthly_key_rows() {
+        let configs = vec![ProviderConfig {
+            name: "opencode-go".into(),
+            ..Default::default()
+        }];
+        let reports = vec![QuotaReport {
+            provider: "opencode-go".into(),
+            quota: Quota {
+                custom_windows: vec![QuotaWindow {
+                    label: String::new(),
+                    percent: Some(0.0),
+                    reset_at: None,
+                    value_label: None,
+                    segments: vec![
+                        QuotaSegment { label: "5h".into(), percent: Some(100.0), reset_at: None },
+                        QuotaSegment { label: "Weekly".into(), percent: Some(40.0), reset_at: None },
+                        QuotaSegment { label: "Monthly".into(), percent: Some(85.0), reset_at: None },
+                    ],
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let pools = vec![AccountPool {
+            provider: "opencode-go".into(),
+            accounts: vec![AccountView {
+                id: "active-key".into(),
+                kind: "key".into(),
+                active: true,
+                quota: Some(Quota {
+                    custom_windows: vec![QuotaWindow {
+                        label: String::new(),
+                        percent: Some(0.0),
+                        reset_at: None,
+                        value_label: None,
+                        segments: vec![
+                            QuotaSegment { label: "5h".into(), percent: Some(12.0), reset_at: None },
+                            QuotaSegment { label: "Weekly".into(), percent: Some(8.0), reset_at: None },
+                            QuotaSegment { label: "Monthly".into(), percent: Some(85.0), reset_at: None },
+                        ],
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        }];
+
+        let providers = merge_providers(&configs, &reports, &[], &pools);
+        let windows = &providers[0].quota.as_ref().expect("provider quota").custom_windows;
+        assert_eq!(windows[0].segments.len(), 3);
+        assert_eq!(windows[0].segments[0].label, "5h");
+        assert_eq!(windows[0].segments[1].label, "Weekly");
+        assert_eq!(windows[0].segments[2].label, "Monthly");
+        assert_eq!(windows[0].segments[0].percent, Some(100.0));
+        assert_eq!(
+            providers[0].accounts[0].quota.as_ref().and_then(|quota| quota.custom_windows.first()?.segments.first()?.percent),
+            Some(12.0)
+        );
     }
 
     #[test]

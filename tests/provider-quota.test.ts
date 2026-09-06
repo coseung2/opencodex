@@ -477,16 +477,16 @@ describe("fetchProviderQuotaReports", () => {
     }
   });
 
-  test("opencode-go key rows show live monthly percents for every connected key", async () => {
+  test("opencode-go key rows show live 5h/weekly/monthly percents for every connected key", async () => {
     seedOpencodeGoUsage();
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? "";
-      const monthly = auth.includes("active-secret") ? 4.2 : 1.1;
+      const active = auth.includes("active-secret");
       return new Response(JSON.stringify({
         usage: {
-          rolling: { status: "ok", percent: 9 },
-          weekly: { status: "ok", percent: 7 },
-          monthly: { status: "ok", percent: monthly, resetsAt: "2026-08-21T21:26:36.051Z" },
+          rolling: { status: "ok", percent: active ? 9 : 2, resetsAt: "2026-08-13T19:35:53.051Z" },
+          weekly: { status: "ok", percent: active ? 7 : 3, resetsAt: "2026-08-17T00:00:00.051Z" },
+          monthly: { status: "ok", percent: active ? 4.2 : 1.1, resetsAt: "2026-08-21T21:26:36.051Z" },
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
@@ -494,14 +494,27 @@ describe("fetchProviderQuotaReports", () => {
     const estimates = await opencodeGoKeyQuotaEstimates(config, "opencode-go");
     expect(estimates).not.toBeNull();
     expect(Object.keys(estimates!).sort()).toEqual(["key-active", "key-standby"]);
-    expect(estimates!["key-active"]?.customWindows?.[0]).toMatchObject({
-      label: "월간 할당",
-      percent: 4.2,
-    });
-    expect(estimates!["key-standby"]?.customWindows?.[0]).toMatchObject({
-      label: "월간 할당",
-      percent: 1.1,
-    });
+    expect(estimates!["key-active"]?.customWindows?.[0]?.segments).toEqual([
+      { label: "5h", percent: 9, resetAt: Date.parse("2026-08-13T19:35:53.051Z") },
+      { label: "Weekly", percent: 7, resetAt: Date.parse("2026-08-17T00:00:00.051Z") },
+      { label: "Monthly", percent: 4.2, resetAt: Date.parse("2026-08-21T21:26:36.051Z") },
+    ]);
+    expect(estimates!["key-standby"]?.customWindows?.[0]?.segments).toEqual([
+      { label: "5h", percent: 2, resetAt: Date.parse("2026-08-13T19:35:53.051Z") },
+      { label: "Weekly", percent: 3, resetAt: Date.parse("2026-08-17T00:00:00.051Z") },
+      { label: "Monthly", percent: 1.1, resetAt: Date.parse("2026-08-21T21:26:36.051Z") },
+    ]);
+  });
+
+  test("opencode-go key rows fall back to request-limit windows when the usage API rejects", async () => {
+    seedOpencodeGoUsage();
+    globalThis.fetch = (async () => new Response("unauthorized", { status: 401 })) as typeof fetch;
+    const estimates = await opencodeGoKeyQuotaEstimates(opencodeGoOnlyConfig(), "opencode-go");
+    expect(estimates!["key-active"]?.customWindows?.[0]?.segments?.map(segment => segment.label))
+      .toEqual(["5h", "Weekly", "Monthly"]);
+    expect(estimates!["key-active"]?.customWindows?.[0]?.segments?.[0]).toMatchObject({ percent: (2 / 31_650) * 100 });
+    expect(estimates!["key-standby"]?.customWindows?.[0]?.segments?.map(segment => segment.label))
+      .toEqual(["Monthly"]);
   });
 
   test("OpenCode Free key rows do not inherit the Go allocation meter", async () => {
