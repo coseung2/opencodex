@@ -5,6 +5,7 @@ import { resolveKiroApiRegion, resolveKiroRequestProfile } from "../oauth/kiro";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
 import { parseKiroEvent } from "./kiro-events";
+import { calibrateKiroEstimate, recordKiroCalibration, rekeyKiroCalibration } from "./kiro-calibration";
 import {
   classifyKiroEventError,
   classifyKiroHttpError,
@@ -184,6 +185,11 @@ function estimateKiroTokens(text: string, modelId?: string): number {
   return estimateTokens(text, modelId ? `kiro/${modelId}` : "kiro");
 }
 
+// Per-entry JSON/role framing is invisible to the text walker but grows with conversation length.
+const KIRO_ENTRY_FRAMING_TOKENS = 12;
+// Newlines, quotes, tabs and backslashes expand when serialized onto the Kiro JSON wire.
+const KIRO_JSON_ESCAPE_EXPANSION = 1.12;
+
 function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelId: string): number {
   const conversationState = (payload as {
     conversationState?: {
@@ -214,7 +220,9 @@ function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelI
       if (assistant.toolUses?.length) parts.push(serializeForUsage(assistant.toolUses));
     }
   }
-  return estimateKiroTokens(parts.join("\n"), modelId) + imageTokens;
+  return Math.ceil(estimateKiroTokens(parts.join("\n"), modelId) * KIRO_JSON_ESCAPE_EXPANSION)
+    + imageTokens
+    + entries.length * KIRO_ENTRY_FRAMING_TOKENS;
 }
 
 function shouldCountStablePromptOverhead(parsed: OcxParsedRequest): boolean {
@@ -985,6 +993,9 @@ async function* parseKiroAttempt(
   // the attempt boundary. Anything the inner parser leaves behind is flushed before the terminal.
   const deferred: AdapterEvent[] = [];
   const retention = createKiroAttemptRetention(budget);
+  // The inner parser can observe Kiro's authoritative context checkpoint, but only this wrapper
+  // knows whether the attempt is terminal or will be followed by the bounded completion retry.
+  const attemptCalibration: { value?: { conversationId: string; estimated: number; charged: number } } = {};
   const attempt = parseKiroAttemptEvents(
     response,
     budget,
@@ -996,12 +1007,22 @@ async function* parseKiroAttempt(
     conversationId,
     deferred,
     retention,
+    attemptCalibration,
     contextInputEstimate,
     priorEmittedOutput,
   );
   let handedOff = false;
   try {
     const result = yield* attempt;
+    const stagedCalibration = attemptCalibration.value;
+    attemptCalibration.value = undefined;
+    if (stagedCalibration && !result.needsFallback) {
+      recordKiroCalibration(
+        stagedCalibration.conversationId,
+        stagedCalibration.estimated,
+        stagedCalibration.charged,
+      );
+    }
     for (const event of deferred.splice(0)) {
       try { yield event; } finally { retention.releaseEvent(event); }
     }
@@ -1023,6 +1044,7 @@ async function* parseKiroAttemptEvents(
   conversationId: string | undefined,
   deferred: AdapterEvent[],
   retention: KiroAttemptRetention,
+  attemptCalibration: { value?: { conversationId: string; estimated: number; charged: number } },
   contextInputEstimate?: number,
   priorEmittedOutput = false,
 ): AsyncGenerator<AdapterEvent, KiroAttemptParseResult> {
@@ -1335,7 +1357,10 @@ async function* parseKiroAttemptEvents(
           if (ev.stopReason !== undefined) stopReason = ev.stopReason;
           break;
         case "message_metadata":
-          if (isValidKiroConversationId(ev.conversationId)) returnedConversationId = ev.conversationId;
+          if (isValidKiroConversationId(ev.conversationId)) {
+            rekeyKiroCalibration(returnedConversationId, ev.conversationId);
+            returnedConversationId = ev.conversationId;
+          }
           break;
         case "content":
           if (ev.modelId) {
@@ -1463,6 +1488,20 @@ async function* parseKiroAttemptEvents(
         contextUsagePercentage,
         ...(contextWindowState.value ? { upstreamContextWindow: contextWindowState.value } : {}),
       });
+    }
+    // The percentage is an absolute post-response checkpoint. Remove generated output before
+    // comparing it with the request-only estimate, then stage the observation for the outer parser
+    // to commit only if this attempt is terminal (not the first half of a bounded fallback).
+    const chargedTotal = contextUsageTotalFloor();
+    if (chargedTotal !== undefined && contextInputEstimate !== undefined) {
+      const chargedInput = chargedTotal - finalUsage.outputTokens;
+      if (chargedInput > 0 && returnedConversationId) {
+        attemptCalibration.value = {
+          conversationId: returnedConversationId,
+          estimated: contextInputEstimate,
+          charged: chargedInput,
+        };
+      }
     }
     // Native stop metadata proves that this inference ended, but it does not prove that ordinary
     // text is a final answer. Kiro has emitted END_TURN for progress prose, so tool-enabled turns
@@ -1914,7 +1953,8 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     if (profileArn) headers["x-amzn-kiro-profile-arn"] = profileArn;
     const built = buildKiroPayload(parsed, profileArn, forcedCompletionMode, wireClient);
     await normalizeKiroImages(built.payload);
-    const contextInputEstimate = estimateKiroPayloadInputTokens(built.payload, parsed.modelId);
+    const rawContextInputEstimate = estimateKiroPayloadInputTokens(built.payload, parsed.modelId);
+    const contextInputEstimate = calibrateKiroEstimate(built.conversationId, rawContextInputEstimate);
     const body = JSON.stringify(built.payload);
     debugProviderDiagnostic("kiro", "request", {
       region,

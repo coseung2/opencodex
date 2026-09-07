@@ -547,7 +547,13 @@ positive value overwrites an earlier one.
 
 Spend arrives in `meteringEvent` as **credits, not tokens**. No captured response carried
 `tokenUsage` on any event, which is why Kiro usage stays estimated; `meteringEvent` is currently
-ignored because a credit is not a token count.
+ignored because a credit is not a token count. The local estimator is Kiro-scoped: Latin/code text
+uses the measured denser Kiro ratio, Hangul/Han/Kana are counted continuously at their own ratio,
+and normalized conversation-entry framing plus JSON escaping contribute to the absolute context
+estimate. A valid terminal `contextUsagePercentage` observation is converted back to input pressure
+(after subtracting output), then smoothed into a bounded per-conversation in-memory correction.
+Failed/fallback attempts do not commit an observation, returned conversation ids inherit the pending
+baseline, and the calibration is capped/evicted rather than persisted.
 
 ## Parallel tool calls (default-on for chat providers)
 

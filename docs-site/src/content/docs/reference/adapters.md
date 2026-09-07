@@ -120,7 +120,12 @@ streams the response back **untranslated**.
 - Non-streaming response collection and partial thinking/tool buffers use the same bounded
   translation budget as streamed requests, including early cancellation cleanup.
 - Decodes `application/vnd.amazon.eventstream`, reconstructs text/thinking/tool events, detects
-  truncated tool JSON, and estimates usage because the upstream does not return token counts.
+  truncated tool JSON, and estimates usage because the upstream does not reliably return token
+  counts. Kiro-routed Latin/code text uses a provider-scoped denser estimate, CJK characters are
+  counted separately instead of through a sampled threshold, and normalized wire framing/escaping
+  contributes to context pressure. When Kiro reports `contextUsagePercentage`, a bounded,
+  conversation-local in-memory calibration sharpens later estimates for that same conversation;
+  failed attempts and implausible observations do not train it.
 - Uses the configured `baseUrl` verbatim when it is custom. A canonical
   `runtime.{region}.kiro.dev` URL follows the imported credential's API region; only that canonical
   shape is eligible for one bounded fallback to `q.{region}.amazonaws.com` after an endpoint,
