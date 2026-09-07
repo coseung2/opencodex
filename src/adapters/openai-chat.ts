@@ -9,6 +9,7 @@ import { redactSecretString } from "../lib/redact";
 import { contentPartsToText } from "./image";
 import { neutralizeIdentity } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools, shouldInjectNonOpenAIToolCatalogNudge } from "./tool-catalog-nudge";
+import { isXaiSchemaTarget, normalizeXaiToolParameters } from "./xai-tool-schema";
 import { openRouterProviderPayload, resolveOpenRouterRouting } from "../providers/openrouter-routing";
 import {
   isTranslatorBudgetExceededError,
@@ -360,16 +361,6 @@ function shouldSanitizeZenToolParameters(provider: OcxProviderConfig): boolean {
     || baseUrl === "https://opencode.ai/zen/go/v1";
 }
 
-const XAI_SCHEMA_BASE_URLS = new Set(["api.x.ai", "cli-chat-proxy.grok.com"]);
-
-function isXaiSchemaTarget(provider: OcxProviderConfig): boolean {
-  try {
-    return XAI_SCHEMA_BASE_URLS.has(new URL(provider.baseUrl).hostname);
-  } catch {
-    return false;
-  }
-}
-
 function isKimiSchemaTarget(provider: OcxProviderConfig): boolean {
   try {
     return new URL(provider.baseUrl).hostname === "api.kimi.com";
@@ -427,38 +418,6 @@ function ensureKimiRootObjectType(parameters: unknown): Record<string, unknown> 
   const obj = parameters as Record<string, unknown>;
   if (obj.type === "object") return obj;
   return { ...obj, type: "object" };
-}
-
-function expandXaiRootObjectSchemas(schema: unknown): Record<string, unknown>[] | undefined {
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
-  const obj = schema as Record<string, unknown>;
-  const compositionKey = ["oneOf", "anyOf"].find(key => Array.isArray(obj[key]));
-  if (!compositionKey) {
-    if (obj.type !== undefined && obj.type !== "object") return undefined;
-    return [{ ...obj, type: "object" }];
-  }
-
-  const siblings = Object.fromEntries(Object.entries(obj).filter(([key]) => key !== compositionKey));
-  const branches = obj[compositionKey];
-  if (!Array.isArray(branches)) return undefined;
-  const expanded: Record<string, unknown>[] = [];
-  for (const branch of branches) {
-    const variants = expandXaiRootObjectSchemas(branch);
-    if (!variants) return undefined;
-    for (const variant of variants) expanded.push({ ...siblings, ...variant });
-  }
-  return expanded.length > 0 ? expanded : undefined;
-}
-
-function normalizeXaiToolParameters(parameters: unknown): Record<string, unknown> | undefined {
-  const variants = expandXaiRootObjectSchemas(parameters);
-  if (!variants) return undefined;
-  if (variants.length === 1) return variants[0];
-  const root = parameters && typeof parameters === "object" && !Array.isArray(parameters)
-    ? parameters as Record<string, unknown>
-    : {};
-  const metadata = Object.fromEntries(Object.entries(root).filter(([key]) => key !== "oneOf" && key !== "anyOf" && key !== "type"));
-  return { ...metadata, oneOf: variants };
 }
 
 function toolsToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderConfig): unknown[] | undefined {

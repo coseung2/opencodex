@@ -50,6 +50,11 @@ streams the response back **untranslated**.
 - In `forward` mode only a safe header allowlist is relayed (`FORWARD_HEADERS`): authorization,
   ChatGPT account id, and the OpenAI beta/originator/session headers. This is the ChatGPT-login path
   that also powers the [sidecars](/guides/sidecars/).
+- xAI OAuth routes Grok 4.5/4.6 Responses clients through the subscription gateway's native
+  Responses wire. The adapter removes xAI-rejected OpenAI-only controls, normalizes hosted search,
+  applies bounded/lossless root-schema flattening only on the Grok CLI proxy, and lowers client
+  custom tools such as `apply_patch` to functions upstream before restoring their Responses custom
+  call identity for the client. API-key and translated Chat/Anthropic requests keep their existing wire.
 
 ## `anthropic`
 

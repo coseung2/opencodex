@@ -97,12 +97,12 @@ never forwards caller-owned `service_tier` and strips stale OpenAI `text.verbosi
 401 performs the same singleflight refresh plus one rebuilt replay as the translated adapter path.
 
 [Decision Log]
-- 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.
-- 기존 구현 및 제약 조건: Codex emits `external_web_access`, `search_context_size`, `search_content_types`, and `user_location`; xAI documents a live-only `web_search` tool with domain filters and image flags, while Codex cached mode explicitly forbids external access.
-- 검토한 주요 대안: Strip only the first rejected field; pass every hosted-search field unchanged; disable web search for all xAI turns; normalize only the exact official xAI API destination.
-- 선택한 방식: On `https://api.x.ai` Responses traffic, lower live search to xAI's public shape, map image content requests to `enable_image_search`, remove unsupported OpenAI-private fields, and omit cached/index-only search plus stale selectors because xAI has no non-live equivalent.
-- 다른 대안 대신 이 방식을 선택한 이유: One-field stripping exposes the next schema mismatch and turning `external_web_access:false` into xAI live search widens the caller's network policy; destination scoping leaves custom gateways and canonical OpenAI byte-shape native.
-- 장점, 단점 및 영향: Grok 4.5/4.6 no longer fail every default Codex turn with an unsupported-argument 400; live search remains available when explicitly enabled, while cached search degrades to no hosted search on xAI rather than silently going live.
+- 목적과 의도: Keep Codex hosted search, function schemas, and client-executed custom tools usable on xAI Responses without forwarding OpenAI-private shapes xAI rejects.
+- 기존 구현 및 제약 조건: Codex emits `web_search_preview`, private search controls, root union schemas, and `custom_tool_call` items such as `apply_patch`; the public API and Grok CLI proxy share the search dialect, while only the CLI proxy requires root-union flattening and both xAI Responses destinations reject the native custom-tool replay shape.
+- 검토한 주요 대안: Strip fields globally; flatten every xAI schema; disable search/custom tools; rewrite response events without tracking item ownership; scope each normalization to the destination capability that requires it.
+- 선택한 방식: Normalize hosted search on both official xAI Responses hosts, flatten only losslessly representable CLI-proxy root unions under depth/node/variant budgets, lower bare custom tools to functions on the upstream wire, and restore only calls whose item ids were recorded as converted custom tools.
+- 다른 대안 대신 이 방식을 선택한 이유: Global flattening changes valid public-API schemas, cached search cannot be widened to live access, and name-only response rewriting can corrupt unrelated function calls in a mixed-tool response.
+- 장점, 단점 및 영향: Grok 4.5/4.6 accept normal Codex tool traffic while public API schemas remain native; an unrepresentable CLI schema is omitted or rejected locally when selected, and cached/index-only search degrades to no hosted search rather than silently going live.
 
 OpenCode Go documents `gpt-5.6-luna` on `/zen/go/v1/responses` while sibling models use its Chat or
 Anthropic endpoints. The built-in preset therefore selects `openai-responses` only for Luna and

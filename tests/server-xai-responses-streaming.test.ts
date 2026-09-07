@@ -185,4 +185,36 @@ describe("xAI OAuth native Responses streaming", () => {
       await server.stop(true);
     }
   }, 10_000);
+
+  test("a selected Grok tool whose schema cannot be represented fails locally as a 400", async () => {
+    let upstreamCalls = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === RESPONSES_ENDPOINT) upstreamCalls += 1;
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const response = await originalFetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "xai/grok-4.6",
+          input: "use unsafe",
+          stream: true,
+          tools: [{ type: "function", name: "unsafe", description: "cannot lower", parameters: { oneOf: [{ type: "string" }] } }],
+          tool_choice: { type: "function", name: "unsafe" },
+        }),
+      });
+      const json = await response.json() as { error?: { type?: string; message?: string } };
+      expect(response.status).toBe(400);
+      expect(json.error?.type).toBe("invalid_request_error");
+      expect(json.error?.message).toContain("cannot be represented");
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      await server.stop(true);
+    }
+  });
 });

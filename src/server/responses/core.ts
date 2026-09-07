@@ -9,6 +9,7 @@ import {
 import { parseRequest } from "../../responses/parser";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
+import { XaiToolSchemaCompatibilityError } from "../../adapters/xai-tool-schema";
 import {
   expandPreviousResponseInput,
   previousResponseProviderState,
@@ -100,7 +101,7 @@ import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve"
 import type { InboundWire } from "../../providers/registry";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
-import { resolveProviderTransport } from "../../providers/xai-transport";
+import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
 import { isOpenCodeMuseResponses, resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
 import { declaredNamespaceAliases } from "../../responses/namespace-aliases";
 import type { WsData } from "../ws-bridge";
@@ -165,6 +166,11 @@ import {
   restoreImageGenCallsInJson,
 } from "../responses-image-gen-repair";
 import { composeSsePayloadRewrites, relaySseWithPayloadRewrite } from "../sse-payload-rewrite";
+import {
+  createXaiCustomToolPayloadRewrite,
+  restoreXaiCustomCallsInJson,
+  xaiResponsesCustomToolNames,
+} from "../../responses/xai-custom-tool-compat";
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
@@ -1661,7 +1667,19 @@ async function handleResponsesInner(
         + `(model ${parsed.modelId}); forwarding without it — earlier turns may be missing from this request`,
       );
     }
-    let request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    let request: Awaited<ReturnType<typeof adapter.buildRequest>>;
+    try {
+      request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    } catch (error) {
+      releaseCodexAuthContextProbeLease(authCtx);
+      if (error instanceof XaiToolSchemaCompatibilityError) {
+        return formatErrorResponse(400, "invalid_request_error", redactSecretString(error.message));
+      }
+      throw error;
+    }
+    const xaiCustomToolNames = isXaiResponsesDestination(route.provider)
+      ? xaiResponsesCustomToolNames(parsed._rawBody)
+      : new Set<string>();
     // Reuse the existing client-only namespace rewrite and its bounded SSE relay. The
     // inspection/cache branch retains raw names for continuation replay. Resolve all
     // declaration ownership before admitting a Muse dotted alias.
@@ -1934,10 +1952,15 @@ async function handleResponsesInner(
     // The bundled known-bad runtime remains on tee by default on both platforms.
     if (isEventStream && upstreamResponse.body) {
       const repairConfig = route.provider.responsesItemIdRepair;
-      const needsClientRewrite = imageGenCallAliases.size > 0 || hasResponsesItemIdRepair(repairConfig);
-      // Compose opt-in payload rewrites into one parse/stringify pass (image-gen restore first).
+      const xaiCustomToolRewrite = createXaiCustomToolPayloadRewrite(xaiCustomToolNames);
+      const needsClientRewrite = imageGenCallAliases.size > 0
+        || hasResponsesItemIdRepair(repairConfig)
+        || xaiCustomToolRewrite !== undefined;
+      // Compose opt-in payload rewrites into one parse/stringify pass. Provider-shape restoration
+      // runs before generic item-id repair so the client sees the correct custom-tool identity.
       const payloadRewrites = [
         createImageGenCallRestoreRewrite(imageGenCallAliases),
+        xaiCustomToolRewrite,
         hasResponsesItemIdRepair(repairConfig)
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
           : undefined,
@@ -2100,7 +2123,8 @@ async function handleResponsesInner(
           rememberPassthroughResponse(JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown });
         } catch { /* non-JSON despite content-type; recording is best-effort */ }
       }
-      return new Response(restoreImageGenCallsInJson(text, imageGenCallAliases), {
+      const restoredCustomTools = restoreXaiCustomCallsInJson(text, xaiCustomToolNames);
+      return new Response(restoreImageGenCallsInJson(restoredCustomTools, imageGenCallAliases), {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers,
