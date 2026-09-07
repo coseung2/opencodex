@@ -501,6 +501,29 @@ describe("kiro adapter — buildRequest", () => {
     expect(JSON.stringify(disabled)).not.toContain("codex_kiro_final_answer");
   });
 
+  test("the private completion tool is explicitly terminal on both injected surfaces", async () => {
+    const state = JSON.parse((await createKiroAdapter(provider).buildRequest(
+      parsedWith([{ role: "user", content: "hi" }], [bashTool]),
+    )).body).conversationState;
+    const current = state.currentMessage.userInputMessage;
+    const firstUser = state.history?.find((entry: { userInputMessage?: unknown }) => entry.userInputMessage)?.userInputMessage
+      ?? current;
+    const completion = current.userInputMessageContext.tools.find(
+      (tool: { toolSpecification: { name: string } }) => tool.toolSpecification.name === KIRO_COMPLETION_TOOL_NAME,
+    );
+    const description: string = completion.toolSpecification.description;
+
+    expect(description).toContain("not an ordinary work tool");
+    expect(description).toContain("ends the turn");
+    expect(description).toContain("returns no tool result");
+    expect(description).toContain("no text or tool call may follow it");
+    expect(firstUser.content).toContain("This completion tool is not an ordinary work tool.");
+    expect(firstUser.content).toContain("exception to generic tool-result counting");
+    expect(firstUser.content).toContain("ends the turn, returns no tool result, and no text or tool call may follow it");
+    // Mid-task behavior remains unchanged; only the terminal boundary is specialized.
+    expect(firstUser.content).toContain("ordinary assistant text is mid-task commentary");
+  });
+
   test("namespaced (MCP) tools advertise + replay the full wire name", async () => {
     const adapter = createKiroAdapter(provider);
     // Tool spec advertised to Kiro must carry the full namespaced name so the bridge's toolNsMap

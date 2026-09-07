@@ -502,7 +502,10 @@ of final answers it actually delivered per normalized conversation id, so client
 that trailing-terminal condition and reaches Kiro normally. Within one inference, a valid private
 completion answer also supersedes any staged assistant prose from that same inference, preventing
 Codex from rendering an answer-shaped commentary message followed by a near-duplicate final answer;
-non-text events and commentary from failed/earlier attempts remain intact.
+non-text events and commentary from failed/earlier attempts remain intact. The private completion
+schema and injected prose both state that its call is terminal, returns no tool result, and admits no
+following text/tool call; this prevents the generic catalog rule about waiting for tool results from
+turning a finished answer back into an open work loop.
 
 ## Kiro reasoning round-trip (`redactedContent`)
 
