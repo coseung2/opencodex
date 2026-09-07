@@ -283,6 +283,7 @@ export function relaySseEagerBounded(
       if (!cancelled) {
         try { controllerRef?.close(); } catch { /* already closed/errored */ }
       }
+      try { rewrite?.dispose?.(); } catch { /* rewrite teardown must not block lifecycle cleanup */ }
       try { hooks.disposeInspection?.(); } catch { /* inspection teardown must not block lifecycle cleanup */ }
       fireDone();
     }

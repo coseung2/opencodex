@@ -29,7 +29,12 @@ export type InboundWire = "responses" | "chat" | "anthropic";
  * A per-model wire default: a bare string applies to every inbound, while the object
  * form applies only to the listed inbound protocols.
  */
-export type ModelWireDefault = string | { wire: string; inbound: readonly InboundWire[] };
+export type ModelWireDefault = string | {
+  wire: string;
+  inbound: readonly InboundWire[];
+  /** Optional auth-mode gate for providers whose subscription and API-key products use different wires. */
+  authModes?: readonly ProviderAuthKind[];
+};
 
 export type ProviderModelDiscoveryScalar = string | number | boolean;
 
@@ -700,6 +705,13 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // transport returns 400 ("Multi Agent requests are not allowed on chat completions").
     models: ["grok-4.6", "grok-4.5", "grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning", "grok-build-0.1", "grok-composer-2.5-fast"],
     defaultModel: "grok-4.5",
+    // Grok's subscription gateway exposes 4.6/4.5 natively on Responses. Scope the default to
+    // OAuth Codex traffic: API-key and Chat/Anthropic callers keep their existing wire, while an
+    // explicit modelAdapters override still wins over this registry-only default.
+    modelWireDefaults: {
+      "grok-4.6": { wire: "openai-responses", inbound: ["responses"], authModes: ["oauth"] },
+      "grok-4.5": { wire: "openai-responses", inbound: ["responses"], authModes: ["oauth"] },
+    },
     // Vision lineup per docs.x.ai model-capabilities/images/understanding: the grok-4.x chat
     // models accept image input (JPEG/PNG, URL or base64). Without this the catalog leaves
     // inputModalities undefined, and deriveComboCatalogModel defaults an undefined member to
@@ -824,16 +836,20 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     featured: true,
     dashboardUrl: "https://platform.openai.com/api-keys",
     defaultModel: "gpt-5.5",
-    models: ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS],
+    models: ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS, "gpt-6-astra"],
     liveModels: true,
-    modelContextWindows: OPENAI_API_GPT56_CONTEXT_WINDOWS,
-    modelMaxInputTokens: OPENAI_API_GPT56_MAX_INPUT_TOKENS,
+    // API limits differ from the Codex-login Astra pin. Keep the public API ladder
+    // separate: low..max is documented, while the native catalog also carries ultra.
+    modelContextWindows: { ...OPENAI_API_GPT56_CONTEXT_WINDOWS, "gpt-6-astra": 1_050_000 },
+    modelMaxInputTokens: { ...OPENAI_API_GPT56_MAX_INPUT_TOKENS, "gpt-6-astra": 922_000 },
+    modelMaxOutputTokens: { "gpt-6-astra": 128_000 },
     modelInputModalities: Object.fromEntries(
-      ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS].map(id => [id, ["text", "image"]]),
+      ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS, "gpt-6-astra"].map(id => [id, ["text", "image"]]),
     ),
-    modelReasoningEfforts: Object.fromEntries(
-      [...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS].map(id => [id, OPENAI_API_GPT56_REASONING_EFFORTS]),
-    ),
+    modelReasoningEfforts: {
+      ...Object.fromEntries([...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS].map(id => [id, OPENAI_API_GPT56_REASONING_EFFORTS])),
+      "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
+    },
     virtualModels: OPENAI_API_GPT56_VIRTUAL_MODELS,
   },
   {
@@ -871,11 +887,15 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     },
     modelContextWindows: {
       "kimi-k3": KIMI_K3_STANDARD_CONTEXT_WINDOW,
+      "muse-spark-1.3-contributor": 1_048_576,
+      "muse-spark-1.2-contributor": 1_048_576,
       [OPENCODE_OX_ALPHA_FREE_MODEL]: OX_ALPHA_CONTEXT_WINDOW,
       [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576,
     },
     modelInputModalities: {
       "kimi-k3": ["text", "image"],
+      "muse-spark-1.3-contributor": ["text", "image"],
+      "muse-spark-1.2-contributor": ["text", "image"],
       [OPENCODE_OX_ALPHA_FREE_MODEL]: ["text", "image"],
       [DEEPSEEK_VISION_PREVIEW_MODEL]: ["text", "image"],
     },
@@ -1799,8 +1819,12 @@ export function providerModelWireDefault(
   if (!entry?.modelWireDefaults || !providerMatchesRegistryTransport(id, provider)) return undefined;
   const declared = entry.modelWireDefaults[modelId.trim().toLowerCase()];
   if (declared === undefined) return undefined;
-  // A bare string applies to every inbound; the object form only to the listed ones.
-  if (typeof declared !== "string" && !declared.inbound.includes(inbound)) return undefined;
+  // A bare string applies to every inbound/auth mode; the object form may narrow either.
+  if (typeof declared !== "string") {
+    if (!declared.inbound.includes(inbound)) return undefined;
+    const authMode = provider.authMode ?? entry.authKind;
+    if (declared.authModes && !declared.authModes.includes(authMode)) return undefined;
+  }
   const wire = typeof declared === "string" ? declared : declared.wire;
   return wire !== undefined && allowedWires.has(wire) ? wire : undefined;
 }

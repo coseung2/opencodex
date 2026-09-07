@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { atomicWriteFileAsync, getConfigDir } from "../config";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import type { OcxProviderContinuationState } from "../types";
+import { ResponseSnapshotWriter } from "./snapshot-policy";
 import {
   deleteResponseSpill,
   noteStubSwapForTest,
@@ -17,7 +18,6 @@ import {
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
-const SNAPSHOT_DEBOUNCE_MS = 2_000;
 /** In-memory high-water byte cap across all entries. Forced store:false retention (kiro/cursor
  * continuation chains) stores the full expanded input each turn — ~quadratic bytes per chain —
  * so a count cap alone cannot bound memory. Oldest-first eviction applies past this mark. */
@@ -69,6 +69,17 @@ let oldestResidentId: string | undefined;
 let oldestResidentAt: number | null = null;
 let byteCapOverride: number | null = null;
 let stateRevision = 0;
+const snapshotWriter = new ResponseSnapshotWriter(async (path, payload) => {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  try { chmodSync(dirname(path), 0o700); } catch { /* best-effort (e.g. Windows) */ }
+  await atomicWriteFileAsync(path, payload);
+});
+
+/** Scalar-only observation; does not load, prune or retain snapshot contents. */
+export function responseSnapshotMetricsForTests() {
+  return snapshotWriter.metrics();
+}
+
 const spillCounters = { writes: 0, writeFailures: 0, readFailures: 0 };
 const admissionCounters = { directSpills: 0, oversizedDrops: 0, snapshotOversizedRefusals: 0 };
 
@@ -573,14 +584,14 @@ function ensureLoaded(): void {
 
 type SnapshotWriteOutcome = "stable" | "unstable" | "failed";
 
-async function writeBoundedSnapshot(path: string): Promise<SnapshotWriteOutcome> {
+async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise<SnapshotWriteOutcome> {
   // Serialize writers so concurrent flush + debounce cannot race on temps / ACL (#612).
   const previous = persistGate;
   let release!: () => void;
   persistGate = new Promise<void>(resolve => { release = resolve; });
   await previous;
   try {
-    for (let attempt = 0; attempt < MAX_SNAPSHOT_REWRITE_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
       const revision = stateRevision;
       const entries: Array<[string, unknown]> = [];
       let total = 0;
@@ -602,9 +613,7 @@ async function writeBoundedSnapshot(path: string): Promise<SnapshotWriteOutcome>
         entries.push(persistEntry);
       }
       entries.reverse();
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      try { chmodSync(dirname(path), 0o700); } catch { /* best-effort (e.g. Windows) */ }
-      await atomicWriteFileAsync(path, JSON.stringify({ version: 2, states: entries }));
+      await snapshotWriter.persist(path, JSON.stringify({ version: 2, states: entries }));
       persistAttemptHookForTests?.();
       if (revision === stateRevision) return "stable";
     }
@@ -627,7 +636,7 @@ function schedulePersistAt(path: string, replace = false): void {
   if (persistTimer && !replace) return;
   if (persistTimer) clearTimeout(persistTimer);
   pendingPersistPath = path;
-  persistTimer = setTimeout(() => { void persistNow(path); }, SNAPSHOT_DEBOUNCE_MS);
+  persistTimer = setTimeout(() => { void persistNow(path); }, snapshotWriter.metrics().debounceMs);
   (persistTimer as { unref?: () => void }).unref?.();
 }
 
@@ -637,12 +646,15 @@ async function persistNow(path: string, awaitFollowUp = false): Promise<void> {
     persistTimer = null;
   }
   pendingPersistPath = null;
-  let outcome = await writeBoundedSnapshot(path);
+  // Background traffic gets one write per debounce, not four immediate full-file rewrites.
+  // Explicit shutdown flushes retain the existing bounded stabilization contract.
+  const attemptLimit = awaitFollowUp ? MAX_SNAPSHOT_REWRITE_ATTEMPTS : 1;
+  let outcome = await writeBoundedSnapshot(path, attemptLimit);
   if (outcome === "unstable" && awaitFollowUp) {
     if (persistTimer) clearTimeout(persistTimer);
     persistTimer = null;
     pendingPersistPath = null;
-    outcome = await writeBoundedSnapshot(path);
+    outcome = await writeBoundedSnapshot(path, attemptLimit);
   }
   if (outcome === "stable") drainPendingSpillUnlinks();
   else if (outcome === "unstable" && !awaitFollowUp) schedulePersistAt(path, true);
@@ -957,7 +969,7 @@ export function rememberResponseState(
   schedulePersist();
 }
 
-/** Test-only persistence churn hook; invoked after each atomic snapshot rewrite. */
+/** Test-only persistence churn hook; invoked after each write/unchanged-validation attempt. */
 export function setResponseStatePersistAttemptHookForTests(hook: (() => void) | null): void {
   persistAttemptHookForTests = hook;
 }
@@ -986,6 +998,7 @@ export function clearResponseStateMemoryForTests(): void {
   oldestResidentId = undefined;
   oldestResidentAt = null;
   stateRevision = 0;
+  snapshotWriter.reset();
   pendingSpillUnlinks.length = 0;
   spillCounters.writes = 0;
   spillCounters.writeFailures = 0;

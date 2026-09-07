@@ -50,6 +50,11 @@ streams the response back **untranslated**.
 - In `forward` mode only a safe header allowlist is relayed (`FORWARD_HEADERS`): authorization,
   ChatGPT account id, and the OpenAI beta/originator/session headers. This is the ChatGPT-login path
   that also powers the [sidecars](/guides/sidecars/).
+- xAI OAuth routes Grok 4.5/4.6 Responses clients through the subscription gateway's native
+  Responses wire. The adapter removes xAI-rejected OpenAI-only controls, normalizes hosted search,
+  applies bounded/lossless root-schema flattening only on the Grok CLI proxy, and lowers client
+  custom tools such as `apply_patch` to functions upstream before restoring their Responses custom
+  call identity for the client. API-key and translated Chat/Anthropic requests keep their existing wire.
 
 ## `anthropic`
 
@@ -96,13 +101,31 @@ streams the response back **untranslated**.
 **Auth:** Kiro OAuth access token as Bearer, with region/profile metadata from the Kiro credential.
 
 - Builds Kiro `conversationState`, maps Codex tools and tool results, and sends image blocks supported
-  by the Kiro wire.
+  by the Kiro wire. Multiple immediately adjacent outputs from one custom-tool invocation are
+  coalesced into one Kiro result in source order; the match uses the original call id, so lossy
+  wire-id normalization cannot authorize a different result.
+- AWS Builder ID requests use Kiro's fixed service profile only at request construction time while
+  retaining the CLI wire envelope. The fallback is never persisted as account identity or used for
+  region selection; enterprise accounts keep their own profile ARN.
 - On locally expanded `previous_response_id` turns, replayed text and tool structure remain in
   history, but image bytes from completed earlier turns are omitted. Images attached to the current
   user/tool-result suffix, including its bounded completion retry, are preserved. Attach an image
   again when a later turn must inspect its pixels again.
+- Treats a client `parallel_tool_calls: true` value as permission rather than a wire requirement.
+  Kiro remains serialized: the routed catalog advertises no parallel-tool capability and the
+  adapter sends no parallel-control field upstream, but ordinary Codex tool turns are not rejected
+  solely because the client permits parallel calls.
+- Accepts ordinary `text.verbosity` preferences and `text.format: { type: "text" }` without
+  forwarding unsupported controls. Schema-constrained JSON output remains explicitly rejected.
+- Non-streaming response collection and partial thinking/tool buffers use the same bounded
+  translation budget as streamed requests, including early cancellation cleanup.
 - Decodes `application/vnd.amazon.eventstream`, reconstructs text/thinking/tool events, detects
-  truncated tool JSON, and estimates usage because the upstream does not return token counts.
+  truncated tool JSON, and estimates usage because the upstream does not reliably return token
+  counts. Kiro-routed Latin/code text uses a provider-scoped denser estimate, CJK characters are
+  counted separately instead of through a sampled threshold, and normalized wire framing/escaping
+  contributes to context pressure. When Kiro reports `contextUsagePercentage`, a bounded,
+  conversation-local in-memory calibration sharpens later estimates for that same conversation;
+  failed attempts and implausible observations do not train it.
 - Uses the configured `baseUrl` verbatim when it is custom. A canonical
   `runtime.{region}.kiro.dev` URL follows the imported credential's API region; only that canonical
   shape is eligible for one bounded fallback to `q.{region}.amazonaws.com` after an endpoint,
@@ -131,7 +154,12 @@ progress.
 When an ordinary client tool exists, opencodex adds a private
 `codex_kiro_final_answer` tool to the upstream request; progress text streams as commentary and
 cannot terminate the turn. The adapter consumes the private call, emits its answer as final text,
-and never exposes the private tool to Codex or Claude Code. Because the stop reason only arrives at
+and never exposes the private tool to Codex or Claude Code. The private tool is explicitly described
+to Kiro as a terminal channel rather than an ordinary work tool: the call is complete when issued,
+returns no tool result, and no later text or tool call belongs to that inference. If progress is
+blocked on a decision, information, or clarification only the user can supply, the blocking question
+uses that same terminal channel instead of being emitted as commentary and then answered by the
+model itself. Because the stop reason only arrives at
 the end of the stream, assistant text in a tool-enabled turn is held until either a real tool call
 starts or the stream ends, then releases it as commentary unless the private tool supplied the final
 answer. When the web-search sidecar is active, released
@@ -145,8 +173,14 @@ transport, the generated conversation is checked for alternating roles, non-empt
 and matched tool-use/result ids. Empty tool output receives a neutral non-empty placeholder. The
 retry cannot recurse: an empty or reasoning-only retry is returned as retryable incomplete, while a
 real client tool call keeps the turn open. A completion-tool answer is always emitted as
-`final_answer`, even when it exactly repeats prior commentary, because phase correctness is more
-important than cosmetic de-duplication. Tool-free requests retain normal text completion behavior.
+`final_answer`. If Kiro emitted answer-shaped prose earlier in the same inference and then uses the
+private completion tool, that staged prose is discarded and only the explicit terminal answer is
+shown; progress from earlier inferences or from a failed turn is not suppressed. A replay whose
+trailing assistant message is a final answer
+that opencodex already delivered is terminated locally without another Kiro inference; this also
+works when the client drops the `phase` field, using a conversation-scoped fingerprint of the final
+answer opencodex emitted. A later user or tool-result message is new work and disables that local
+terminal. Tool-free requests retain normal text completion behavior.
 
 ### Reasoning effort
 

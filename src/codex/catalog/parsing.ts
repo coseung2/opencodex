@@ -31,7 +31,7 @@ import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 
-import { NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES } from "./metadata";
+import { NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeModelConfig } from "./metadata";
 
 export function legacyCatalogBackupPath(): string {
   return join(getConfigDir(), "catalog-backup.json");
@@ -206,6 +206,11 @@ const NO_FAST_TIER_NATIVE_SLUGS = new Set([
 ]);
 
 export function normalizeServiceTiers(entry: RawEntry): RawEntry {
+  if (entry.slug === NATIVE_GPT6_ASTRA_MODEL && Array.isArray(entry.service_tiers)) {
+    entry.service_tiers = entry.service_tiers.map(tier =>
+      tier?.id === "priority" && tier.description === "1.5x speed, increased usage"
+        ? { ...tier, description: "2x speed, increased usage" } : tier);
+  }
   // Strip service tiers for models that do not actually support the Fast tier.
   if (typeof entry.slug === "string" && NO_FAST_TIER_NATIVE_SLUGS.has(entry.slug)) {
     delete entry.service_tier;
@@ -250,10 +255,19 @@ function nativeAutoCompactLimit(contextWindow: number, maxInputTokens?: number):
     : ninetyPercent;
 }
 
-export function applyNativeOpenAiContextOverride(entry: RawEntry): void {
+export function applyNativeOpenAiContextOverride(entry: RawEntry, config?: NativeModelConfig): void {
   if (!isNativeOpenAiEntry(entry)) return;
   const override = NATIVE_OPENAI_CONTEXT_OVERRIDES[entry.slug as string];
   if (!override) return;
+  if (entry.slug === NATIVE_GPT6_ASTRA_MODEL) {
+    const window = nativeOpenAiContextWindow(entry.slug, config)!;
+    entry.context_window = window;
+    const cap = config?.providerContextCaps?.openai;
+    const ceiling = typeof cap === "number" && Number.isSafeInteger(cap) && cap > 0 ? Math.min(872_000, cap) : 872_000;
+    entry.max_context_window = Math.max(window, ceiling);
+    entry.auto_compact_token_limit = nativeAutoCompactLimit(window, nativeOpenAiMaxInputTokens(entry.slug, config));
+    return;
+  }
   if (typeof override.contextWindow === "number") {
     entry.context_window = override.contextWindow;
     entry.auto_compact_token_limit = nativeAutoCompactLimit(override.contextWindow, override.maxInputTokens);
@@ -346,6 +360,7 @@ export function normalizeRoutedCatalogEntry(entry: RawEntry, parallelToolCalls =
   delete entry.model_messages;
   delete entry.tool_mode;
   delete entry.multi_agent_version;
+  delete entry.multi_agent_reasoning_effort;
   delete entry.use_responses_lite;
   delete entry.supports_websockets;
   delete entry.additional_speed_tiers;

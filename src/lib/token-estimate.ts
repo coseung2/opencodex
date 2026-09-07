@@ -1,69 +1,73 @@
 /**
  * Heuristic token-estimation sidecar.
  *
- * Some providers (notably kiro / CodeWhisperer) return no token usage in their stream, so Codex's
- * usage display and auto-compact (which read response.completed.usage) never engage. This module
- * provides a cheap, dependency-free char-based estimate to fill that gap.
- *
- * Grounding (web): 1 token ~= 4 chars for English prose; empirical model ratios are ~Claude 3.5,
- * ~GPT 3.6, ~Gemini 3.8 chars/token (within ~10%). Code / JSON / tool-args (the dominant Codex
- * traffic) pack MORE tokens per char, so a lower chars-per-token ratio is used for those models.
- * Over-counting fails safe (auto-compact fires earlier); under-counting risks context overflow.
+ * Some providers (notably Kiro / CodeWhisperer) do not reliably return token usage for every
+ * stream, so usage display and context-pressure handling need a cheap local estimate. The generic
+ * ratios remain conservative and provider-neutral; Kiro-specific measurements are applied only to
+ * `kiro` / `kiro/...` ids so the same Claude/DeepSeek/Qwen families on other providers are not
+ * silently retuned.
  */
 
 /** Generic English-prose fallback ratio (chars per token). */
 const DEFAULT_CHARS_PER_TOKEN = 4;
 
 /**
- * Kiro routes code/JSON-heavy agent traffic whose true ratio is ~3.0-3.3 chars/token. 3.5 keeps a
- * small safety margin (slight over-count) without wildly inflating; tune toward 3.3 if overflow is
- * ever observed. All kiro models are text LLMs, so a single ratio applies to the whole family.
+ * Kiro routes code/JSON-heavy agent traffic. Recorded Kiro conversations put pure-Latin content at
+ * about 2.8 chars/token, materially denser than ordinary English prose. Keep this Kiro-scoped: the
+ * same model family on Anthropic, Cursor, or another gateway has a different wire/framing cost.
  */
-const KIRO_CHARS_PER_TOKEN = 3.5;
+const KIRO_CHARS_PER_TOKEN = 2.8;
 
-const KIRO_MODEL_PREFIXES = ["kiro", "claude", "deepseek", "minimax", "glm", "qwen"];
+/** Existing non-Kiro agent-family heuristic retained for backwards compatibility. */
+const AGENT_MODEL_CHARS_PER_TOKEN = 3.5;
+const AGENT_MODEL_PREFIXES = ["kiro", "claude", "deepseek", "minimax", "glm", "qwen"];
 
-/** Model-aware chars-per-token ratio. Unknown models fall back to the generic English ratio. */
+/** Model-aware LATIN chars-per-token ratio. */
 export function charsPerToken(modelId?: string): number {
   if (!modelId) return DEFAULT_CHARS_PER_TOKEN;
   const id = modelId.toLowerCase();
-  if (KIRO_MODEL_PREFIXES.some(p => id.startsWith(p))) return KIRO_CHARS_PER_TOKEN;
+  // `estimateKiroTokens` deliberately prefixes the routed id with `kiro/`.
+  if (id.startsWith("kiro")) return KIRO_CHARS_PER_TOKEN;
+  if (AGENT_MODEL_PREFIXES.some(prefix => id.startsWith(prefix))) return AGENT_MODEL_CHARS_PER_TOKEN;
   return DEFAULT_CHARS_PER_TOKEN;
 }
 
 /**
- * CJK-aware ratio (devlog 260712 B3, audit R2#7): Korean/Chinese/Japanese text packs
- * roughly one token per 1.5-3 chars, so a CJK-heavy blob estimated at English ratios
- * badly undercounts. When >30% of chars are CJK, clamp DOWN to 2.5 chars/token —
- * `min(model ratio, 2.5)` so per-model ratios (Claude 3.5, Kiro family) never rise.
+ * Hangul/Han/Kana tokenizes markedly denser than Latin text. Apply the dense ratio only to the
+ * characters that need it instead of switching the whole payload at an arbitrary CJK-share
+ * threshold. This removes both the old 30% cliff and the stride-sampling alias on long payloads.
  */
-const CJK_CHARS_PER_TOKEN = 2.5;
-const CJK_RATIO_THRESHOLD = 0.3;
-// Hangul syllables/jamo, CJK unified ideographs (+ext A), hiragana/katakana.
-const CJK_RE = /[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF]/;
+const CJK_CHARS_PER_TOKEN = 1.5;
 
-function cjkRatio(text: string): number {
-  if (text.length === 0) return 0;
-  // Sample long blobs for O(1) cost: every char up to 2k, then a stride.
-  const stride = text.length > 2048 ? Math.ceil(text.length / 2048) : 1;
+/** Exact, allocation-free BMP CJK count. Rare supplementary-plane characters are safely overcounted. */
+function countCjk(text: string): number {
   let cjk = 0;
-  let sampled = 0;
-  for (let i = 0; i < text.length; i += stride) {
-    sampled++;
-    if (CJK_RE.test(text[i]!)) cjk++;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (
+      (code >= 0xac00 && code <= 0xd7a3)
+      || (code >= 0x1100 && code <= 0x11ff)
+      || (code >= 0x3130 && code <= 0x318f)
+      || (code >= 0x4e00 && code <= 0x9fff)
+      || (code >= 0x3400 && code <= 0x4dbf)
+      || (code >= 0x3040 && code <= 0x30ff)
+    ) cjk += 1;
   }
-  return sampled === 0 ? 0 : cjk / sampled;
+  return cjk;
 }
 
 /**
  * Estimate the token count of a text blob. Pure and deterministic.
- * Returns 0 for empty/whitespace-free-empty input; otherwise ceil(length / ratio), min 1.
+ * Returns 0 for empty input; otherwise at least 1.
  */
 export function estimateTokens(text: string, modelId?: string): number {
   if (!text) return 0;
-  const len = text.length;
-  if (len === 0) return 0;
-  let ratio = charsPerToken(modelId);
-  if (cjkRatio(text) > CJK_RATIO_THRESHOLD) ratio = Math.min(ratio, CJK_CHARS_PER_TOKEN);
-  return Math.max(1, Math.ceil(len / ratio));
+  const length = text.length;
+  if (length === 0) return 0;
+  const latinRatio = charsPerToken(modelId);
+  const cjk = countCjk(text);
+  const estimate = cjk === 0
+    ? Math.ceil(length / latinRatio)
+    : Math.ceil((length - cjk) / latinRatio + cjk / CJK_CHARS_PER_TOKEN);
+  return Math.max(1, estimate);
 }

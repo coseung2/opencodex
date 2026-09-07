@@ -1,6 +1,8 @@
 /** Minimal OAuth types, ported from jawcode packages/ai/src/utils/oauth/types.ts. */
 export type OAuthCredentialSource = "oauth" | "local-cli" | "credential-file" | "environment" | "manual";
 
+export type KiroCredentialAuthType = "kiro_desktop" | "aws_sso_oidc";
+
 /** Account-scoped Kiro data required for refresh and request routing. */
 export interface KiroOAuthMetadata {
   profileArn?: string;
@@ -8,6 +10,8 @@ export interface KiroOAuthMetadata {
   apiRegion?: string;
   clientId?: string;
   clientSecret?: string;
+  /** Non-secret request-routing signal; never substitute for an account profile. */
+  authType?: KiroCredentialAuthType;
 }
 
 export type OAuthCredentials = {

@@ -88,27 +88,21 @@ different custom destination does not inherit its upstream assumptions. Object-f
 also narrow the decision by inbound protocol and authentication mode; an auth-scoped default must
 not leak from a subscription transport into an API-key or forwarded-credential route.
 
-xAI keeps `openai-chat` as both its provider-wide compatibility wire and the default for Grok 4.5
-and 4.6 subscription traffic. The official Grok CLI catalog declares those models as Responses
-backends, but the current gateway rejects opaque reasoning continuation and compaction state on
-later turns. Operators may still select `openai-responses` with an explicit model adapter override
-while that compatibility work continues. The OAuth route drops caller-owned `service_tier` even
-when an override selects Responses, and native Responses OAuth 401 replay remains available to
-explicit opt-ins. API-key requests, translated Chat/Anthropic callers, and other Grok models retain
-their existing wire and tier policy.
-
-The dashboard's xAI Responses opt-in switch is the GUI surface of this same `modelAdapters` lane,
-not a separate tier policy. One write sets or clears the Grok 4.5 and 4.6 entries together while
-preserving unrelated overrides; a pre-existing one-entry state is reported as mixed until the next
-switch write normalizes both.
+xAI keeps `openai-chat` as its provider-wide compatibility wire, but Grok 4.5 and 4.6 OAuth
+Responses clients use the native `openai-responses` wire declared by the Grok subscription
+catalog. The registry default is scoped by both inbound protocol and auth mode: API-key requests,
+translated Chat/Anthropic callers, and other Grok models retain their existing wire. An explicit
+`modelAdapters` entry still wins and can opt either model back into Chat. The OAuth Responses route
+never forwards caller-owned `service_tier` and strips stale OpenAI `text.verbosity`; one pre-stream
+401 performs the same singleflight refresh plus one rebuilt replay as the translated adapter path.
 
 [Decision Log]
-- 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.
-- 기존 구현 및 제약 조건: Codex emits `external_web_access`, `search_context_size`, `search_content_types`, and `user_location`; xAI documents a live-only `web_search` tool with domain filters and image flags, while Codex cached mode explicitly forbids external access.
-- 검토한 주요 대안: Strip only the first rejected field; pass every hosted-search field unchanged; disable web search for all xAI turns; normalize only the exact official xAI API destination.
-- 선택한 방식: On `https://api.x.ai` Responses traffic, lower live search to xAI's public shape, map image content requests to `enable_image_search`, remove unsupported OpenAI-private fields, and omit cached/index-only search plus stale selectors because xAI has no non-live equivalent.
-- 다른 대안 대신 이 방식을 선택한 이유: One-field stripping exposes the next schema mismatch and turning `external_web_access:false` into xAI live search widens the caller's network policy; destination scoping leaves custom gateways and canonical OpenAI byte-shape native.
-- 장점, 단점 및 영향: Grok 4.5/4.6 no longer fail every default Codex turn with an unsupported-argument 400; live search remains available when explicitly enabled, while cached search degrades to no hosted search on xAI rather than silently going live.
+- 목적과 의도: Keep Codex hosted search, function schemas, and client-executed custom tools usable on xAI Responses without forwarding OpenAI-private shapes xAI rejects.
+- 기존 구현 및 제약 조건: Codex emits `web_search_preview`, private search controls, root union schemas, and `custom_tool_call` items such as `apply_patch`; the public API and Grok CLI proxy share the search dialect, while only the CLI proxy requires root-union flattening and both xAI Responses destinations reject the native custom-tool replay shape.
+- 검토한 주요 대안: Strip fields globally; flatten every xAI schema; disable search/custom tools; rewrite response events without tracking item ownership; scope each normalization to the destination capability that requires it.
+- 선택한 방식: Normalize hosted search on both official xAI Responses hosts, flatten only losslessly representable CLI-proxy root unions under depth/node/variant budgets, lower bare custom tools to functions on the upstream wire, and restore only calls whose item ids were recorded as converted custom tools.
+- 다른 대안 대신 이 방식을 선택한 이유: Global flattening changes valid public-API schemas, cached search cannot be widened to live access, and name-only response rewriting can corrupt unrelated function calls in a mixed-tool response.
+- 장점, 단점 및 영향: Grok 4.5/4.6 accept normal Codex tool traffic while public API schemas remain native; an unrepresentable CLI schema is omitted or rejected locally when selected, and cached/index-only search degrades to no hosted search rather than silently going live.
 
 OpenCode Go documents `gpt-5.6-luna` on `/zen/go/v1/responses` while sibling models use its Chat or
 Anthropic endpoints. The built-in preset therefore selects `openai-responses` only for Luna and
@@ -480,6 +474,86 @@ Grounded in the open-sourced official client (xai-org/grok-build); unit + eviden
   compatibility profile const for the Grok client version (`src/providers/xai-transport.ts`);
   `fetchWithHeaderTimeout` takes an executor so provider fetch wrappers stay inside the
   timeout race.
+- **Grok Build Responses surface:** managed Grok models use `api_backend="responses"` directly.
+  Bridge keepalives are SSE comments, never invented Responses event variants. Requests carrying
+  the managed `x-opencodex-grok: 1` marker get only the strict-client repairs Grok needs:
+  missing `output_text.annotations` becomes `[]`, and a sparse completed snapshot may be rebuilt
+  from validated, contiguous, bounded `output_item.done` items. Duplicate/gapped/mismatched or
+  reasoning-only evidence fails closed. Stateful rewrite buffers participate in the translator
+  budget and are disposed on EOF, error, eager-relay teardown, and client cancellation.
+
+## Kiro permissive client hints
+
+A Responses `parallel_tool_calls: true` value permits parallelism; it does not require an
+unsupported wire control. Kiro accepts the hint without sending any parallel-control field.
+The existing Kiro preset and catalog still advertise serialized execution. Plain text output
+controls are likewise tolerated; actual schema-constrained output remains unsupported.
+The current fork's commentary/image replay retirement and private completion contract are
+independent of these input compatibility rules and must remain intact. Adjacent outputs from one
+custom-tool invocation are collapsed into a single Kiro result only when their original caller ids
+match exactly; normalized wire ids are never used as the ownership proof. Any non-result message is
+a grouping barrier. Builder ID uses Kiro's public service profile only as request-scoped transport
+metadata and remains on the CLI envelope; the fallback never becomes stored account identity or a
+region source. A replay whose trailing content-bearing assistant message is an already delivered
+`final_answer` is a local terminal: Kiro receives no request, the completion tool is not advertised,
+and an outputless completed response closes the duplicate turn. The proxy also remembers the hash
+of final answers it actually delivered per normalized conversation id, so clients that omit the
+`phase` field cannot reopen the same finished task; any later user/tool-result message invalidates
+that trailing-terminal condition and reaches Kiro normally. Within one inference, a valid private
+completion answer also supersedes any staged assistant prose from that same inference, preventing
+Codex from rendering an answer-shaped commentary message followed by a near-duplicate final answer;
+non-text events and commentary from failed/earlier attempts remain intact. The private completion
+schema and injected prose both state that its call is terminal, returns no tool result, and admits no
+following text/tool call; this prevents the generic catalog rule about waiting for tool results from
+turning a finished answer back into an open work loop. The same terminal channel is explicitly
+allowed for a blocking question when only the user can supply the missing decision, information, or
+clarification, so Kiro does not write the question as commentary and then invent its own answer to
+keep the work loop moving.
+
+## Kiro reasoning round-trip (`redactedContent`)
+
+Kiro never returns plaintext reasoning for its **GPT-5.6 family** (`gpt-5.6-sol`, `-terra`,
+`-luna`): `reasoningContentEvent` carries a KMS-encrypted `redactedContent` blob, never `text`.
+Their `additionalModelRequestFieldsSchema` (`ListAvailableModels`) accepts only `reasoning.effort`
+with `additionalProperties: false` — there is no display/summary opt-in, so this is the only
+reasoning these models can return. Kiro's own CLI replays the blob on the matching
+`assistantResponseMessage.reasoningContent` to preserve model reasoning across turns; dropping it
+makes every turn restart without the previous turn's reasoning. Verified on kiro-cli 2.14.1 and
+2.16.0, all three models.
+
+The Claude 4.6+/5 entries advertise a different, richer contract (`thinking.type` adaptive/disabled,
+`thinking.display` summarized/omitted, `output_config.effort`, `max_tokens`) and are not covered by
+that measurement; older Claude, deepseek, minimax, glm, and qwen entries advertise no additional
+fields at all. The handling below keys off the wire field, not the model id, so any model that
+sends `redactedContent` round-trips.
+
+- The blob rides the existing `ocxr1:` envelope as `krc` (`src/responses/reasoning-envelope.ts`) on
+  an envelope-only reasoning item — `summary: []`, no text deltas — so it stays invisible in the
+  Codex app while round-tripping, exactly like the hidden-thinking path.
+- **Pairing is backwards.** Kiro emits `reasoningContentEvent` at the END of an assistant turn,
+  after content AND tool calls. A `krc`-only item therefore belongs to the turn that already
+  closed, so the parser attaches it to the PRECEDING assistant message rather than folding it into
+  the following turn like ordinary reasoning (`src/responses/parser.ts`). With no assistant turn to
+  own it, the blob is dropped rather than mis-paired.
+- The blob lives on `OcxAssistantMessage.kiroRedactedReasoning`, not on a thinking content part, so
+  no other adapter replays provider-private state if the conversation switches providers.
+
+Kiro reports context pressure in its own `contextUsageEvent`, which is the authoritative source. On
+every capture taken (2.14.1 and 2.16.0) `metadataEvent` carried only `stopReason` — which is why
+reading the percentage from `metadataEvent` alone never saw a value — but the parser still accepts a
+finite `contextUsagePercentage` (and a `tokenUsage` block) there as a fallback, so a value parsed
+from `metadataEvent` is legitimate rather than impossible. Both feed the same field, and any
+positive value overwrites an earlier one.
+
+Spend arrives in `meteringEvent` as **credits, not tokens**. No captured response carried
+`tokenUsage` on any event, which is why Kiro usage stays estimated; `meteringEvent` is currently
+ignored because a credit is not a token count. The local estimator is Kiro-scoped: Latin/code text
+uses the measured denser Kiro ratio, Hangul/Han/Kana are counted continuously at their own ratio,
+and normalized conversation-entry framing plus JSON escaping contribute to the absolute context
+estimate. A valid terminal `contextUsagePercentage` observation is converted back to input pressure
+(after subtracting output), then smoothed into a bounded per-conversation in-memory correction.
+Failed/fallback attempts do not commit an observation, returned conversation ids inherit the pending
+baseline, and the calibration is capped/evicted rather than persisted.
 
 ## Parallel tool calls (default-on for chat providers)
 

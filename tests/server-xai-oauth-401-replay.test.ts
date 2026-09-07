@@ -12,6 +12,7 @@ import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isol
 
 const TOKEN_ENDPOINT = "https://auth.x.ai/oauth/token";
 const CHAT_ENDPOINT = `${XAI_GROK_CLI_BASE_URL}/chat/completions`;
+const RESPONSES_ENDPOINT = `${XAI_GROK_CLI_BASE_URL}/responses`;
 
 let testDir = "";
 let previousHome: string | undefined;
@@ -64,10 +65,18 @@ function xaiConfig(authMode: "oauth" | "key" = "oauth"): OcxConfig {
 
 function successBody(text: string): string {
   return JSON.stringify({
-    id: "chatcmpl-xai-401",
-    object: "chat.completion",
-    choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    id: "resp-xai-401",
+    object: "response",
+    status: "completed",
+    model: "grok-4.5",
+    output: [{
+      id: "msg-xai-401",
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text, annotations: [] }],
+    }],
+    usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
   });
 }
 
@@ -79,8 +88,8 @@ async function post(server: ReturnType<typeof startServer>): Promise<Response> {
   });
 }
 
-function installOAuthFetch(chatStatuses: number[]): { chatAuth: string[]; counts: { refresh: number } } {
-  const chatAuth: string[] = [];
+function installOAuthFetch(responseStatuses: number[]): { responseAuth: string[]; counts: { refresh: number } } {
+  const responseAuth: string[] = [];
   const counts = { refresh: 0 };
   globalThis.fetch = (async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -98,9 +107,9 @@ function installOAuthFetch(chatStatuses: number[]): { chatAuth: string[]; counts
         expires_in: 3600,
       }), { headers: { "content-type": "application/json" } });
     }
-    if (url === CHAT_ENDPOINT) {
-      chatAuth.push(new Headers(init?.headers).get("authorization") ?? "");
-      const status = chatStatuses.shift() ?? 200;
+    if (url === RESPONSES_ENDPOINT) {
+      responseAuth.push(new Headers(init?.headers).get("authorization") ?? "");
+      const status = responseStatuses.shift() ?? 200;
       if (status === 401) {
         return new Response(JSON.stringify({ error: { message: "rejected" } }), {
           status: 401,
@@ -111,7 +120,7 @@ function installOAuthFetch(chatStatuses: number[]): { chatAuth: string[]; counts
     }
     return originalFetch(input, init);
   }) as typeof fetch;
-  return { chatAuth, counts };
+  return { responseAuth, counts };
 }
 
 describe("xAI OAuth upstream 401 replay", () => {
@@ -126,7 +135,7 @@ describe("xAI OAuth upstream 401 replay", () => {
       const json = await response.json() as { output?: { type: string; content?: { text?: string }[] }[] };
       expect(json.output?.find(item => item.type === "message")?.content?.[0]?.text).toBe("ok after refresh");
       expect(observed.counts.refresh).toBe(1);
-      expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
+      expect(observed.responseAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
     } finally {
       server.stop(true);
     }
@@ -141,9 +150,9 @@ describe("xAI OAuth upstream 401 replay", () => {
       const response = await post(server);
       const json = await response.json() as { error?: { message?: string } };
       expect(response.status).toBe(401);
-      expect(json.error?.message).toContain("Provider error 401");
+      expect(json.error?.message).toContain("rejected");
       expect(observed.counts.refresh).toBe(1);
-      expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
+      expect(observed.responseAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
     } finally {
       server.stop(true);
     }
@@ -209,7 +218,7 @@ describe("xAI OAuth upstream 401 replay", () => {
           expires_in: 3600,
         }), { headers: { "content-type": "application/json" } });
       }
-      if (url === CHAT_ENDPOINT) {
+      if (url === RESPONSES_ENDPOINT) {
         const bearer = new Headers(init?.headers).get("authorization") ?? "";
         attemptsByBearer.set(bearer, (attemptsByBearer.get(bearer) ?? 0) + 1);
         if (bearer === "Bearer rejected-access") {

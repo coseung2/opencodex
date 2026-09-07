@@ -60,7 +60,7 @@ export function imageGenToolCallAliases(
   return aliases;
 }
 
-/** Recursively restore only exact image-gen function-call aliases in a parsed Responses payload. */
+/** Restore exact client tool identities. Callers own destination-scoped alias admission. */
 function restoreImageGenCalls(
   value: unknown,
   aliases: ReadonlyMap<string, NamespacedTool>,
@@ -86,7 +86,7 @@ function restoreImageGenCalls(
 
   const name = typeof value.name === "string" ? value.name : undefined;
   const target = value.type === "function_call" && name ? aliases.get(name) : undefined;
-  if (target) {
+  if (target && (value.namespace === undefined || value.namespace === target.namespace)) {
     restored.name = target.name;
     restored.namespace = target.namespace;
     changed = true;

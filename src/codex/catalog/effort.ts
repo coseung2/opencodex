@@ -33,7 +33,7 @@ import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 import { readCatalog, readCodexCatalogPath } from "./parsing";
 import type { CatalogModel, RawEntry } from "./parsing";
-import { UPSTREAM_NATIVE_ENTRIES } from "./metadata";
+import { NATIVE_GPT6_ASTRA_MODEL, UPSTREAM_NATIVE_ENTRIES } from "./metadata";
 import { loadBundledCodexCatalog } from "./bundled";
 import type { BundledCatalogDeps } from "./bundled";
 import { deriveEntry } from "./sync";
@@ -181,7 +181,9 @@ export function applyReasoningLevels(
 }
 
 export function isGpt56NativeSlug(slug: string): boolean {
-  return !slug.includes("/") && slug.startsWith("gpt-5.6-");
+  // Historical name: this predicate protects the full native ladder/Responses Lite,
+  // not the context-window family. Astra uses its own pinned metadata and ceiling.
+  return !slug.includes("/") && (slug.startsWith("gpt-5.6-") || slug === NATIVE_GPT6_ASTRA_MODEL);
 }
 
 export function ensureGpt56ReasoningLevels(entry: RawEntry): void {

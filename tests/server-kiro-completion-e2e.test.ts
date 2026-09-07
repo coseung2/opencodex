@@ -6,6 +6,7 @@ import { KIRO_COMPLETION_TOOL_NAME } from "../src/adapters/kiro-constants";
 import { saveConfig } from "../src/config";
 import { encodeMessage } from "../src/lib/eventstream-decoder";
 import { startServer } from "../src/server";
+import { clearDeliveredFinalAnswersForTests } from "../src/responses/turn-termination";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 
@@ -24,6 +25,7 @@ beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), "ocx-kiro-completion-"));
   process.env.OPENCODEX_HOME = testDir;
   process.env.KIRO_REGION = "us-east-1";
+  clearDeliveredFinalAnswersForTests();
   globalThis.fetch = originalFetch;
 });
 
@@ -211,6 +213,101 @@ describe("Kiro completion through public server endpoints", () => {
       expect(upstream.requests).toHaveLength(2);
       expect(kiroToolNames(upstream.requests[0])).toEqual(["bash", KIRO_COMPLETION_TOOL_NAME]);
       expect(kiroToolNames(upstream.requests[1])).toEqual(["bash", KIRO_COMPLETION_TOOL_NAME]);
+    } finally {
+      proxy.stop(true);
+      upstream.server.stop(true);
+    }
+  });
+
+  for (const stream of [false, true]) {
+    test(`history ending in a delivered final answer sends nothing upstream (stream=${stream})`, async () => {
+      const upstream = scriptedKiroUpstream([]);
+      saveConfig(kiroConfig(upstream.server.url.toString()));
+      const proxy = startServer(0);
+      try {
+        const response = await originalFetch(new URL("/v1/responses", proxy.url), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "kiro-test/gpt-5.6-sol",
+            stream,
+            input: [
+              { type: "message", role: "user", content: [{ type: "input_text", text: "do the task" }] },
+              {
+                type: "message",
+                role: "assistant",
+                phase: "final_answer",
+                content: [{ type: "output_text", text: "The task is done." }],
+              },
+            ],
+            tools: [{ type: "function", name: "bash", description: "Run a command", parameters: { type: "object" } }],
+          }),
+        });
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(upstream.requests).toHaveLength(0);
+        if (stream) {
+          const events = responseEvents(body);
+          expect(events.filter(event => event.name === "response.completed")).toHaveLength(1);
+          expect(events.some(event => event.name === "response.output_text.delta")).toBe(false);
+        } else {
+          const json = JSON.parse(body) as { status?: string; output?: unknown[] };
+          expect(json.status).toBe("completed");
+          expect(json.output ?? []).toHaveLength(0);
+        }
+      } finally {
+        proxy.stop(true);
+        upstream.server.stop(true);
+      }
+    });
+  }
+
+  test("a proxy-recorded final answer remains closed when the client drops phase, but a real follow-up runs", async () => {
+    const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
+    const upstream = scriptedKiroUpstream([
+      completionFrames(deliveredAnswer),
+      completionFrames("Yes. The follow-up is new work."),
+    ]);
+    saveConfig(kiroConfig(upstream.server.url.toString()));
+    const proxy = startServer(0);
+    try {
+      const headers = { "content-type": "application/json", session_id: "kiro-repeat-regression" };
+      const tools = [{ type: "function", name: "bash", description: "Run a command", parameters: { type: "object" } }];
+      const first = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model: "kiro-test/gpt-5.6-sol", stream: false, input: "what is code mode", tools }),
+      });
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(upstream.requests).toHaveLength(1);
+
+      const replayInput = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "what is code mode" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: deliveredAnswer }] },
+      ];
+      const replay = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model: "kiro-test/gpt-5.6-sol", stream: false, input: replayInput, tools }),
+      });
+      expect(replay.status).toBe(200);
+      expect((await replay.json() as { output?: unknown[] }).output ?? []).toHaveLength(0);
+      expect(upstream.requests).toHaveLength(1);
+
+      const followUp = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "kiro-test/gpt-5.6-sol",
+          stream: false,
+          input: [...replayInput, { type: "message", role: "user", content: [{ type: "input_text", text: "so it batches calls?" }] }],
+          tools,
+        }),
+      });
+      expect(followUp.status).toBe(200);
+      await followUp.text();
+      expect(upstream.requests).toHaveLength(2);
     } finally {
       proxy.stop(true);
       upstream.server.stop(true);

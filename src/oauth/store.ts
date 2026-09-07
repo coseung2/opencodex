@@ -247,13 +247,15 @@ function normalizeCredential(cred: unknown): OAuthCredentials | null {
     const apiRegion = clean(kiro.apiRegion, 64);
     const clientId = clean(kiro.clientId, 4096);
     const clientSecret = clean(kiro.clientSecret, 4096);
-    if (profileArn || ssoRegion || apiRegion || clientId || clientSecret) {
+    const authType = kiro.authType === "aws_sso_oidc" || kiro.authType === "kiro_desktop" ? kiro.authType : undefined;
+    if (profileArn || ssoRegion || apiRegion || clientId || clientSecret || authType) {
       normalized.kiro = {
         ...(profileArn ? { profileArn } : {}),
         ...(ssoRegion ? { ssoRegion } : {}),
         ...(apiRegion ? { apiRegion } : {}),
         ...(clientId ? { clientId } : {}),
         ...(clientSecret ? { clientSecret } : {}),
+        ...(authType ? { authType } : {}),
       };
     }
   }

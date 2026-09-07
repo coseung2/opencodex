@@ -14,7 +14,7 @@ import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../..
 import { getProviderRegistryEntry } from "../../providers/registry";
 import { applyProviderContextCap, providerContextCap } from "../../providers/context-cap";
 import { routedSlug, slugEquals, slugsEquivalent } from "../../providers/slug-codec";
-import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
+import { CODEX_GPT5_IDENTITY_LINE, neutralizeIdentity } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
@@ -194,10 +194,10 @@ export function deriveEntry(
       if (typeof e.base_instructions === "string") {
         // Proxy-neutral: keep the GPT-5/OpenAI disclaimer but never advertise the opencodex proxy
         // (leaking that into base_instructions is a non-first-party signature → ToS risk).
-        e.base_instructions = e.base_instructions.replace(
+        e.base_instructions = neutralizeIdentity(e.base_instructions.replace(
           CODEX_GPT5_IDENTITY_LINE,
           `You are a coding agent powered by the ${modelName} model. Do not claim to be GPT-5 or made by OpenAI.`,
-        );
+        ));
       }
       applyReasoningLevels(e, model?.reasoningEfforts, model?.defaultReasoningEffort, preserveExact);
       normalizeRoutedCatalogEntry(e, model?.parallelToolCalls === true);
@@ -258,6 +258,7 @@ export function buildCatalogEntries(
   wsEnabled = false,
   multiAgentMode: MultiAgentMode = "default",
   exactComboSlugs: ReadonlySet<string> = new Set(),
+  config?: OcxConfig,
 ): RawEntry[] {
   // Codex's models-manager sorts by `priority` ASC and advertises the first 5 picker-visible
   // models to spawn_agent (sort_by_key(priority) + MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT=5). Catalog
@@ -271,6 +272,7 @@ export function buildCatalogEntries(
     .map(catalogModelSlug));
   for (const slug of gptSlugs) {
     const e = deriveEntry(template, slug, "OpenAI native model (Codex OAuth passthrough).", 9);
+    applyNativeOpenAiContextOverride(e, config);
     if (rank.has(slug)) e.priority = rank.get(slug)!;
     out.push(e);
   }
@@ -370,6 +372,7 @@ export function mergeCatalogEntriesForSync(
   exactComboSlugs: ReadonlySet<string> = new Set(),
   hasPhysicalComboProvider = false,
   includeNativeOpenAi = true,
+  config?: OcxConfig,
 ): RawEntry[] {
   const rank = new Map(featured.map((slug, i) => [slug, i] as const));
   const native = includeNativeOpenAi
@@ -478,7 +481,7 @@ export function mergeCatalogEntriesForSync(
 
   const mergedEntries = [...native, ...finalRoutedEntries].map(m => {
     const normalized = normalizeServiceTiers(m);
-    applyNativeOpenAiContextOverride(normalized);
+    applyNativeOpenAiContextOverride(normalized, config);
     const exactCombo = typeof m.slug === "string" && exactComboSlugs.has(m.slug);
     const e = ensureStrictCatalogFields(normalized, {
       preserveExactInputModalities: exactCombo,
@@ -568,7 +571,7 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{
   // bare gpt-* rows that hard-404 via NoEnabledOpenAiProviderError. Keep natives when no
   // providers are configured yet (fresh install / catalog bootstrap tests).
   const includeNativeOpenAi = enabledProviders.length === 0 || hasCanonicalOpenai;
-  catalog.models = mergeCatalogEntriesForSync(catalogModelsForMerge, goEntries, baseline, featured, wsEnabled, goIds, template, disabledNativeSlugs(config), gatheredProviderNames, multiAgentMode, exactComboSlugs, hasPhysicalComboProvider, includeNativeOpenAi);
+  catalog.models = mergeCatalogEntriesForSync(catalogModelsForMerge, goEntries, baseline, featured, wsEnabled, goIds, template, disabledNativeSlugs(config), gatheredProviderNames, multiAgentMode, exactComboSlugs, hasPhysicalComboProvider, includeNativeOpenAi, config);
   clampCatalogModelsToCodexSupport(catalog.models);
 
   atomicWriteFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n");

@@ -239,15 +239,17 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
   if (!prov.models && seed.models) prov.models = [...seed.models];
   if (prov.liveModels === undefined && seed.liveModels !== undefined) prov.liveModels = seed.liveModels;
   if (prov.contextWindow === undefined && seed.contextWindow !== undefined) prov.contextWindow = seed.contextWindow;
-  if (!prov.modelContextWindows && seed.modelContextWindows) prov.modelContextWindows = { ...seed.modelContextWindows };
+  if (seed.modelContextWindows) prov.modelContextWindows = { ...seed.modelContextWindows, ...prov.modelContextWindows };
   if (seed.modelInputModalities) prov.modelInputModalities = fillRecordOfArrays(seed.modelInputModalities, prov.modelInputModalities);
   if (prov.defaultMaxOutputTokens === undefined && seed.defaultMaxOutputTokens !== undefined) prov.defaultMaxOutputTokens = seed.defaultMaxOutputTokens;
-  if (!prov.modelMaxOutputTokens && seed.modelMaxOutputTokens) prov.modelMaxOutputTokens = { ...seed.modelMaxOutputTokens };
+  if (seed.modelMaxOutputTokens) prov.modelMaxOutputTokens = { ...seed.modelMaxOutputTokens, ...prov.modelMaxOutputTokens };
   if (!prov.reasoningEfforts && seed.reasoningEfforts) prov.reasoningEfforts = [...seed.reasoningEfforts];
-  if (!prov.modelReasoningEfforts && seed.modelReasoningEfforts) prov.modelReasoningEfforts = cloneRecordOfArrays(seed.modelReasoningEfforts);
-  if (!prov.modelDefaultReasoningEfforts && seed.modelDefaultReasoningEfforts) prov.modelDefaultReasoningEfforts = { ...seed.modelDefaultReasoningEfforts };
+  // One customized model must not hide the registry's knowledge of every other
+  // model. Fill per key on new maps; explicit empty ladders remain authoritative.
+  if (seed.modelReasoningEfforts) prov.modelReasoningEfforts = fillRecordOfArrays(seed.modelReasoningEfforts, prov.modelReasoningEfforts);
+  if (seed.modelDefaultReasoningEfforts) prov.modelDefaultReasoningEfforts = { ...seed.modelDefaultReasoningEfforts, ...prov.modelDefaultReasoningEfforts };
   if (!prov.reasoningEffortMap && seed.reasoningEffortMap) prov.reasoningEffortMap = { ...seed.reasoningEffortMap };
-  if (!prov.modelReasoningEffortMap && seed.modelReasoningEffortMap) prov.modelReasoningEffortMap = cloneNestedRecord(seed.modelReasoningEffortMap);
+  if (seed.modelReasoningEffortMap) prov.modelReasoningEffortMap = { ...cloneNestedRecord(seed.modelReasoningEffortMap), ...cloneNestedRecord(prov.modelReasoningEffortMap ?? {}) };
   if (!prov.noVisionModels && seed.noVisionModels) prov.noVisionModels = [...seed.noVisionModels];
   if (!prov.noReasoningModels && seed.noReasoningModels) prov.noReasoningModels = [...seed.noReasoningModels];
   if (!prov.noTemperatureModels && seed.noTemperatureModels) prov.noTemperatureModels = [...seed.noTemperatureModels];

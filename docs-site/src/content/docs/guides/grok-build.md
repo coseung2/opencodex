@@ -3,10 +3,10 @@ title: Grok Build
 description: Use any opencodex-routed model from xAI's Grok Build CLI — models are auto-registered into ~/.grok/config.toml while the proxy runs.
 ---
 
-opencodex serves an OpenAI-compatible `POST /v1/chat/completions` (and `/v1/responses`) on its
-local port, and Grok Build supports custom models against OpenAI-compatible servers. Starting
-with this integration, opencodex registers its whole visible catalog into Grok Build
-automatically — no manual config editing required.
+opencodex serves an OpenAI-compatible `POST /v1/responses` (and `/v1/chat/completions`) on its
+local port, and Grok Build supports custom models against OpenAI-compatible servers. The managed
+integration uses Responses directly so tool calls and terminal snapshots keep their native shape,
+and registers the visible catalog automatically — no manual config editing required.
 
 ## Auto-registration
 
@@ -18,7 +18,7 @@ into `~/.grok/config.toml`:
 [model.ocx-gpt-5-6-sol]
 model = "gpt-5.6-sol"
 base_url = "http://127.0.0.1:10100/v1"
-api_backend = "chat_completions"
+api_backend = "responses"
 api_key = "opencodex-loopback"
 name = "OCX gpt-5.6-sol"
 # ... one [model.ocx-*] table per visible model ...
@@ -97,7 +97,7 @@ per-model tables with **direct fields**, outside the `# >>> opencodex managed bl
 [model.ocx-opus]
 model = "anthropic/claude-opus-4-8"
 base_url = "http://127.0.0.1:10100/v1"
-api_backend = "chat_completions"
+api_backend = "responses"
 api_key = "opencodex-loopback"
 ```
 
@@ -108,7 +108,7 @@ dial and use your admission token:
 [model.ocx-opus]
 model = "anthropic/claude-opus-4-8"
 base_url = "http://192.168.1.10:10100/v1"   # the reachable host, not 127.0.0.1
-api_backend = "chat_completions"
+api_backend = "responses"
 api_key = "your-OPENCODEX_API_AUTH_TOKEN"
 ```
 
@@ -122,11 +122,12 @@ the id `grok-4.5`. Generated aliases avoid dots entirely for this reason.
 
 ## Known limitations
 
-- **Responses backend and keep-alives:** opencodex emits a `response.heartbeat` keep-alive
-  on `/v1/responses` streams during upstream silence. Grok Build's Responses decoder
-  rejects unknown event types, so a manually configured `api_backend = "responses"` model
-  can fail mid-turn on slow upstreams. The auto-registered entries pin
-  `api_backend = "chat_completions"`, which never surfaces raw heartbeat frames.
+- **Responses strictness:** the managed integration uses `api_backend = "responses"`. Wire
+  keep-alives are SSE comment lines rather than invented Responses event types, so Grok Build's
+  strict decoder never has to deserialize a heartbeat variant. For Grok-tagged requests,
+  opencodex also backfills the required empty `annotations` array on `output_text` parts and can
+  reconstruct a sparse `response.completed.output` only from validated, contiguous
+  `output_item.done` items. Ambiguous or contradictory streams are left untouched.
 - **Service-installed `ocx restart`:** when opencodex runs under a service manager,
   `ocx restart` currently stops the service and replaces it with an unmanaged process —
   service persistence (auto-restart, start-at-login) is lost until the next

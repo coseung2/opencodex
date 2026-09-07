@@ -3,7 +3,13 @@ import type { IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage } from "../types";
 import { catalogModelSupportsReasoningSummaries } from "../codex/catalog";
 import { COMPACT_PROMPT, decodeCompactionSummary, SUMMARY_PREFIX } from "../responses/compaction";
+import { isOpenCodeMuseResponses } from "../providers/opencode-go-transport";
+import { isXaiResponsesDestination } from "../providers/xai-transport";
+import { debugProviderDiagnostic } from "../lib/debug";
+import { isXaiSchemaTarget, normalizeXaiToolParameters, XaiToolSchemaCompatibilityError } from "./xai-tool-schema";
+import { normalizeXaiResponsesWebSearch } from "./xai-web-search";
 import { collectResponsesToolGroups } from "../responses/tool-groups";
+import { lowerXaiResponsesCustomTools } from "../responses/xai-custom-tool-compat";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
@@ -255,11 +261,8 @@ function normalizeConfiguredReasoningSummaryDelivery(
  * - Drops tool_search_call/tool_search_output input items
  * - Sets parallel_tool_calls to false
  */
-const MUSE_SPARK_WEB_SEARCH_STRICT_MODELS = new Set(["muse-spark-1.3-contributor", "muse-spark-1.2-contributor"]);
-
-function stripMuseSparkUnsupportedWebSearchFields(body: unknown, modelId: unknown): unknown {
-  if (!isPlainObject(body) || typeof modelId !== "string"
-    || !MUSE_SPARK_WEB_SEARCH_STRICT_MODELS.has(modelId.trim().toLowerCase())) return body;
+function stripMuseSparkUnsupportedWebSearchFields(body: unknown, modelId: unknown, responseUrl: string): unknown {
+  if (!isPlainObject(body) || !isOpenCodeMuseResponses(modelId, responseUrl)) return body;
   const rewrite = (tools: unknown[]) => {
     let changed = false;
     const next = tools.map(tool => {
@@ -389,12 +392,34 @@ function stripSparkCompatibility(body: unknown): unknown {
     : body;
 }
 
+function stripXaiOAuthOnlyParams(body: unknown, provider: OcxProviderConfig): unknown {
+  if (provider.authMode !== "oauth" || !isXaiResponsesDestination(provider) || !isPlainObject(body)) return body;
+  let changed = false;
+  const next: Record<string, unknown> = { ...body };
+  // The Grok subscription gateway has no caller-owned Priority/Fast contract. A global fastMode or
+  // stale client may still send the OpenAI service_tier parameter after the model switches wires.
+  if (Object.hasOwn(next, "service_tier")) { delete next.service_tier; changed = true; }
+  // xAI does not document OpenAI's text.verbosity control; stale catalog clients can keep sending
+  // it after a metadata refresh, so fail soft at the destination boundary as well.
+  if (isPlainObject(next.text) && Object.hasOwn(next.text, "verbosity")) {
+    const text = { ...next.text };
+    delete text.verbosity;
+    next.text = text;
+    changed = true;
+  }
+  return changed ? next : body;
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
-function normalizeFunctionToolSchema(tool: unknown): unknown {
+function normalizeFunctionToolSchema(tool: unknown, xaiTarget: boolean): unknown | undefined {
   if (!isPlainObject(tool) || tool.type !== "function") return tool;
+  if (xaiTarget) {
+    const parameters = normalizeXaiToolParameters(isPlainObject(tool.parameters) ? tool.parameters : {});
+    return parameters === undefined ? undefined : { ...tool, parameters };
+  }
   if (isPlainObject(tool.parameters) && tool.parameters.type === "object") return tool;
   return {
     ...tool,
@@ -402,16 +427,55 @@ function normalizeFunctionToolSchema(tool: unknown): unknown {
   };
 }
 
-function normalizeToolSchemas(body: unknown): unknown {
-  if (!isPlainObject(body)) return body;
+function reconcileToolChoiceForOmittedTools(
+  body: Record<string, unknown>,
+  omittedFunctionNames: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (omittedFunctionNames.size === 0) return body;
+  const toolChoice = body.tool_choice;
+  if (!isPlainObject(toolChoice)) return body;
+  const refuse = (name: string): never => {
+    throw new XaiToolSchemaCompatibilityError(
+      `tool_choice requires function "${name}", but its parameter schema cannot be represented for this destination; `
+      + "relax tool_choice or simplify the tool's parameter schema",
+    );
+  };
+  if (toolChoice.type === "function" && typeof toolChoice.name === "string") {
+    return omittedFunctionNames.has(toolChoice.name) ? refuse(toolChoice.name) : body;
+  }
+  if (toolChoice.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
+    const omitted = toolChoice.tools.filter(tool =>
+      isPlainObject(tool)
+      && tool.type === "function"
+      && typeof tool.name === "string"
+      && omittedFunctionNames.has(tool.name));
+    if (omitted.length === 0) return body;
+    const kept = toolChoice.tools.filter(tool => !omitted.includes(tool));
+    if (kept.length === 0) {
+      const first = omitted[0];
+      return refuse(isPlainObject(first) && typeof first.name === "string" ? first.name : "unknown");
+    }
+    return { ...body, tool_choice: { ...toolChoice, tools: kept } };
+  }
+  return body;
+}
 
+function normalizeToolSchemas(body: unknown, xaiTarget: boolean): unknown {
+  if (!isPlainObject(body)) return body;
+  const omittedFunctionNames = new Set<string>();
   const normalizeTools = (tools: unknown[]): unknown[] => {
     let changed = false;
-    const normalized = tools.map((tool) => {
-      const fixed = normalizeFunctionToolSchema(tool);
+    const normalized: unknown[] = [];
+    for (const tool of tools) {
+      const fixed = normalizeFunctionToolSchema(tool, xaiTarget);
+      if (fixed === undefined) {
+        changed = true;
+        if (isPlainObject(tool) && typeof tool.name === "string") omittedFunctionNames.add(tool.name);
+        continue;
+      }
       if (fixed !== tool) changed = true;
-      return fixed;
-    });
+      normalized.push(fixed);
+    }
     return changed ? normalized : tools;
   };
 
@@ -431,7 +495,10 @@ function normalizeToolSchemas(body: unknown): unknown {
     });
     if (inputChanged) normalizedBody = { ...normalizedBody, input };
   }
-  return normalizedBody;
+  if (omittedFunctionNames.size > 0) {
+    debugProviderDiagnostic("openai-responses", "tool-schema-omitted", { omitted: [...omittedFunctionNames] });
+  }
+  return reconcileToolChoiceForOmittedTools(normalizedBody, omittedFunctionNames);
 }
 
 const MAX_RESPONSES_CALL_ID_LENGTH = 64;
@@ -1062,7 +1129,19 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (parsed._compactionRequest === true && !isCanonicalOpenAiForwardProvider(provider)) {
         outBody = buildRoutedCompactionBody(outBody);
       }
-      const sanitizedBody = normalizeToolSchemas(stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId));
+      if (isXaiResponsesDestination(provider)) {
+        outBody = lowerXaiResponsesCustomTools(outBody).body;
+      }
+      const sanitizedBody = stripXaiOAuthOnlyParams(
+        normalizeXaiResponsesWebSearch(
+          normalizeToolSchemas(
+            stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId, url),
+            isXaiSchemaTarget(provider),
+          ),
+          provider,
+        ),
+        provider,
+      );
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
         provider,

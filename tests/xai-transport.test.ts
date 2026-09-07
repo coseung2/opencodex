@@ -97,34 +97,36 @@ describe("xAI auth-mode transport selection", () => {
     });
   });
 
-  test("flattens nested root tool unions for xAI without changing other providers", () => {
+  test("normalizes a lossless root union only on the Grok CLI proxy", () => {
     const schema = {
       oneOf: [
-        { type: "object", properties: { mode: { type: "string", enum: ["view"] } } },
-        { oneOf: [{ type: "object", properties: { path: { type: "string" } } }, { type: "object", properties: {} }] },
+        { type: "object", properties: { mode: { const: "view" } }, required: ["mode"] },
+        { type: "object", properties: { mode: { const: "edit" } }, required: ["mode"] },
       ],
-      $defs: { shared: { type: "string" } },
+      additionalProperties: false,
     };
-    const request = createOpenAIChatAdapter(provider("key")).buildRequest({
+    const oauth = resolveProviderTransport("xai", provider("oauth"));
+    const request = createOpenAIChatAdapter(oauth).buildRequest({
       ...parsed(),
       context: { messages: [], tools: [{ name: "automation_update", description: "Update", parameters: schema }] },
     });
     const xaiParameters = (JSON.parse(request.body) as { tools: Array<{ function: { parameters: Record<string, unknown> } }> }).tools[0].function.parameters;
+    expect(xaiParameters).toEqual({
+      type: "object",
+      properties: { mode: { anyOf: [{ const: "view" }, { const: "edit" }] } },
+      required: ["mode"],
+      additionalProperties: false,
+    });
 
-    expect(xaiParameters.type).toBeUndefined();
-    expect(xaiParameters.oneOf).toHaveLength(3);
-    expect((xaiParameters.oneOf as Record<string, unknown>[]).every(branch => branch.type === "object")).toBe(true);
-    expect(xaiParameters.$defs).toEqual(schema.$defs);
-
-    const otherRequest = createOpenAIChatAdapter({ ...provider("key"), baseUrl: "https://example.test/v1" }).buildRequest({
+    const publicApiRequest = createOpenAIChatAdapter(provider("key")).buildRequest({
       ...parsed(),
       context: { messages: [], tools: [{ name: "automation_update", description: "Update", parameters: schema }] },
     });
-    expect((JSON.parse(otherRequest.body) as { tools: Array<{ function: { parameters: unknown } }> }).tools[0].function.parameters).toEqual(schema);
+    expect((JSON.parse(publicApiRequest.body) as { tools: Array<{ function: { parameters: unknown } }> }).tools[0].function.parameters).toEqual(schema);
   });
 
-  test("omits an xAI tool whose root schema cannot be normalized safely", () => {
-    const request = createOpenAIChatAdapter(provider("key")).buildRequest({
+  test("omits a Grok CLI tool whose root schema cannot be normalized safely", () => {
+    const request = createOpenAIChatAdapter(resolveProviderTransport("xai", provider("oauth"))).buildRequest({
       ...parsed(),
       context: { messages: [], tools: [{ name: "unsafe", description: "Unsafe", parameters: { oneOf: [{ type: "string" }] } }] },
     });
@@ -144,18 +146,26 @@ describe("xAI auth-mode transport selection", () => {
             type: "function",
             name: "automation_update",
             description: "Update an automation",
-            parameters: { oneOf: [{ type: "object", properties: {} }, { oneOf: [{ type: "object", properties: {} }] }] },
+            parameters: {
+              oneOf: [
+                { type: "object", properties: { mode: { const: "view" } }, required: ["mode"] },
+                { type: "object", properties: { mode: { const: "edit" } }, required: ["mode"] },
+              ],
+            },
           }],
         },
         { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
       ],
     });
-    const request = createOpenAIChatAdapter(provider("key")).buildRequest(parsedRequest);
+    const request = createOpenAIChatAdapter(resolveProviderTransport("xai", provider("oauth"))).buildRequest(parsedRequest);
     const body = JSON.parse(request.body) as { tools: Array<{ function: { name: string; parameters: Record<string, unknown> } }> };
     const tool = body.tools.find(entry => entry.function.name === "automation_update");
 
-    expect(tool?.function.parameters.oneOf).toHaveLength(2);
-    expect((tool?.function.parameters.oneOf as Record<string, unknown>[]).every(branch => branch.type === "object")).toBe(true);
+    expect(tool?.function.parameters).toEqual({
+      type: "object",
+      properties: { mode: { anyOf: [{ const: "view" }, { const: "edit" }] } },
+      required: ["mode"],
+    });
   });
 });
 

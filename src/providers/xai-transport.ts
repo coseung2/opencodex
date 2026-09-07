@@ -22,6 +22,16 @@ export const XAI_GROK_COMPATIBILITY = {
 export const XAI_GROK_CLIENT_VERSION = XAI_GROK_COMPATIBILITY.version;
 export const XAI_CONV_ID_HEADER = XAI_GROK_COMPATIBILITY.headers.conversationId;
 
+/** Both xAI Responses hosts share the same request dialect. */
+export function isXaiResponsesDestination(provider: Pick<OcxProviderConfig, "baseUrl">): boolean {
+  try {
+    const hostname = new URL(provider.baseUrl).hostname.toLowerCase();
+    return hostname === "api.x.ai" || hostname === "cli-chat-proxy.grok.com";
+  } catch {
+    return false;
+  }
+}
+
 export type OcxProviderTransport = OcxProviderConfig & {
   /** Request executor used only at runtime; never persisted. */
   fetch?: typeof globalThis.fetch;

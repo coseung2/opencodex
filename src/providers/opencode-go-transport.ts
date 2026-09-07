@@ -4,6 +4,24 @@ import { registryEntryForProviderDestination } from "./registry";
 
 export const OPENCODE_GO_SESSION_HEADER = "x-opencode-session";
 
+const MUSE_RESPONSE_MODELS = new Set(["muse-spark-1.2-contributor", "muse-spark-1.3-contributor"]);
+const MUSE_RESPONSE_URLS = new Set([
+  "https://opencode.ai/zen/v1/responses",
+  "https://opencode.ai/zen/go/v1/responses",
+]);
+
+/** Compatibility belongs to the exact model AND effective destination, not a provider label. */
+export function isOpenCodeMuseResponses(modelId: unknown, responseUrl: string): boolean {
+  if (typeof modelId !== "string" || !MUSE_RESPONSE_MODELS.has(modelId.trim().toLowerCase())) return false;
+  try {
+    const url = new URL(responseUrl);
+    if (url.username || url.password || url.search || url.hash) return false;
+    return MUSE_RESPONSE_URLS.has(`${url.origin.toLowerCase()}${url.pathname.replace(/\/+$/, "")}`);
+  } catch {
+    return false;
+  }
+}
+
 function hasHeaderCaseInsensitive(
   headers: Record<string, string> | undefined,
   name: string,

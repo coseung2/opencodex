@@ -9,12 +9,14 @@ import {
 import { parseRequest } from "../../responses/parser";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
+import { XaiToolSchemaCompatibilityError } from "../../adapters/xai-tool-schema";
 import {
   expandPreviousResponseInput,
   previousResponseProviderState,
   previousResponseReplayFailure,
   rememberResponseState,
 } from "../../responses/state";
+import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
 import { routeModel, type RouteResult } from "../../router";
 import {
   advanceComboAfterFailure,
@@ -100,8 +102,9 @@ import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve"
 import type { InboundWire } from "../../providers/registry";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
-import { resolveProviderTransport } from "../../providers/xai-transport";
-import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
+import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
+import { isOpenCodeMuseResponses, resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
+import { declaredNamespaceAliases } from "../../responses/namespace-aliases";
 import type { WsData } from "../ws-bridge";
 import { trackActiveTurnLease, trackStreamLifetime } from "../lifecycle";
 import { redactSecretString } from "../../lib/redact";
@@ -158,12 +161,18 @@ import {
   createResponsesItemIdPayloadRewrite,
   hasResponsesItemIdRepair,
 } from "../responses-item-id-repair";
+import { createGrokResponsesSparseTerminalPayloadRewrite } from "../grok-responses-snapshot-repair";
 import {
   createImageGenCallRestoreRewrite,
   imageGenToolCallAliases,
   restoreImageGenCallsInJson,
 } from "../responses-image-gen-repair";
 import { composeSsePayloadRewrites, relaySseWithPayloadRewrite } from "../sse-payload-rewrite";
+import {
+  createXaiCustomToolPayloadRewrite,
+  restoreXaiCustomCallsInJson,
+  xaiResponsesCustomToolNames,
+} from "../../responses/xai-custom-tool-compat";
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
@@ -889,8 +898,11 @@ async function applyFinalRouteRequestNormalization(args: {
   // Virtual model rewriting: Pro aliases → base model + reasoning.mode="pro".
   applyOpenAiVirtualModel(parsed, route, logCtx);
 
-  // Fast mode override for OpenAI-routed models.
-  if (config.fastMode !== undefined && route.provider.adapter === "openai-responses") {
+  // Fast mode override for OpenAI-shaped routes. xAI OAuth's subscription Responses lane has no
+  // caller-owned Priority/Fast contract, so switching Grok to its native wire must not make a
+  // global OpenAI fastMode leak service_tier upstream.
+  const callerFastTierAllowed = !(route.providerName === "xai" && route.provider.authMode === "oauth");
+  if (config.fastMode !== undefined && route.provider.adapter === "openai-responses" && callerFastTierAllowed) {
     const tier = config.fastMode ? "priority" : undefined;
     if (parsed._rawBody && typeof parsed._rawBody === "object") {
       if (tier) (parsed._rawBody as Record<string, unknown>).service_tier = tier;
@@ -1330,6 +1342,7 @@ async function handleResponsesInner(
       cursorConversationId: parsed._cursorConversationId,
     });
   }
+  bindTurnTerminationScope(parsed, logCtx.conversationId);
   logCtx.requestedModel = parsed.modelId;
   logCtx.requestedEffort = parsed.options.reasoning;
   logCtx.requestedServiceTier = parsed.options.serviceTier;
@@ -1636,9 +1649,6 @@ async function handleResponsesInner(
   }
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
-    const imageGenCallAliases = route.provider.authMode === "forward"
-      ? new Map<string, { namespace: string; name: string }>()
-      : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
     // Local continuation cache for the ChatGPT passthrough. Codex WS turns chain with
     // previous_response_id, ocx converts them to internal HTTP requests, and the ChatGPT Codex
     // REST backend rejects the parameter — the adapter strips it in forward mode, so the ONLY
@@ -1660,7 +1670,27 @@ async function handleResponsesInner(
         + `(model ${parsed.modelId}); forwarding without it — earlier turns may be missing from this request`,
       );
     }
-    let request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    let request: Awaited<ReturnType<typeof adapter.buildRequest>>;
+    try {
+      request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    } catch (error) {
+      releaseCodexAuthContextProbeLease(authCtx);
+      if (error instanceof XaiToolSchemaCompatibilityError) {
+        return formatErrorResponse(400, "invalid_request_error", redactSecretString(error.message));
+      }
+      throw error;
+    }
+    const xaiCustomToolNames = isXaiResponsesDestination(route.provider)
+      ? xaiResponsesCustomToolNames(parsed._rawBody)
+      : new Set<string>();
+    // Reuse the existing client-only namespace rewrite and its bounded SSE relay. The
+    // inspection/cache branch retains raw names for continuation replay. Resolve all
+    // declaration ownership before admitting a Muse dotted alias.
+    const imageGenCallAliases = route.provider.authMode === "forward"
+      ? new Map<string, { namespace: string; name: string }>()
+      : isOpenCodeMuseResponses(parsed.modelId, request.url)
+        ? declaredNamespaceAliases(parsed.context.tools ?? [], translatorBudget)
+        : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
     recordAdapterReasoning(logCtx, request);
     const passthroughEstimate = typeof request.usageLog?.inputTokens === "number"
       ? request.usageLog.inputTokens
@@ -1713,6 +1743,66 @@ async function handleResponsesInner(
       return transportFailureResponse(err);
     } finally {
       request.releaseBodyObservation?.();
+    }
+
+    // Native Responses providers return from this passthrough branch before the generic recovery
+    // loop below. Preserve the same OAuth contract here: one pre-stream 401 forces one credential
+    // refresh and one rebuilt replay. This is required for xAI now that Grok 4.6/4.5 subscription
+    // traffic uses the provider's native Responses wire.
+    if (upstreamResponse.status === 401 && isOAuth401ReplayProvider && sentOAuthSnapshot) {
+      try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed */ }
+      let refreshed: OAuthAccessSnapshot;
+      try {
+        refreshed = await forceRefreshOAuthAccessSnapshot(sentOAuthSnapshot);
+      } catch (err) {
+        upstream.abort();
+        releaseCodexAuthContextProbeLease(authCtx);
+        return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
+      }
+      sentOAuthSnapshot = refreshed;
+      if (route.providerName === "kiro") parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
+      const refreshedProvider = resolveProviderTransport(
+        route.providerName,
+        { ...route.provider, apiKey: refreshed.accessToken },
+        parsed.options.promptCacheKey,
+        route.providerName === "github-copilot" ? getOAuthCredentialApiBaseUrl(route.providerName) : undefined,
+      );
+      route.provider = refreshedProvider;
+      const refreshedAdapter = resolveAdapter(
+        resolveWireProtocolOverride(route.providerName, route.modelId, refreshedProvider, inboundWire),
+        config.cacheRetention,
+      );
+      if (!("passthrough" in refreshedAdapter) || !refreshedAdapter.passthrough) {
+        upstream.abort();
+        return formatErrorResponse(502, "upstream_error", "OAuth refresh changed the provider wire unexpectedly");
+      }
+      logCtx.providerAdapter = refreshedAdapter.name;
+      sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, refreshedAdapter.name, logCtx.accountLogLabel);
+      try {
+        request = await refreshedAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+        recordAdapterReasoning(logCtx, request);
+      } catch (err) {
+        upstream.abort();
+        if (options.abortSignal?.aborted) return clientCancelledResponse();
+        return formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err)));
+      }
+      try {
+        upstreamResponse = await fetchWithTransientRetry(
+          recovery => {
+            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery ?? "oauth-401");
+            return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
+              method: request.method,
+              headers: request.headers,
+              body: request.body,
+            }, recovery), upstream.signal, connectMs, parsed.stream, providerFetch(route.provider, options.codexWsRuntimeIdentity));
+          },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+        );
+      } catch (err) {
+        return transportFailureResponse(err);
+      } finally {
+        request.releaseBodyObservation?.();
+      }
     }
 
     if (usesCodexForwardPoolAuth(authCtx, route.provider) && !authCtx.fixedAccount) {
@@ -1865,10 +1955,20 @@ async function handleResponsesInner(
     // The bundled known-bad runtime remains on tee by default on both platforms.
     if (isEventStream && upstreamResponse.body) {
       const repairConfig = route.provider.responsesItemIdRepair;
-      const needsClientRewrite = imageGenCallAliases.size > 0 || hasResponsesItemIdRepair(repairConfig);
-      // Compose opt-in payload rewrites into one parse/stringify pass (image-gen restore first).
+      const xaiCustomToolRewrite = createXaiCustomToolPayloadRewrite(xaiCustomToolNames);
+      const grokSparseTerminalRewrite = logCtx.surface === "grok"
+        ? createGrokResponsesSparseTerminalPayloadRewrite(translatorBudget)
+        : undefined;
+      const needsClientRewrite = imageGenCallAliases.size > 0
+        || hasResponsesItemIdRepair(repairConfig)
+        || xaiCustomToolRewrite !== undefined
+        || grokSparseTerminalRewrite !== undefined;
+      // Compose opt-in payload rewrites into one parse/stringify pass. Provider-shape restoration
+      // runs before generic item-id repair so the client sees the correct custom-tool identity.
       const payloadRewrites = [
         createImageGenCallRestoreRewrite(imageGenCallAliases),
+        xaiCustomToolRewrite,
+        grokSparseTerminalRewrite,
         hasResponsesItemIdRepair(repairConfig)
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
           : undefined,
@@ -2031,7 +2131,8 @@ async function handleResponsesInner(
           rememberPassthroughResponse(JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown });
         } catch { /* non-JSON despite content-type; recording is best-effort */ }
       }
-      return new Response(restoreImageGenCallsInJson(text, imageGenCallAliases), {
+      const restoredCustomTools = restoreXaiCustomCallsInJson(text, xaiCustomToolNames);
+      return new Response(restoreImageGenCallsInJson(restoredCustomTools, imageGenCallAliases), {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers,
@@ -2387,6 +2488,62 @@ async function handleResponsesInner(
         adapterNeedsForcedContinuation(adapter.name) ? { force: true } : undefined,
       );
     }
+    return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
+  }
+
+  // Some adapter inputs already contain the completed answer and require no inference at all.
+  // Kiro uses this for replayed history ending in a delivered final answer. Keep this OUTSIDE the
+  // ordinary empty-completion path: an outputless done is intentional here and must never trigger
+  // another request for the closed task.
+  const localTerminal = adapter.localTerminal?.(parsed);
+  if (localTerminal) {
+    const terminalEvents: AdapterEvent[] = [{
+      type: "done",
+      endTurn: true,
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    }];
+    const { toolNsMap, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    if (parsed.stream) {
+      const localSse = bridgeToResponsesSSE(
+        (async function* () { yield* terminalEvents; })(),
+        parsed.modelId,
+        toolNsMap,
+        freeformToolNames,
+        toolSearchToolNames,
+        undefined,
+        2_000,
+        {
+          translatorBudget,
+          ...(options.forceEmptyResponseId ? { responseId: "" } : {}),
+          ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
+          onUsage: usage => {
+            logCtx.usageFromBridge = true;
+            if (usage) {
+              logCtx.usage = usage;
+              if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
+            }
+          },
+        },
+      );
+      const localTurnAc = new AbortController();
+      const tracked = trackStreamLifetime(localSse, localTurnAc, undefined, options.turnAdmissionLease);
+      return new Response(tracked, {
+        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" },
+      });
+    }
+    const json = buildResponseJSON(terminalEvents, parsed.modelId, {
+      translatorBudget,
+      toolNsMap,
+      freeformToolNames,
+      toolSearchToolNames,
+      onUsage: usage => {
+        logCtx.usageFromBridge = true;
+        if (usage) {
+          logCtx.usage = usage;
+          if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
+        }
+      },
+    });
     return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
   }
 
@@ -2878,13 +3035,15 @@ async function handleResponsesInner(
         // PRE-compaction history, and a later previous_response_id expansion would rehydrate the
         // giant stale chain Codex just replaced.
         ...(routedCompaction ? {} : {
-          onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) =>
+          onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+            if (activeAdapter.name === "kiro") rememberDeliveredFinalAnswer(parsed, response);
             rememberResponseState(
               parsed._rawBody,
               response,
               continuationStateForResponse(providerState),
               activeAdapter.name === "kiro" ? { force: true } : undefined,
-            ),
+            );
+          },
         }),
       },
     );
@@ -2944,6 +3103,7 @@ async function handleResponsesInner(
     });
     // See the streaming branch: compaction turns skip the continuation cache.
     if (!routedCompaction) {
+      if (activeAdapter.name === "kiro") rememberDeliveredFinalAnswer(parsed, json);
       rememberResponseState(
         parsed._rawBody,
         json,

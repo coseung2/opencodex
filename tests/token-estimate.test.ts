@@ -1,21 +1,54 @@
 import { describe, expect, test } from "bun:test";
 import { charsPerToken, estimateTokens } from "../src/lib/token-estimate";
 
-describe("CJK-aware ratio (devlog 260712 B3)", () => {
+describe("script-segmented token estimation", () => {
   const korean = "한국어 텍스트는 토큰 밀도가 높아서 영어 기준 추정이 과소계산됩니다 ".repeat(10);
   const english = "English text estimates fine at the default four chars per token ratio ".repeat(10);
+  const cjkOf = (text: string) => [...text]
+    .filter(char => /[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF]/.test(char)).length;
+  const expected = (text: string, latinRatio: number) => {
+    const cjk = cjkOf(text);
+    return Math.ceil((text.length - cjk) / latinRatio + cjk / 1.5);
+  };
 
-  test("CJK-heavy text clamps DOWN to 2.5 chars/token (more tokens than English ratio)", () => {
-    expect(estimateTokens(korean, "gpt-5.6-sol")).toBe(Math.ceil(korean.length / 2.5));
+  test("CJK characters use their own dense ratio instead of switching the whole blob", () => {
+    expect(estimateTokens(korean, "gpt-5.6-sol")).toBe(expected(korean, 4));
+    expect(estimateTokens(korean, "kiro/claude-opus-5")).toBe(expected(korean, 2.8));
+    expect(estimateTokens(korean, "claude-sonnet-4-6")).toBe(expected(korean, 3.5));
   });
 
-  test("Claude-shaped models clamp min(3.5, 2.5) -> 2.5 for CJK; keep 3.5 for English (audit R2#7)", () => {
-    expect(estimateTokens(korean, "claude-sonnet-4-6")).toBe(Math.ceil(korean.length / 2.5));
+  test("pure Latin keeps the provider/model ratio", () => {
+    expect(estimateTokens(english, "gpt-5.6-sol")).toBe(Math.ceil(english.length / 4));
+    expect(estimateTokens(english, "kiro/claude-opus-5")).toBe(Math.ceil(english.length / 2.8));
     expect(estimateTokens(english, "claude-sonnet-4-6")).toBe(Math.ceil(english.length / 3.5));
   });
 
-  test("English text keeps the model ratio (no CJK trigger)", () => {
-    expect(estimateTokens(english, "gpt-5.6-sol")).toBe(Math.ceil(english.length / 4));
+  test("Kiro's measured ratio is scoped to Kiro routes", () => {
+    expect(charsPerToken("kiro/claude-opus-5")).toBe(2.8);
+    expect(charsPerToken("kiro-auto")).toBe(2.8);
+    for (const id of ["claude-opus-5", "deepseek-3.2", "qwen3.8-27b", "glm-5", "minimax-m2.5"]) {
+      expect(charsPerToken(id)).toBe(3.5);
+    }
+  });
+
+  test("estimate changes continuously across the old 30% CJK threshold", () => {
+    const at = (share: number) => {
+      const total = 2_000;
+      const cjk = Math.round(total * share);
+      return estimateTokens("한".repeat(cjk) + "a".repeat(total - cjk), "kiro/claude-opus-5");
+    };
+    const below = at(0.29);
+    const above = at(0.31);
+    expect(above).toBeGreaterThan(below);
+    expect(Math.abs(above - below) / below).toBeLessThan(0.05);
+  });
+
+  test("periodic CJK in a long Latin blob cannot alias into a fake CJK-heavy sample", () => {
+    const record = "id=0001,name=widget,qty=12,note=".padEnd(63, "x") + "한";
+    const blob = record.repeat(400);
+    const cjk = cjkOf(blob);
+    expect(cjk / blob.length).toBeLessThan(0.02);
+    expect(estimateTokens(blob, "kiro/claude-opus-5")).toBe(expected(blob, 2.8));
   });
 });
 
@@ -24,9 +57,12 @@ describe("token-estimate sidecar", () => {
     expect(estimateTokens("", "claude-opus-4.8")).toBe(0);
   });
 
-  test("kiro text models use the 3.5 ratio", () => {
-    for (const m of ["kiro-auto", "claude-opus-4.8", "claude-opus-4.5", "deepseek-3.2", "minimax-m2.5", "minimax-m2.1", "glm-5", "qwen3-coder-next"]) {
-      expect(charsPerToken(m)).toBe(3.5);
+  test("Kiro-routed models use 2.8; the same agent families elsewhere retain 3.5", () => {
+    for (const model of ["kiro-auto", "kiro/claude-opus-4.8", "kiro/deepseek-3.2", "kiro/glm-5"]) {
+      expect(charsPerToken(model)).toBe(2.8);
+    }
+    for (const model of ["claude-opus-4.8", "deepseek-3.2", "minimax-m2.5", "glm-5", "qwen3-coder-next"]) {
+      expect(charsPerToken(model)).toBe(3.5);
     }
   });
 
@@ -35,29 +71,27 @@ describe("token-estimate sidecar", () => {
     expect(charsPerToken("gpt-5")).toBe(4);
   });
 
-  test("ceil + min-1: any non-empty text is at least 1 token", () => {
-    expect(estimateTokens("a", "claude-opus-4.8")).toBe(1);
+  test("any non-empty text is at least one token", () => {
+    expect(estimateTokens("a", "kiro/claude-opus-4.8")).toBe(1);
     expect(estimateTokens("ab", "claude-opus-4.8")).toBe(1);
   });
 
-  test("estimate scales with length (ceil(len/3.5))", () => {
-    // 35 chars / 3.5 = 10 tokens
-    expect(estimateTokens("x".repeat(35), "claude-opus-4.8")).toBe(10);
-    // 36 chars / 3.5 = 10.28 -> ceil 11
-    expect(estimateTokens("x".repeat(36), "claude-opus-4.8")).toBe(11);
+  test("Kiro Latin estimate scales with ceil(length/2.8)", () => {
+    expect(estimateTokens("x".repeat(28), "kiro/claude-opus-4.8")).toBe(10);
+    expect(estimateTokens("x".repeat(29), "kiro/claude-opus-4.8")).toBe(11);
   });
 
-  test("lower ratio (kiro) yields more tokens than generic for same text (fail-safe over-count)", () => {
+  test("Kiro's denser ratio yields more tokens than generic for the same text", () => {
     const text = "x".repeat(400);
-    expect(estimateTokens(text, "claude-opus-4.8")).toBeGreaterThan(estimateTokens(text, "gpt-5"));
+    expect(estimateTokens(text, "kiro/claude-opus-4.8")).toBeGreaterThan(estimateTokens(text, "gpt-5"));
   });
 
   test("monotonic: longer text never estimates fewer tokens", () => {
-    let prev = 0;
-    for (const n of [0, 1, 10, 100, 1000]) {
-      const t = estimateTokens("x".repeat(n), "claude-opus-4.8");
-      expect(t).toBeGreaterThanOrEqual(prev);
-      prev = t;
+    let previous = 0;
+    for (const length of [0, 1, 10, 100, 1000]) {
+      const next = estimateTokens("x".repeat(length), "kiro/claude-opus-4.8");
+      expect(next).toBeGreaterThanOrEqual(previous);
+      previous = next;
     }
   });
 });

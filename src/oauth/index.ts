@@ -53,7 +53,7 @@ export interface OAuthAccessSnapshot {
   generation: string;
   accessToken: string;
   /** Safe request-routing subset; refresh-only Kiro client secrets never leave the credential store. */
-  kiro?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion">;
+  kiro?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion" | "authType">;
 }
 
 const MAX_OAUTH_TOKEN_REFRESH_FLIGHTS = 32;
@@ -305,6 +305,10 @@ export function publicOAuthAuthenticationErrorMessage(error: unknown): string {
 }
 
 function accessSnapshot(provider: string, accountId: string, cred: OAuthCredentials): OAuthAccessSnapshot {
+  // Legacy registrations can derive this non-secret bit from their private client pair.
+  // The pair itself must never escape through the request snapshot.
+  const kiroAuthType = cred.kiro?.authType
+    ?? (cred.kiro?.clientId && cred.kiro?.clientSecret ? "aws_sso_oidc" as const : undefined);
   const storedKiroRouting = {
     ...(cred.kiro?.profileArn ? { profileArn: cred.kiro.profileArn } : {}),
     ...(cred.kiro?.apiRegion ? { apiRegion: cred.kiro.apiRegion } : {}),
@@ -319,9 +323,11 @@ function accessSnapshot(provider: string, accountId: string, cred: OAuthCredenti
     // may use explicit environment routing, but never borrow the currently signed-in local CLI account.
     ...(provider === "kiro"
       ? {
-          kiro: Object.keys(storedKiroRouting).length > 0
-            ? storedKiroRouting
-            : environmentKiroRoutingMetadata() ?? {},
+          kiro: {
+            ...(Object.keys(storedKiroRouting).length > 0
+              ? storedKiroRouting : environmentKiroRoutingMetadata() ?? {}),
+            ...(kiroAuthType ? { authType: kiroAuthType } : {}),
+          },
         }
       : {}),
   };

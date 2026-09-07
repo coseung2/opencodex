@@ -711,7 +711,7 @@ describe("Responses bridge reasoning and usage parity", () => {
     // Regression for the Cursor parallel-tool-call stall: while the upstream silently assembles tool
     // calls, the adapter emits `heartbeat` events. They must keep the stall watchdog alive (no
     // upstream_stall_timeout). Adapter heartbeats themselves are not translated into Responses
-    // protocol items; wire keepalives use a separate `response.heartbeat` frame (see next test).
+    // protocol items; wire keepalives use a separate SSE comment line (see next test).
     //
     // resolveStallTimeoutSec ceils to a minimum of 1s, so sub-second stallTimeoutSec values cannot
     // prove the reset. Drive the beat loop through a test clock seam and run adapter-only progress
@@ -785,10 +785,11 @@ describe("Responses bridge reasoning and usage parity", () => {
     expect(frames.some(f => f.data.type === "heartbeat")).toBe(false);
   });
 
-  test("wire response.heartbeat keeps firing while only adapter heartbeats flow", async () => {
+  test("wire keepalive comment keeps firing while only adapter heartbeats flow", async () => {
     // Issue #521: web-search buffers semantic events and yields invisible adapter heartbeats from
     // raw-byte progress. Those must not suppress wire keepalives, or Codex Desktop idle-timeouts
-    // (~5 min) while OCX still considers the upstream alive.
+    // (~5 min) while OCX still considers the upstream alive. Comments never become Responses
+    // variants, so strict clients such as Grok Build can consume the same stream safely.
     const heartbeatMs = 50;
     const stallTimeoutSec = 1;
     const cycles = 4;
@@ -824,7 +825,7 @@ describe("Responses bridge reasoning and usage parity", () => {
       yield { type: "done" };
     }
 
-    const framesPromise = collectSse(bridgeToResponsesSSE(
+    const stream = bridgeToResponsesSSE(
       adapterHeartbeatsOnly(),
       "model",
       undefined,
@@ -833,7 +834,8 @@ describe("Responses bridge reasoning and usage parity", () => {
       undefined,
       heartbeatMs,
       { stallTimeoutSec, timers },
-    ));
+    );
+    const rawTextPromise = new Response(stream).text();
 
     await flush();
     for (let i = 0; i < cycles; i++) {
@@ -843,15 +845,13 @@ describe("Responses bridge reasoning and usage parity", () => {
       await flush();
     }
 
-    const frames = await framesPromise;
-    const wireHeartbeats = frames.filter(f =>
-      f.event === "response.heartbeat" && f.data.type === "response.heartbeat"
-    );
-    expect(wireHeartbeats.length).toBeGreaterThan(1);
-    expect(frames.some(f => f.event === "response.completed")).toBe(true);
-    expect(frames.some(f => (f.data.response as Record<string, unknown> | undefined)?.incomplete_details)).toBe(false);
-    // Reject every adapter-shaped heartbeat payload, regardless of event name or field count.
-    expect(frames.some(f => f.data.type === "heartbeat")).toBe(false);
+    const rawText = await rawTextPromise;
+    const keepaliveCount = (rawText.match(/^: opencodex heartbeat$/gm) ?? []).length;
+    expect(keepaliveCount).toBeGreaterThan(1);
+    expect(rawText).toContain("response.completed");
+    expect(rawText).not.toContain("upstream_stall_timeout");
+    expect(rawText).not.toContain("response.heartbeat");
+    expect(rawText).not.toContain('"type":"heartbeat"');
   });
 });
 

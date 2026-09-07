@@ -258,11 +258,11 @@ export function bridgeToResponsesSSE(
     terminalReported = true;
     try { options?.onTerminal?.(status); } catch { /* terminal metrics must not break the stream */ }
   };
-  // RC3 keep-alive: Codex's idle timer is timeout(idle_timeout, stream.next()) over an
-  // eventsource_stream; ANY received event re-arms it, while an unknown type is ignored
-  // (responses.rs `_ => Ok(None)`). Emit a parser-ignored `response.heartbeat` whenever the
-  // *wire* has been silent, even if invisible adapter heartbeats are still flowing (web-search
-  // buffering + raw-byte progress). Upstream activity only resets the stall watchdog.
+  // RC3 keep-alive: keep the event-stream transport active without inventing a Responses event
+  // variant. Strict clients such as Grok Build deserialize every typed event and reject unknown
+  // `response.heartbeat` frames, while an SSE comment is transport-only and still keeps the
+  // connection alive. Emit it whenever the *wire* has been silent, even if invisible adapter
+  // heartbeats are still flowing (web-search buffering + raw-byte progress).
   let upstreamActivity = false;
   let wireActivity = false;
   let beat: unknown;
@@ -328,7 +328,7 @@ export function bridgeToResponsesSSE(
         ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
       });
 
-      const heartbeatFrame = encoder.encode('event: response.heartbeat\ndata: {"type":"response.heartbeat"}\n\n');
+      const heartbeatFrame = encoder.encode(": opencodex heartbeat\n\n");
       let stallTicks = 0;
       const stallSec = resolveStallTimeoutSec(options?.stallTimeoutSec);
       const maxStallTicks = Math.ceil((stallSec * 1000) / heartbeatMs);
@@ -391,6 +391,29 @@ export function bridgeToResponsesSSE(
         const reservation = budget?.reserveTransient(bytesOf(encrypted), { kind: "reasoning" });
         hiddenRawReasoningText = "";
         hiddenRawReasoningBytes = 0;
+        reservation?.commitRetained();
+        budget?.releaseRetained(previousBytes, { kind: "reasoning" });
+        const itemId = `rs_${uuid()}`;
+        const item = { type: "reasoning", id: itemId, summary: [] as never[], encrypted_content: encrypted };
+        emit("response.output_item.added", { output_index: outputIndex, item });
+        emit("response.output_item.done", { output_index: outputIndex, item });
+        retainFinishedItem(item as OutputItem, bytesOf(encrypted), "reasoning");
+        outputIndex++;
+      };
+      // Kiro reasoning round-trip. Kiro sends its encrypted blob at the END of a turn, while the
+      // assistant message is still open, so this CANNOT emit on arrival: the open message still
+      // owns `outputIndex` (it only advances on close), and an item emitted here would both reuse
+      // that index and land BEFORE the message — where the parser's backwards pairing drops it as
+      // orphaned. Stash it and flush after `done` has closed every open item instead.
+      let pendingKiroRedacted: string | undefined;
+      let pendingKiroRedactedBytes = 0;
+      const flushKiroRedactedReasoning = () => {
+        if (!pendingKiroRedacted) return;
+        const previousBytes = pendingKiroRedactedBytes;
+        const encrypted = encodeReasoningEnvelope({ krc: pendingKiroRedacted });
+        const reservation = budget?.reserveTransient(bytesOf(encrypted), { kind: "reasoning" });
+        pendingKiroRedacted = undefined;
+        pendingKiroRedactedBytes = 0;
         reservation?.commitRetained();
         budget?.releaseRetained(previousBytes, { kind: "reasoning" });
         const itemId = `rs_${uuid()}`;
@@ -817,6 +840,12 @@ export function bridgeToResponsesSSE(
               pendingRedacted.push(event.data);
               break;
             }
+            case "kiro_redacted_reasoning": {
+              // Stash only — see flushKiroRedactedReasoning. One blob per turn, so last wins.
+              pendingKiroRedactedBytes = replaceRetainedString(pendingKiroRedactedBytes, event.data, "reasoning");
+              pendingKiroRedacted = event.data;
+              break;
+            }
             case "reasoning_raw_delta": {
               if (options?.hideThinkingSummary) {
                 ({ value: hiddenRawReasoningText, bytes: hiddenRawReasoningBytes } = appendString(
@@ -987,6 +1016,9 @@ export function bridgeToResponsesSSE(
               // Redacted-only turns (or hidden thinking without a trailing signature event) still
               // need their envelope-only reasoning item so the blocks replay next turn.
               flushHiddenReasoningEnvelope();
+              // After every close above, so the blob lands AFTER the assistant message it belongs
+              // to and the parser's backwards pairing finds it.
+              flushKiroRedactedReasoning();
               if (options?.compaction) {
                 // Exactly one compaction item per turn; codex-rs takes the first and fatals on 0.
                 const item = {
@@ -1288,6 +1320,10 @@ export function buildResponseJSON(
   let batchSignatureBytes = 0;
   let batchRedacted: string[] = [];
   let batchRedactedBytes = 0;
+  // Kiro reasoning blob, held until after the trailing flushes so it lands AFTER the assistant
+  // message (see the streaming path). Retained because it outlives releaseTranslatedEvent.
+  let batchKiroRedacted: string | undefined;
+  let batchKiroRedactedBytes = 0;
   let currentToolCallId = "";
   let currentToolCallName = "";
   let currentToolCallArgs = "";
@@ -1455,6 +1491,16 @@ export function buildResponseJSON(
         }
         batchRedacted.push(e.data);
         break;
+      case "kiro_redacted_reasoning":
+        // Stash only — pushed after the trailing flushes. One blob per turn, so last wins.
+        {
+          const dataBytes = bytesOf(e.data);
+          budget?.chargeRetained(dataBytes, { kind: "reasoning" });
+          if (batchKiroRedactedBytes > 0) budget?.releaseRetained(batchKiroRedactedBytes, { kind: "reasoning" });
+          batchKiroRedactedBytes = dataBytes;
+        }
+        batchKiroRedacted = e.data;
+        break;
       case "reasoning_raw_delta":
         if (currentText) flushText("commentary");
         if (currentSummaryReasoning) flushSummaryReasoning();
@@ -1553,6 +1599,15 @@ export function buildResponseJSON(
   flushRawReasoning();
   // Open tool call on a failed/incomplete turn must not land as status:"completed".
   if (currentToolCallId) flushToolCall(errorEvent || incompleteEvent ? "incomplete" : "completed");
+  if (batchKiroRedacted) {
+    // pushOutput reserves the item itself and releases the retained raw blob it replaces.
+    pushOutput({
+      type: "reasoning", id: `rs_${uuid()}`, summary: [],
+      encrypted_content: encodeReasoningEnvelope({ krc: batchKiroRedacted }),
+    }, batchKiroRedactedBytes, "reasoning");
+    batchKiroRedacted = undefined;
+    batchKiroRedactedBytes = 0;
+  }
   // A truncated turn must never be installed as replacement history: emit the
   // compaction item only when the turn actually completed (#422).
   if (
