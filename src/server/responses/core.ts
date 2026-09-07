@@ -16,6 +16,7 @@ import {
   previousResponseReplayFailure,
   rememberResponseState,
 } from "../../responses/state";
+import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
 import { routeModel, type RouteResult } from "../../router";
 import {
   advanceComboAfterFailure,
@@ -1341,6 +1342,7 @@ async function handleResponsesInner(
       cursorConversationId: parsed._cursorConversationId,
     });
   }
+  bindTurnTerminationScope(parsed, logCtx.conversationId);
   logCtx.requestedModel = parsed.modelId;
   logCtx.requestedEffort = parsed.options.reasoning;
   logCtx.requestedServiceTier = parsed.options.serviceTier;
@@ -2489,6 +2491,62 @@ async function handleResponsesInner(
     return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
   }
 
+  // Some adapter inputs already contain the completed answer and require no inference at all.
+  // Kiro uses this for replayed history ending in a delivered final answer. Keep this OUTSIDE the
+  // ordinary empty-completion path: an outputless done is intentional here and must never trigger
+  // another request for the closed task.
+  const localTerminal = adapter.localTerminal?.(parsed);
+  if (localTerminal) {
+    const terminalEvents: AdapterEvent[] = [{
+      type: "done",
+      endTurn: true,
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    }];
+    const { toolNsMap, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    if (parsed.stream) {
+      const localSse = bridgeToResponsesSSE(
+        (async function* () { yield* terminalEvents; })(),
+        parsed.modelId,
+        toolNsMap,
+        freeformToolNames,
+        toolSearchToolNames,
+        undefined,
+        2_000,
+        {
+          translatorBudget,
+          ...(options.forceEmptyResponseId ? { responseId: "" } : {}),
+          ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
+          onUsage: usage => {
+            logCtx.usageFromBridge = true;
+            if (usage) {
+              logCtx.usage = usage;
+              if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
+            }
+          },
+        },
+      );
+      const localTurnAc = new AbortController();
+      const tracked = trackStreamLifetime(localSse, localTurnAc, undefined, options.turnAdmissionLease);
+      return new Response(tracked, {
+        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" },
+      });
+    }
+    const json = buildResponseJSON(terminalEvents, parsed.modelId, {
+      translatorBudget,
+      toolNsMap,
+      freeformToolNames,
+      toolSearchToolNames,
+      onUsage: usage => {
+        logCtx.usageFromBridge = true;
+        if (usage) {
+          logCtx.usage = usage;
+          if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
+        }
+      },
+    });
+    return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
+  }
+
   const upstream = new AbortController();
   const cleanupUpstreamAbort = linkAbortSignal(upstream, options.abortSignal);
   const connectMs = config.connectTimeoutMs ?? 200_000;
@@ -2977,13 +3035,15 @@ async function handleResponsesInner(
         // PRE-compaction history, and a later previous_response_id expansion would rehydrate the
         // giant stale chain Codex just replaced.
         ...(routedCompaction ? {} : {
-          onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) =>
+          onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+            if (activeAdapter.name === "kiro") rememberDeliveredFinalAnswer(parsed, response);
             rememberResponseState(
               parsed._rawBody,
               response,
               continuationStateForResponse(providerState),
               activeAdapter.name === "kiro" ? { force: true } : undefined,
-            ),
+            );
+          },
         }),
       },
     );
@@ -3043,6 +3103,7 @@ async function handleResponsesInner(
     });
     // See the streaming branch: compaction turns skip the continuation cache.
     if (!routedCompaction) {
+      if (activeAdapter.name === "kiro") rememberDeliveredFinalAnswer(parsed, json);
       rememberResponseState(
         parsed._rawBody,
         json,

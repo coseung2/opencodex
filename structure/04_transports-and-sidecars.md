@@ -494,7 +494,12 @@ custom-tool invocation are collapsed into a single Kiro result only when their o
 match exactly; normalized wire ids are never used as the ownership proof. Any non-result message is
 a grouping barrier. Builder ID uses Kiro's public service profile only as request-scoped transport
 metadata and remains on the CLI envelope; the fallback never becomes stored account identity or a
-region source.
+region source. A replay whose trailing content-bearing assistant message is an already delivered
+`final_answer` is a local terminal: Kiro receives no request, the completion tool is not advertised,
+and an outputless completed response closes the duplicate turn. The proxy also remembers the hash
+of final answers it actually delivered per normalized conversation id, so clients that omit the
+`phase` field cannot reopen the same finished task; any later user/tool-result message invalidates
+that trailing-terminal condition and reaches Kiro normally.
 
 ## Kiro reasoning round-trip (`redactedContent`)
 

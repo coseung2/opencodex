@@ -17,6 +17,7 @@ import { KiroThinkingParser } from "./kiro-thinking";
 import { isCompleteKiroToolInput, kiroTruncationErrorMessage } from "./kiro-truncation";
 import { createKiroToolNameRegistry, fallbackToolUseId, fingerprint, invocationId, isValidKiroConversationId, mapModelId, normalizeToolId, osTag, stableConversationId } from "./kiro-wire";
 import { namespacedToolName } from "../types";
+import { hasRecordedTrailingDeliveredFinalAnswer } from "../responses/turn-termination";
 import {
   isTranslatorBudgetExceededError,
   releaseTranslatedEvent,
@@ -44,6 +45,7 @@ import { convertKiroToolContext } from "./kiro-tools";
 import { neutralizeIdentity } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeFromNames } from "./tool-catalog-nudge";
 import {
+  KIRO_ANSWER_DELIVERED_MESSAGE,
   KIRO_COMPLETION_INSTRUCTIONS,
   KIRO_COMPLETION_RETRY_MESSAGE,
   KIRO_COMPLETION_TOOL_NAME,
@@ -342,8 +344,37 @@ function validateKiroCapabilities(parsed: OcxParsedRequest): void {
 }
 
 type KiroTurn =
-  | { kind: "user"; content: string; images: KiroImage[]; toolResults: KiroToolResult[] }
-  | { kind: "assistant"; content: string; toolUses: KiroToolUse[]; redactedReasoning?: string };
+  | {
+      kind: "user";
+      content: string;
+      images: KiroImage[];
+      toolResults: KiroToolResult[];
+      /** True only for the proxy-generated acknowledgement after a delivered final answer. */
+      answerDeliveredAck?: boolean;
+    }
+  | {
+      kind: "assistant";
+      content: string;
+      toolUses: KiroToolUse[];
+      redactedReasoning?: string;
+      /** A Responses final_answer already shown to the user; this turn must not be resumed. */
+      finalAnswer?: boolean;
+    };
+
+/** True only when no later user/tool-result work follows the delivered final answer. */
+function hasTrailingDeliveredFinalAnswer(messages: readonly OcxMessage[], parsed?: OcxParsedRequest): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant") return false;
+    const assistant = message as OcxAssistantMessage;
+    if ((assistant.content ?? []).some(part => part.type === "toolCall")) return false;
+    const hasText = (assistant.content ?? []).some(part => part.type === "text" && part.text.trim());
+    if (!hasText) continue;
+    return assistant.phase === "final_answer"
+      || (parsed !== undefined && hasRecordedTrailingDeliveredFinalAnswer(parsed, messages));
+  }
+  return false;
+}
 
 function appendTurnText(target: string, next: string): string {
   if (!next) return target;
@@ -452,8 +483,12 @@ export function buildKiroPayload(
   const registry = createKiroToolNameRegistry();
   const toolContext = convertKiroToolContext(parsed, registry);
   const ordinaryTools = toolContext.tools;
+  // A replay that already ends in a delivered final answer has nothing left to complete. Keeping
+  // the private completion tool enabled here reopens the closed task even if the trailing prompt is
+  // neutral, because the model is still instructed to produce another terminal answer.
+  const trailingDeliveredAnswer = hasTrailingDeliveredFinalAnswer(kiroPayloadMessages(parsed), parsed);
   const completionMode: KiroCompletionMode = forcedCompletionMode
-    ?? (ordinaryTools.length > 0 ? "required" : "disabled");
+    ?? (ordinaryTools.length > 0 && !trailingDeliveredAnswer ? "required" : "disabled");
   const kiroTools = completionMode === "disabled"
     ? ordinaryTools
     : [...ordinaryTools, kiroCompletionTool()];
@@ -487,15 +522,29 @@ export function buildKiroPayload(
       turns.push({ kind: "user", content, images: [...images], toolResults: [...toolResults] });
     }
   };
-  const pushAssistant = (content: string, toolUses: KiroToolUse[], redactedReasoning?: string): void => {
+  const pushAssistant = (
+    content: string,
+    toolUses: KiroToolUse[],
+    redactedReasoning?: string,
+    finalAnswer?: boolean,
+  ): void => {
     const last = turns.at(-1);
     if (last?.kind === "assistant") {
       last.content = appendTurnText(last.content, content);
       last.toolUses.push(...toolUses);
       // Merged turns keep the newest blob: it covers the reasoning up to the merged turn's end.
       if (redactedReasoning) last.redactedReasoning = redactedReasoning;
+      // Finality follows the LAST merged component. Commentary after a final answer means work
+      // continued and therefore reopens the turn legitimately.
+      last.finalAnswer = finalAnswer === true;
     } else {
-      turns.push({ kind: "assistant", content, toolUses: [...toolUses], ...(redactedReasoning ? { redactedReasoning } : {}) });
+      turns.push({
+        kind: "assistant",
+        content,
+        toolUses: [...toolUses],
+        ...(redactedReasoning ? { redactedReasoning } : {}),
+        ...(finalAnswer ? { finalAnswer: true } : {}),
+      });
     }
   };
 
@@ -572,7 +621,12 @@ export function buildKiroPayload(
         const hasReasoning = aMsg.content.some(part => part.type === "thinking" && part.thinking.trim());
         if (hasReasoning || aMsg.phase === "commentary") continue;
       }
-      pushAssistant(text, toolUses, aMsg.kiroRedactedReasoning);
+      pushAssistant(
+        text,
+        toolUses,
+        aMsg.kiroRedactedReasoning,
+        aMsg.phase === "final_answer" && toolUses.length === 0,
+      );
     } else if (msg.role === "toolResult") {
       const tr = msg as OcxToolResultMessage;
       if (tr.containsEncryptedContent) {
@@ -624,12 +678,15 @@ export function buildKiroPayload(
   if (turns.length === 0 || turns[0].kind === "assistant") {
     turns.unshift({ kind: "user", content: KIRO_CONTINUATION_MESSAGE, images: [], toolResults: [] });
   }
-  if (turns.at(-1)?.kind === "assistant") {
+  const trailingTurn = turns.at(-1);
+  if (trailingTurn?.kind === "assistant") {
+    const resumeText = completionMode === "text_fallback" ? KIRO_COMPLETION_RETRY_MESSAGE : KIRO_CONTINUATION_MESSAGE;
     turns.push({
       kind: "user",
-      content: completionMode === "text_fallback" ? KIRO_COMPLETION_RETRY_MESSAGE : KIRO_CONTINUATION_MESSAGE,
+      content: trailingTurn.finalAnswer ? KIRO_ANSWER_DELIVERED_MESSAGE : resumeText,
       images: [],
       toolResults: [],
+      ...(trailingTurn.finalAnswer ? { answerDeliveredAck: true } : {}),
     });
   }
 
@@ -645,6 +702,9 @@ export function buildKiroPayload(
 
   const currentTurn = turns.pop();
   if (!currentTurn || currentTurn.kind !== "user") throw new Error("Kiro request must end with a user turn");
+  // Keep internal acknowledgement state separate from its text: a real user may quote the same
+  // sentence and must still receive ordinary thinking/completion behavior.
+  const answerDeliveredAck = currentTurn.answerDeliveredAck === true;
   const toEntry = (turn: KiroTurn): KiroHistoryEntry => turn.kind === "assistant"
     ? {
         assistantResponseMessage: {
@@ -675,10 +735,14 @@ export function buildKiroPayload(
     currentUim.userInputMessageContext = { ...(currentUim.userInputMessageContext ?? {}), tools: kiroTools };
   }
   if (completionMode === "text_fallback") {
-    if (currentUim.content !== KIRO_COMPLETION_RETRY_MESSAGE) {
+    if (currentUim.content !== KIRO_COMPLETION_RETRY_MESSAGE && !answerDeliveredAck) {
       currentUim.content = appendTurnText(currentUim.content, KIRO_COMPLETION_RETRY_MESSAGE);
     }
-  } else if (!currentUim.userInputMessageContext?.toolResults && currentUim.content !== KIRO_CONTINUATION_MESSAGE) {
+  } else if (
+    !currentUim.userInputMessageContext?.toolResults
+    && currentUim.content !== KIRO_CONTINUATION_MESSAGE
+    && !answerDeliveredAck
+  ) {
     currentUim.content = injectKiroThinkingTags(currentUim.content, parsed);
   }
 
@@ -1937,6 +2001,15 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
 
   return {
     name: "kiro",
+    // Replayed history that already ends in the answer the user saw is not a new inference turn.
+    // This hook lets the server terminate locally before build/send and, critically, before the
+    // empty-completion guard can reinterpret an outputless terminal as something to retry.
+    localTerminal(parsed: OcxParsedRequest) {
+      return hasTrailingDeliveredFinalAnswer(kiroPayloadMessages(parsed), parsed)
+        ? { reason: "kiro_final_answer_already_delivered" }
+        : undefined;
+    },
+
     async buildRequest(parsed: OcxParsedRequest, incoming) {
       const built = await build(parsed);
       modelId = parsed.modelId;

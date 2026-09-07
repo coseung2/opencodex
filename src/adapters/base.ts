@@ -30,6 +30,13 @@ export interface ProviderAdapter {
    */
   buildRequest(parsed: OcxParsedRequest, incoming: IncomingMeta): AdapterRequest | Promise<AdapterRequest>;
 
+  /**
+   * Decide before request construction that the input already contains the completed answer and
+   * nothing should be sent upstream. The server turns this into an outputless completed response
+   * and deliberately bypasses empty-completion retry.
+   */
+  localTerminal?(parsed: OcxParsedRequest): AdapterLocalTerminal | undefined;
+
   fetchResponse?(request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response>;
 
   parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent>;
@@ -39,6 +46,11 @@ export interface ProviderAdapter {
     incoming: IncomingMeta,
     emit: (event: AdapterEvent) => void,
   ): Promise<void>;
+}
+
+export interface AdapterLocalTerminal {
+  /** Fixed diagnostic identifier; never derived from conversation content. */
+  reason: string;
 }
 
 export interface AdapterRequest {

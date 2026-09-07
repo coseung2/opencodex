@@ -164,7 +164,11 @@ and matched tool-use/result ids. Empty tool output receives a neutral non-empty 
 retry cannot recurse: an empty or reasoning-only retry is returned as retryable incomplete, while a
 real client tool call keeps the turn open. A completion-tool answer is always emitted as
 `final_answer`, even when it exactly repeats prior commentary, because phase correctness is more
-important than cosmetic de-duplication. Tool-free requests retain normal text completion behavior.
+important than cosmetic de-duplication. A replay whose trailing assistant message is a final answer
+that opencodex already delivered is terminated locally without another Kiro inference; this also
+works when the client drops the `phase` field, using a conversation-scoped fingerprint of the final
+answer opencodex emitted. A later user or tool-result message is new work and disables that local
+terminal. Tool-free requests retain normal text completion behavior.
 
 ### Reasoning effort
 

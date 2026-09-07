@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createKiroAdapter } from "../src/adapters/kiro";
-import { KIRO_TOOL_RESULT_CARRIER_MESSAGE } from "../src/adapters/kiro-constants";
+import { KIRO_ANSWER_DELIVERED_MESSAGE, KIRO_COMPLETION_TOOL_NAME, KIRO_CONTINUATION_MESSAGE, KIRO_TOOL_RESULT_CARRIER_MESSAGE } from "../src/adapters/kiro-constants";
 import { MAX_KIRO_TOOL_CATALOG_BYTES, MAX_KIRO_TOOL_COUNT } from "../src/adapters/kiro-tools";
 import { applyProviderConfigHints, buildCatalogEntries } from "../src/codex/catalog";
 import { getValidAccessTokenSnapshot } from "../src/oauth";
@@ -371,6 +371,56 @@ describe("kiro adapter — buildRequest", () => {
 
     expect(current.content.trim()).not.toBe("");
     expect(current.userInputMessageContext.toolResults[0].content[0].text.trim()).not.toBe("");
+  });
+
+  test("a delivered final answer is not told to continue or complete again", async () => {
+    const messages = [
+      { role: "user", content: "do it" },
+      { role: "assistant", phase: "final_answer", content: [{ type: "text", text: "Done: the answer." }] },
+    ];
+    const adapter = createKiroAdapter(provider);
+    expect(adapter.localTerminal?.(parsedWith(messages, [bashTool]))).toEqual({
+      reason: "kiro_final_answer_already_delivered",
+    });
+
+    const { body } = await adapter.buildRequest(parsedWith(messages, [bashTool]));
+    const current = JSON.parse(body).conversationState.currentMessage.userInputMessage;
+    const toolNames = (current.userInputMessageContext?.tools ?? [])
+      .map((tool: { toolSpecification?: { name?: string } }) => tool.toolSpecification?.name);
+
+    expect(current.content).toBe(KIRO_ANSWER_DELIVERED_MESSAGE);
+    expect(current.content).not.toContain(KIRO_CONTINUATION_MESSAGE);
+    expect(toolNames).toContain("bash");
+    expect(toolNames).not.toContain(KIRO_COMPLETION_TOOL_NAME);
+  });
+
+  test("unfinished assistant history still gets a continuation and completion contract", async () => {
+    const messages = [
+      { role: "user", content: "do it" },
+      { role: "assistant", content: [{ type: "text", text: "Still working." }] },
+    ];
+    const adapter = createKiroAdapter(provider);
+    expect(adapter.localTerminal?.(parsedWith(messages, [bashTool]))).toBeUndefined();
+    const { body } = await adapter.buildRequest(parsedWith(messages, [bashTool]));
+    const current = JSON.parse(body).conversationState.currentMessage.userInputMessage;
+    const toolNames = (current.userInputMessageContext?.tools ?? [])
+      .map((tool: { toolSpecification?: { name?: string } }) => tool.toolSpecification?.name);
+
+    expect(current.content).toContain(KIRO_CONTINUATION_MESSAGE);
+    expect(toolNames).toContain(KIRO_COMPLETION_TOOL_NAME);
+  });
+
+  test("a real user follow-up after a delivered final answer remains new work", async () => {
+    const messages = [
+      { role: "user", content: "do it" },
+      { role: "assistant", phase: "final_answer", content: [{ type: "text", text: "Done." }] },
+      { role: "user", content: "now check one more thing" },
+    ];
+    const adapter = createKiroAdapter(provider);
+    expect(adapter.localTerminal?.(parsedWith(messages, [bashTool]))).toBeUndefined();
+    const { body } = await adapter.buildRequest(parsedWith(messages, [bashTool]));
+    const current = JSON.parse(body).conversationState.currentMessage.userInputMessage;
+    expect(current.content).toContain("now check one more thing");
   });
 
   test("tool result images are attached to Kiro carrier user messages", async () => {
