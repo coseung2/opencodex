@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createKiroAdapter } from "../src/adapters/kiro";
-import { KIRO_ANSWER_DELIVERED_MESSAGE, KIRO_COMPLETION_TOOL_NAME, KIRO_CONTINUATION_MESSAGE, KIRO_TOOL_RESULT_CARRIER_MESSAGE } from "../src/adapters/kiro-constants";
+import { KIRO_ANSWER_DELIVERED_MESSAGE, KIRO_COMPLETION_RETRY_MESSAGE, KIRO_COMPLETION_TOOL_NAME, KIRO_CONTINUATION_MESSAGE, KIRO_TOOL_RESULT_CARRIER_MESSAGE } from "../src/adapters/kiro-constants";
 import { MAX_KIRO_TOOL_CATALOG_BYTES, MAX_KIRO_TOOL_COUNT } from "../src/adapters/kiro-tools";
 import { applyProviderConfigHints, buildCatalogEntries } from "../src/codex/catalog";
 import { getValidAccessTokenSnapshot } from "../src/oauth";
@@ -517,11 +517,19 @@ describe("kiro adapter — buildRequest", () => {
     expect(description).toContain("ends the turn");
     expect(description).toContain("returns no tool result");
     expect(description).toContain("no text or tool call may follow it");
+    expect(description).toContain("the question itself is the answer");
+    expect(completion.toolSpecification.inputSchema.json.properties.answer.description)
+      .toContain("blocking question");
     expect(firstUser.content).toContain("This completion tool is not an ordinary work tool.");
     expect(firstUser.content).toContain("exception to generic tool-result counting");
     expect(firstUser.content).toContain("ends the turn, returns no tool result, and no text or tool call may follow it");
     // Mid-task behavior remains unchanged; only the terminal boundary is specialized.
     expect(firstUser.content).toContain("ordinary assistant text is mid-task commentary");
+    expect(firstUser.content).toContain("that question is your final answer");
+    expect(firstUser.content).toContain("Do not write the question as ordinary text and then answer it yourself");
+    expect(KIRO_COMPLETION_RETRY_MESSAGE).toContain("decision, information, or a clarification");
+    expect(KIRO_COMPLETION_RETRY_MESSAGE).toContain("with that question as the answer");
+    expect(KIRO_COMPLETION_RETRY_MESSAGE).not.toContain("Do not ask the user");
   });
 
   test("namespaced (MCP) tools advertise + replay the full wire name", async () => {

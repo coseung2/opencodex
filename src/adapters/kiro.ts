@@ -454,14 +454,14 @@ function kiroCompletionTool(): Record<string, unknown> {
       // different: a valid call is the terminal itself. State that at the schema surface where the
       // model chooses tools, otherwise a finished model can keep working while waiting for a result
       // that will never exist.
-      description: "Terminal completion channel, not an ordinary work tool. When the task is fully complete and no more work or tool calls are needed, you must call this tool exactly once instead of providing the final answer as ordinary assistant text. Put the complete user-facing final answer in `answer`. The call is complete when issued: it ends the turn, returns no tool result, and no text or tool call may follow it.",
+      description: "Terminal completion channel, not an ordinary work tool. When the task is fully complete and no more work or tool calls are needed, you must call this tool exactly once instead of providing the final answer as ordinary assistant text. Call it the same way when you cannot continue until the user supplies a decision, information, or a clarification that only they can give: the question itself is the answer. Put the complete user-facing final answer in `answer`. The call is complete when issued: it ends the turn, returns no tool result, and no text or tool call may follow it.",
       inputSchema: {
         json: {
           type: "object",
           properties: {
             answer: {
               type: "string",
-              description: "The complete final answer to show the user.",
+              description: "The complete final answer to show the user, or the blocking question you need the user to answer before you can continue.",
             },
           },
           required: ["answer"],

@@ -505,7 +505,10 @@ Codex from rendering an answer-shaped commentary message followed by a near-dupl
 non-text events and commentary from failed/earlier attempts remain intact. The private completion
 schema and injected prose both state that its call is terminal, returns no tool result, and admits no
 following text/tool call; this prevents the generic catalog rule about waiting for tool results from
-turning a finished answer back into an open work loop.
+turning a finished answer back into an open work loop. The same terminal channel is explicitly
+allowed for a blocking question when only the user can supply the missing decision, information, or
+clarification, so Kiro does not write the question as commentary and then invent its own answer to
+keep the work loop moving.
 
 ## Kiro reasoning round-trip (`redactedContent`)
 

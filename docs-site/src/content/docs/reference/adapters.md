@@ -151,7 +151,10 @@ When an ordinary client tool exists, opencodex adds a private
 cannot terminate the turn. The adapter consumes the private call, emits its answer as final text,
 and never exposes the private tool to Codex or Claude Code. The private tool is explicitly described
 to Kiro as a terminal channel rather than an ordinary work tool: the call is complete when issued,
-returns no tool result, and no later text or tool call belongs to that inference. Because the stop reason only arrives at
+returns no tool result, and no later text or tool call belongs to that inference. If progress is
+blocked on a decision, information, or clarification only the user can supply, the blocking question
+uses that same terminal channel instead of being emitted as commentary and then answered by the
+model itself. Because the stop reason only arrives at
 the end of the stream, assistant text in a tool-enabled turn is held until either a real tool call
 starts or the stream ends, then releases it as commentary unless the private tool supplied the final
 answer. When the web-search sidecar is active, released
