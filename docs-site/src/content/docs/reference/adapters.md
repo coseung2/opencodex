@@ -163,8 +163,10 @@ transport, the generated conversation is checked for alternating roles, non-empt
 and matched tool-use/result ids. Empty tool output receives a neutral non-empty placeholder. The
 retry cannot recurse: an empty or reasoning-only retry is returned as retryable incomplete, while a
 real client tool call keeps the turn open. A completion-tool answer is always emitted as
-`final_answer`, even when it exactly repeats prior commentary, because phase correctness is more
-important than cosmetic de-duplication. A replay whose trailing assistant message is a final answer
+`final_answer`. If Kiro emitted answer-shaped prose earlier in the same inference and then uses the
+private completion tool, that staged prose is discarded and only the explicit terminal answer is
+shown; progress from earlier inferences or from a failed turn is not suppressed. A replay whose
+trailing assistant message is a final answer
 that opencodex already delivered is terminated locally without another Kiro inference; this also
 works when the client drops the `phase` field, using a conversation-scoped fingerprint of the final
 answer opencodex emitted. A later user or tool-result message is new work and disables that local

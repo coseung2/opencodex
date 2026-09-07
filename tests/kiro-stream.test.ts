@@ -268,8 +268,9 @@ describe("kiro adapter — parseStream", () => {
       ...completionFrames("Task complete."),
     ))));
 
+    // Same-inference prose is superseded by the explicit terminal answer; emitting both is the
+    // duplicate-answer loop users see as Kiro rehashing work it has already finished.
     expect(events.filter(event => event.type === "text_delta")).toEqual([
-      { type: "text_delta", text: "Checking the result.", phase: "commentary" },
       { type: "text_delta", text: "Task complete.", phase: "final_answer" },
     ]);
     expect(events.some(event => event.type === "tool_call_start" || event.type === "tool_call_delta")).toBe(false);
@@ -744,7 +745,6 @@ describe("kiro adapter — parseStream", () => {
     ))));
 
     expect(events.filter(event => event.type === "text_delta")).toEqual([
-      { type: "text_delta", text: "Checking the result.", phase: "commentary" },
       { type: "text_delta", text: "Task complete.", phase: "final_answer" },
     ]);
     expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });

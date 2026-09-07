@@ -1064,6 +1064,21 @@ async function* parseKiroAttemptEvents(
       try { yield event; } finally { retention.releaseEvent(event); }
     }
   };
+  // A valid private completion supersedes prose staged during the SAME inference. Kiro sometimes
+  // emits answer-shaped text and then calls the terminal tool; forwarding both makes Codex render
+  // two near-identical assistant messages. Drop only staged text on this proven completion path,
+  // preserve non-text events, and release every retained event either way.
+  const consumeSupersededByCompletion = async function* (
+    events: AdapterEvent[],
+  ): AsyncGenerator<AdapterEvent> {
+    for (const event of events.splice(0)) {
+      try {
+        if (event.type !== "text_delta") yield event;
+      } finally {
+        retention.releaseEvent(event);
+      }
+    }
+  };
 
   const providerState = (): { kiro: { conversationId: string } } | undefined =>
     returnedConversationId ? { kiro: { conversationId: returnedConversationId } } : undefined;
@@ -1468,12 +1483,13 @@ async function* parseKiroAttemptEvents(
     });
 
     if (mode === "required") {
-      yield* emitRetained(deferred.splice(0));
+      if (completionAnswer !== undefined) yield* consumeSupersededByCompletion(deferred);
+      else yield* emitRetained(deferred.splice(0));
     }
 
     if (mode === "text_fallback") {
       if (completionAnswer !== undefined) {
-        yield* emitRetained(fallbackEvents);
+        yield* consumeSupersededByCompletion(fallbackEvents);
         yield { type: "text_delta", text: completionAnswer, phase: "final_answer" };
         return {
           assistantText,

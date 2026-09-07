@@ -499,7 +499,10 @@ region source. A replay whose trailing content-bearing assistant message is an a
 and an outputless completed response closes the duplicate turn. The proxy also remembers the hash
 of final answers it actually delivered per normalized conversation id, so clients that omit the
 `phase` field cannot reopen the same finished task; any later user/tool-result message invalidates
-that trailing-terminal condition and reaches Kiro normally.
+that trailing-terminal condition and reaches Kiro normally. Within one inference, a valid private
+completion answer also supersedes any staged assistant prose from that same inference, preventing
+Codex from rendering an answer-shaped commentary message followed by a near-duplicate final answer;
+non-text events and commentary from failed/earlier attempts remain intact.
 
 ## Kiro reasoning round-trip (`redactedContent`)
 
