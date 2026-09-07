@@ -474,6 +474,13 @@ Grounded in the open-sourced official client (xai-org/grok-build); unit + eviden
   compatibility profile const for the Grok client version (`src/providers/xai-transport.ts`);
   `fetchWithHeaderTimeout` takes an executor so provider fetch wrappers stay inside the
   timeout race.
+- **Grok Build Responses surface:** managed Grok models use `api_backend="responses"` directly.
+  Bridge keepalives are SSE comments, never invented Responses event variants. Requests carrying
+  the managed `x-opencodex-grok: 1` marker get only the strict-client repairs Grok needs:
+  missing `output_text.annotations` becomes `[]`, and a sparse completed snapshot may be rebuilt
+  from validated, contiguous, bounded `output_item.done` items. Duplicate/gapped/mismatched or
+  reasoning-only evidence fails closed. Stateful rewrite buffers participate in the translator
+  budget and are disposed on EOF, error, eager-relay teardown, and client cancellation.
 
 ## Kiro permissive client hints
 

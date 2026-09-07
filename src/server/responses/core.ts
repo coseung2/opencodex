@@ -160,6 +160,7 @@ import {
   createResponsesItemIdPayloadRewrite,
   hasResponsesItemIdRepair,
 } from "../responses-item-id-repair";
+import { createGrokResponsesSparseTerminalPayloadRewrite } from "../grok-responses-snapshot-repair";
 import {
   createImageGenCallRestoreRewrite,
   imageGenToolCallAliases,
@@ -1953,14 +1954,19 @@ async function handleResponsesInner(
     if (isEventStream && upstreamResponse.body) {
       const repairConfig = route.provider.responsesItemIdRepair;
       const xaiCustomToolRewrite = createXaiCustomToolPayloadRewrite(xaiCustomToolNames);
+      const grokSparseTerminalRewrite = logCtx.surface === "grok"
+        ? createGrokResponsesSparseTerminalPayloadRewrite(translatorBudget)
+        : undefined;
       const needsClientRewrite = imageGenCallAliases.size > 0
         || hasResponsesItemIdRepair(repairConfig)
-        || xaiCustomToolRewrite !== undefined;
+        || xaiCustomToolRewrite !== undefined
+        || grokSparseTerminalRewrite !== undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass. Provider-shape restoration
       // runs before generic item-id repair so the client sees the correct custom-tool identity.
       const payloadRewrites = [
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         xaiCustomToolRewrite,
+        grokSparseTerminalRewrite,
         hasResponsesItemIdRepair(repairConfig)
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
           : undefined,

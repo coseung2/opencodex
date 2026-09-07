@@ -258,11 +258,11 @@ export function bridgeToResponsesSSE(
     terminalReported = true;
     try { options?.onTerminal?.(status); } catch { /* terminal metrics must not break the stream */ }
   };
-  // RC3 keep-alive: Codex's idle timer is timeout(idle_timeout, stream.next()) over an
-  // eventsource_stream; ANY received event re-arms it, while an unknown type is ignored
-  // (responses.rs `_ => Ok(None)`). Emit a parser-ignored `response.heartbeat` whenever the
-  // *wire* has been silent, even if invisible adapter heartbeats are still flowing (web-search
-  // buffering + raw-byte progress). Upstream activity only resets the stall watchdog.
+  // RC3 keep-alive: keep the event-stream transport active without inventing a Responses event
+  // variant. Strict clients such as Grok Build deserialize every typed event and reject unknown
+  // `response.heartbeat` frames, while an SSE comment is transport-only and still keeps the
+  // connection alive. Emit it whenever the *wire* has been silent, even if invisible adapter
+  // heartbeats are still flowing (web-search buffering + raw-byte progress).
   let upstreamActivity = false;
   let wireActivity = false;
   let beat: unknown;
@@ -328,7 +328,7 @@ export function bridgeToResponsesSSE(
         ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
       });
 
-      const heartbeatFrame = encoder.encode('event: response.heartbeat\ndata: {"type":"response.heartbeat"}\n\n');
+      const heartbeatFrame = encoder.encode(": opencodex heartbeat\n\n");
       let stallTicks = 0;
       const stallSec = resolveStallTimeoutSec(options?.stallTimeoutSec);
       const maxStallTicks = Math.ceil((stallSec * 1000) / heartbeatMs);

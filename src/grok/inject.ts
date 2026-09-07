@@ -313,7 +313,7 @@ export function buildGrokManagedBlock(
       `[model.${alias}]`,
       `model = ${tomlString(model.id)}`,
       `base_url = ${tomlString(baseUrl)}`,
-      'api_backend = "chat_completions"',
+      'api_backend = "responses"',
       'api_key = "opencodex-loopback"',
       `name = ${tomlString(model.name ?? `OCX ${model.id}`)}`,
       // Best-effort attribution tag for the usage dashboard. Upstream Grok sends

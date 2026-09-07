@@ -186,6 +186,50 @@ describe("xAI OAuth native Responses streaming", () => {
     }
   }, 10_000);
 
+  test("Grok-tagged Responses reconstruct a sparse terminal snapshot and required annotations", async () => {
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url !== RESPONSES_ENDPOINT) return originalFetch(input, init);
+      const frames = [
+        { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_sparse", status: "in_progress", role: "assistant", content: [] } },
+        { type: "response.content_part.added", output_index: 0, content_index: 0, item_id: "msg_sparse", part: { type: "output_text", text: "" } },
+        { type: "response.output_text.delta", output_index: 0, content_index: 0, item_id: "msg_sparse", delta: "answer" },
+        { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_sparse", status: "completed", role: "assistant", content: [{ type: "output_text", text: "answer" }] } },
+        { type: "response.completed", response: { id: "resp_sparse", status: "completed", model: "grok-4.6", output: [] } },
+      ];
+      return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n", {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const response = await originalFetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-opencodex-grok": "1" },
+        body: JSON.stringify({ model: "xai/grok-4.6", input: "hello", stream: true, store: false }),
+      });
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      const payloads = text.split(/\r?\n/)
+        .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+        .map(line => JSON.parse(line.slice(6)) as Record<string, unknown>);
+      const partAdded = payloads.find(frame => frame.type === "response.content_part.added")!;
+      expect(partAdded.part).toMatchObject({ type: "output_text", annotations: [] });
+      const completed = payloads.find(frame => frame.type === "response.completed")!;
+      const snapshot = completed.response as { output: Array<Record<string, unknown>> };
+      expect(snapshot.output).toHaveLength(1);
+      expect(snapshot.output[0]).toMatchObject({
+        type: "message",
+        id: "msg_sparse",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("a selected Grok tool whose schema cannot be represented fails locally as a 400", async () => {
     let upstreamCalls = 0;
     globalThis.fetch = (async (input, init) => {

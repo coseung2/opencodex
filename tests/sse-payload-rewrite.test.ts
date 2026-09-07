@@ -7,6 +7,7 @@ import { createResponsesItemIdPayloadRewrite } from "../src/server/responses-ite
 import {
   composeSsePayloadRewrites,
   relaySseWithPayloadRewrite,
+  type SsePayloadRewrite,
 } from "../src/server/sse-payload-rewrite";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 import { relaySseWithFailedTail } from "../src/server/relay";
@@ -101,6 +102,16 @@ describe("SSE payload rewrite composition", () => {
 
   test("compose with no rewrites is identity", () => {
     expect(composeSsePayloadRewrites()('{"a":1}')).toBe('{"a":1}');
+  });
+
+  test("relay disposes stateful payload rewrites exactly once at EOF", async () => {
+    let disposals = 0;
+    const rewrite = ((payload: string) => payload) as SsePayloadRewrite;
+    rewrite.dispose = () => { disposals += 1; };
+    const budget = createTestTranslatorBudget();
+    await readAll(relaySseWithPayloadRewrite(streamFromText("data: [DONE]\n\n"), rewrite, budget));
+    expect(disposals).toBe(1);
+    budget.dispose();
   });
 
   test("unterminated rewrite accumulation closes through a typed failed tail", async () => {

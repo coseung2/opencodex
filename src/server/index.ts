@@ -709,6 +709,7 @@ export function startServer(port?: number) {
           ...admissionFields(admission),
           inboundProtocol: "responses",
         };
+        if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
         const finalizeNativePassthroughLog = (
           status: number,
