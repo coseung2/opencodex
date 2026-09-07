@@ -519,6 +519,22 @@ describe("kiro oauth — import-first", () => {
     expect(cred.kiro?.profileArn).toBeUndefined();
   });
 
+  test.each([undefined, "not-an-arn"])("a session switch discards an email with missing or malformed profile %s", async (profileArn) => {
+    seedKiroCliDb({ access_token: "aoa-accountA", refresh_token: "rt-accountA" });
+    const runner = async (args: string[]) => {
+      if (args[0] === "whoami") {
+        removeKiroCliDb();
+        seedKiroCliDb({ access_token: "aoa-accountB", refresh_token: "rt-accountB" });
+        return { exitCode: 0, stdout: JSON.stringify({ email: "b@example.com", profileArn }) };
+      }
+      throw new Error("unexpected");
+    };
+    const cred = await loginKiro({}, { cliRunner: runner });
+    expect(cred.access).toBe("aoa-accountA");
+    expect(cred.email).toBeUndefined();
+    expect(cred.kiro?.profileArn).toBeUndefined();
+  });
+
   test("with no refresh token the access token is the revalidation key (#993)", async () => {
     // The implementation falls back to the access token when refresh is absent.
     // Without this case that branch is unexercised in either direction.

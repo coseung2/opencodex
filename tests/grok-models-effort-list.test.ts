@@ -108,17 +108,35 @@ describe("raw /v1/models list reasoning-effort advertisement (Grok Build discove
 
   test("a ladder without a configured default uses the canonical medium default", async () => {
     const config = effortConfig();
+    // Use an unregistered model: K3 now inherits its registry default per key.
+    config.providers.kimi!.models = ["custom-test"];
     config.providers.kimi!.modelDefaultReasoningEfforts = {};
-    config.providers.kimi!.modelReasoningEfforts = { k3: ["low", "medium", "high"] };
+    config.providers.kimi!.modelReasoningEfforts = { "custom-test": ["low", "medium", "high"] };
+    saveConfig(config);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/v1/models", server.url));
+      const body = await res.json() as { data: Array<Record<string, unknown>> };
+      const k3 = body.data.find(m => m.id === "kimi/custom-test");
+      expect(k3!.reasoning_effort).toBe("medium");
+      const options = k3!.reasoning_efforts as Array<Record<string, unknown>>;
+      expect(options[1]).toEqual({ value: "medium", label: "Medium Effort", default: true });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("a known model inherits its registry default when the per-model default is absent", async () => {
+    const config = effortConfig();
+    config.providers.kimi!.modelDefaultReasoningEfforts = {};
     saveConfig(config);
     const server = startServer(0);
     try {
       const res = await fetch(new URL("/v1/models", server.url));
       const body = await res.json() as { data: Array<Record<string, unknown>> };
       const k3 = body.data.find(m => m.id === "kimi/k3");
-      expect(k3!.reasoning_effort).toBe("medium");
-      const options = k3!.reasoning_efforts as Array<Record<string, unknown>>;
-      expect(options[1]).toEqual({ value: "medium", label: "Medium Effort", default: true });
+      expect(k3!.reasoning_effort).toBe("max");
+      expect(k3!.reasoning_efforts).toContainEqual({ value: "max", label: "Max Effort", default: true });
     } finally {
       await server.stop(true);
     }

@@ -284,7 +284,7 @@ async function oauthCredentialFromImported(
     // active Kiro CLI session between the SQLite read and whoami. Accept
     // whoami's identity only when the session token STILL matches the import —
     // refresh token, or access token when refresh is absent.
-    if (identity.profileArn !== undefined) {
+    if (identity.profileArn !== undefined || identity.email !== undefined) {
       const current = readKiroCliSqliteCredential();
       const importedKey = imported.refresh || imported.access;
       const currentKey = current ? current.refresh || current.access : "";

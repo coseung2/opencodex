@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
 import { createGrokResponsesSparseTerminalPayloadRewrite } from "../src/server/grok-responses-snapshot-repair";
+import { createXaiCustomToolPayloadRewrite } from "../src/responses/xai-custom-tool-compat";
+import { composeSsePayloadRewrites } from "../src/server/sse-payload-rewrite";
 
 function message(id: string, text: string, annotations?: unknown[]) {
   return {
@@ -43,6 +45,28 @@ describe("Grok sparse Responses terminal repair", () => {
       response: { status: "completed", output: [message("msg_authoritative", "authoritative", [])] },
     }));
     expect(JSON.parse(terminal).response.output[0].id).toBe("msg_authoritative");
+  });
+
+  test("reconstructs a custom-tool-only terminal after xAI function-call restoration", () => {
+    const rewrite = composeSsePayloadRewrites(
+      createXaiCustomToolPayloadRewrite(new Set(["apply_patch"]))!,
+      createGrokResponsesSparseTerminalPayloadRewrite(),
+    );
+    const call = { type: "function_call", id: "fc_patch", call_id: "call_patch", name: "apply_patch" };
+    rewrite(event("response.output_item.added", {
+      output_index: 0, item: { ...call, status: "in_progress", arguments: "" },
+    }));
+    rewrite(event("response.output_item.done", {
+      output_index: 0,
+      item: { ...call, status: "completed", arguments: JSON.stringify({ input: "patch content" }) },
+    }));
+    const terminal = JSON.parse(rewrite(event("response.completed", {
+      response: { status: "completed", output: [] },
+    })));
+    expect(terminal.response.output).toEqual([{
+      type: "custom_tool_call", id: "ctc_patch", call_id: "call_patch", name: "apply_patch",
+      status: "completed", input: "patch content",
+    }]);
   });
 
   test("fails closed on gaps, duplicates, and open/done identity mismatches", () => {

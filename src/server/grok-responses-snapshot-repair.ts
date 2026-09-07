@@ -153,7 +153,8 @@ function trustedCompletedItem(item: Record<string, unknown>): { visibleToGrok: b
     if (typeof item.call_id !== "string" || item.call_id.trim().length === 0
       || typeof item.name !== "string" || item.name.trim().length === 0
       || typeof item.input !== "string") return null;
-    return { visibleToGrok: false };
+    // xAI restoration runs first: a client-executed function may already be a custom call.
+    return { visibleToGrok: true };
   }
 
   if (item.type === "web_search_call") {
