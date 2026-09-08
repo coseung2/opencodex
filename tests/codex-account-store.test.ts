@@ -153,6 +153,7 @@ describe("codex-account-store CRUD", () => {
       throw new Error("expected getValidCodexToken to reject");
     } catch (err) {
       expect(err).toBeInstanceOf(TokenRefreshError);
+      expect((err as InstanceType<typeof TokenRefreshError>).reason).toBe("revoked");
       const message = (err as Error).message;
       expect(message).toContain("Codex token refresh failed");
       expect(message).not.toContain("sensitive-local-alias");
@@ -161,6 +162,168 @@ describe("codex-account-store CRUD", () => {
       expect(message).not.toContain("sensitive-account-id");
       expect(message).not.toContain("invalid_grant");
       expect(message).not.toContain("revoked for");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("forceRefreshCodexToken refreshes a still-future credential after an upstream 401", async () => {
+    const {
+      forceRefreshCodexToken,
+      getCodexAccountCredential,
+      readCodexAccountRecord,
+      saveCodexAccountCredential,
+    } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("future-401", {
+      accessToken: "stale-access",
+      refreshToken: "still-valid-refresh",
+      expiresAt: Date.now() + 24 * 3600_000,
+      chatgptAccountId: "account",
+    });
+    const observed = readCodexAccountRecord("future-401")!;
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return Response.json({ access_token: "fresh-access", refresh_token: "rotated-refresh", expires_in: 3600 });
+    }) as typeof fetch;
+
+    try {
+      const result = await forceRefreshCodexToken("future-401", {
+        generation: observed.generation,
+        accessToken: observed.credential!.accessToken,
+      });
+      expect(calls).toBe(1);
+      expect(result.accessToken).toBe("fresh-access");
+      expect(result.generation).toBe(observed.generation + 1);
+      expect(getCodexAccountCredential("future-401")).toMatchObject({
+        accessToken: "fresh-access",
+        refreshToken: "rotated-refresh",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("forceRefreshCodexToken reuses a replacement generation without another refresh", async () => {
+    const {
+      forceRefreshCodexToken,
+      readCodexAccountRecord,
+      saveCodexAccountCredential,
+    } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("future-replaced", {
+      accessToken: "observed-access",
+      refreshToken: "observed-refresh",
+      expiresAt: Date.now() + 24 * 3600_000,
+      chatgptAccountId: "account",
+    });
+    const observed = readCodexAccountRecord("future-replaced")!;
+    saveCodexAccountCredential("future-replaced", {
+      accessToken: "replacement-access",
+      refreshToken: "replacement-refresh",
+      expiresAt: Date.now() + 24 * 3600_000,
+      chatgptAccountId: "account",
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("replacement generation should be reused");
+    }) as typeof fetch;
+
+    try {
+      await expect(forceRefreshCodexToken("future-replaced", {
+        generation: observed.generation,
+        accessToken: observed.credential!.accessToken,
+      })).resolves.toMatchObject({ accessToken: "replacement-access", generation: observed.generation + 1 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("forced refresh does not reuse a duplicate slot carrying the rejected bearer", async () => {
+    const { forceRefreshCodexToken, readCodexAccountRecord, saveCodexAccountCredential } = await import("../src/codex/account-store");
+    const future = Date.now() + 24 * 3600_000;
+    saveCodexAccountCredential("duplicate-a", {
+      accessToken: "rejected-access",
+      refreshToken: "shared-refresh",
+      expiresAt: future,
+      chatgptAccountId: "account",
+    });
+    saveCodexAccountCredential("duplicate-b", {
+      accessToken: "rejected-access",
+      refreshToken: "shared-refresh",
+      expiresAt: future,
+      chatgptAccountId: "account",
+    });
+    const observed = readCodexAccountRecord("duplicate-a")!;
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return Response.json({ access_token: "recovered-access", expires_in: 3600 });
+    }) as typeof fetch;
+    try {
+      await expect(forceRefreshCodexToken("duplicate-a", {
+        generation: observed.generation,
+        accessToken: observed.credential!.accessToken,
+      })).resolves.toMatchObject({ accessToken: "recovered-access" });
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a terminal refresh response from an old generation cannot quarantine a replacement", async () => {
+    const {
+      CodexCredentialGenerationConflictError,
+      getValidCodexToken,
+      getCodexAccountCredential,
+      saveCodexAccountCredential,
+    } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("terminal-race", {
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      expiresAt: 0,
+      chatgptAccountId: "account",
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      saveCodexAccountCredential("terminal-race", {
+        accessToken: "replacement-access",
+        refreshToken: "replacement-refresh",
+        expiresAt: Date.now() + 24 * 3600_000,
+        chatgptAccountId: "account",
+      });
+      return Response.json({ error: "invalid_grant" }, { status: 400 });
+    }) as typeof fetch;
+    try {
+      await expect(getValidCodexToken("terminal-race")).rejects.toBeInstanceOf(CodexCredentialGenerationConflictError);
+      expect(getCodexAccountCredential("terminal-race")).toMatchObject({ accessToken: "replacement-access" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("transient token endpoint failures stay unknown and do not ask for reauthentication", async () => {
+    const { getValidCodexToken, saveCodexAccountCredential, TokenRefreshError } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("transient-endpoint", {
+      accessToken: "old-access",
+      refreshToken: "refresh",
+      expiresAt: 0,
+      chatgptAccountId: "account",
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ error: "invalid_grant" }, { status: 503 })) as typeof fetch;
+    try {
+      await expect(getValidCodexToken("transient-endpoint")).rejects.toMatchObject({
+        reason: "unknown",
+        httpStatus: 503,
+      });
+      try {
+        await getValidCodexToken("transient-endpoint");
+      } catch (err) {
+        expect(err).toBeInstanceOf(TokenRefreshError);
+        expect((err as Error).message).toContain("retry later");
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -42,7 +42,9 @@ import {
 import { CODEX_UNKNOWN_USAGE_SCORE, isCodexQuotaExhausted, setAccountQuotaFromParsed } from "../src/codex/quota";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
 import { routeModel } from "../src/router";
-import { consumeForInspection } from "../src/server/relay";
+import { consumeForInspection, createSseInspector } from "../src/server/relay";
+import { codexForwardTerminalOutcomeRecorder } from "../src/server/responses";
+import { httpStatusForRequestLogTerminal, type RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-codex-routing-test");
@@ -191,6 +193,24 @@ describe("codex routing", () => {
     updateAccountQuota("b", 20);
     expect(resolveCodexAccountForThread("known-100-weekly", config)).toBe("b");
   });
+
+  test.each(["fiveHourPercent", "weeklyPercent", "monthlyPercent"] as const)(
+    "a depleted %s window rotates an existing thread and skips a depleted alternate",
+    (window) => {
+      saveTestCredential("c");
+      const config = makeConfig({
+        autoSwitchThreshold: 100,
+        codexAccounts: ["a", "b", "c"].map(id => ({ id, email: `${id}@test`, plan: "team", isMain: false })),
+      });
+      setAccountQuotaFromParsed("a", { fiveHourPercent: 59, weeklyPercent: 23, monthlyPercent: 10 });
+      setAccountQuotaFromParsed("b", { fiveHourPercent: 0, weeklyPercent: 100, monthlyPercent: 10 });
+      setAccountQuotaFromParsed("c", { fiveHourPercent: 41, weeklyPercent: 23, monthlyPercent: 10 });
+      expect(resolveCodexAccountForThread("multi-window", config)).toBe("a");
+      setAccountQuotaFromParsed("a", { fiveHourPercent: 59, weeklyPercent: 23, monthlyPercent: 10, [window]: 100 });
+      expect(resolveCodexAccountForThread("multi-window", config)).toBe("c");
+      expect(resolveCodexAccountForThread("new-multi-window", config)).toBe("c");
+    },
+  );
 
   test("known 100% Go monthly usage follows threshold switching", () => {
     const config = makeConfig({
@@ -810,6 +830,52 @@ describe("codex routing", () => {
     recordCodexUpstreamOutcome(config, "a", 503);
     expect(resolveCodexAccountForThread("next", config)).toBe("a");
   });
+
+  test.each([
+    { message: "The usage limit has been reached" },
+    { code: "usage_limit_reached" },
+    { type: "rate_limit_error", code: "rate_limit_exceeded", message: "Rate limit exceeded" },
+  ])("incomplete quota error %j cools the account and moves the next request", (error) => {
+    const config = makeConfig({ autoSwitchThreshold: 100 });
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    expect(resolveCodexAccountForThread("quota-incomplete", config)).toBe("a");
+    const logCtx: RequestLogContext = { model: "gpt-test", provider: "openai" };
+    const recorder = codexForwardTerminalOutcomeRecorder(config, {
+      kind: "pool", accountId: "a", accessToken: "test", chatgptAccountId: "test", writerGeneration: 0, generation: 0,
+    }, { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+    undefined, logCtx, "quota-incomplete");
+    expect(recorder).toBeDefined();
+    const inspector = createSseInspector({ logCtx, onTerminal: recorder });
+    inspector.feed(new TextEncoder().encode(`data: ${JSON.stringify({
+      type: "response.incomplete", response: { status: "incomplete", error },
+    })}\n\n`));
+    expect(httpStatusForRequestLogTerminal("incomplete", logCtx)).toBe(429);
+    expect(isCodexAccountInCooldown("a")).toBe(true);
+    expect(resolveCodexAccountForThread("quota-incomplete", config)).toBe("b");
+  });
+
+  test.each(["max_output_tokens", "content_filter", "adapter_eof"])(
+    "an incomplete %s without an error does not cool or rotate the account",
+    (reason) => {
+      const config = makeConfig();
+      updateAccountQuota("a", 10);
+      updateAccountQuota("b", 20);
+      expect(resolveCodexAccountForThread("normal-incomplete", config)).toBe("a");
+      const logCtx: RequestLogContext = { model: "gpt-test", provider: "openai" };
+      const recorder = codexForwardTerminalOutcomeRecorder(config, {
+        kind: "pool", accountId: "a", accessToken: "test", chatgptAccountId: "test", writerGeneration: 0, generation: 0,
+      }, { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+      undefined, logCtx, "normal-incomplete");
+      const inspector = createSseInspector({ logCtx, onTerminal: recorder });
+      inspector.feed(new TextEncoder().encode(`data: ${JSON.stringify({
+        type: "response.incomplete", response: { status: "incomplete", incomplete_details: { reason }, error: null },
+      })}\n\n`));
+      expect(isCodexAccountInCooldown("a")).toBe(false);
+      expect(resolveCodexAccountForThread("normal-incomplete", config)).toBe("a");
+      expect(httpStatusForRequestLogTerminal("incomplete", logCtx)).toBe(reason === "max_output_tokens" ? 200 : 502);
+    },
+  );
 
   test("inspection client cancellation records no terminal outcome or account penalty", async () => {
     const config = makeConfig();

@@ -720,7 +720,7 @@ function captureTerminalHttpStatus(
   },
 ): void {
   if (logCtx.terminalHttpStatus !== undefined) return;
-  if (json.type !== "response.failed") return;
+  if (json.type !== "response.failed" && json.type !== "response.incomplete") return;
   const error = json.response?.error;
   if (!error || typeof error !== "object") return;
   logCtx.terminalHttpStatus = httpStatusFromTerminalError({
@@ -759,11 +759,11 @@ export function httpStatusForRequestLogTerminal(
    * - 장점, 단점 및 영향: Logs stop reporting false upstream errors while retaining the
    *   incomplete terminal detail; native callers without a structured reason keep old behavior.
    */
+  if ((status === "failed" || status === "incomplete") && logCtx?.terminalHttpStatus !== undefined) {
+    return logCtx.terminalHttpStatus;
+  }
   if (status === "incomplete" && logCtx?.terminalIncompleteReason === "max_output_tokens") {
     return 200;
-  }
-  if (status === "failed" && logCtx?.terminalHttpStatus !== undefined) {
-    return logCtx.terminalHttpStatus;
   }
   return httpStatusForTerminalStatus(status);
 }

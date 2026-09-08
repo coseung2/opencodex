@@ -297,10 +297,18 @@ const CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 export class TokenRefreshError extends Error {
   reason: "expired" | "revoked" | "unknown";
-  constructor(reason: "expired" | "revoked" | "unknown", message: string) {
+  /** HTTP status returned by the token endpoint, when a response was received. */
+  readonly httpStatus?: number;
+
+  constructor(
+    reason: "expired" | "revoked" | "unknown",
+    message: string,
+    details: { httpStatus?: number } = {},
+  ) {
     super(message);
     this.name = "TokenRefreshError";
     this.reason = reason;
+    this.httpStatus = details.httpStatus;
   }
 }
 
@@ -350,6 +358,7 @@ function withCredentialMutationLockSync<T>(fn: () => T): T {
 
 type CodexTokenResult = { accessToken: string; chatgptAccountId: string; generation: number };
 type CodexRefreshResult = CodexTokenResult & { credential?: CodexAccountCredentials };
+export type CodexTokenObservation = Pick<CodexTokenResult, "accessToken" | "generation">;
 const MAX_CODEX_REFRESH_FLIGHTS = 32;
 const CODEX_REFRESH_FLIGHT_STALE_MS = 120_000;
 interface RefreshFlight {
@@ -438,25 +447,64 @@ async function withCodexRefreshFileLock<T>(lockKey: string, signal: AbortSignal,
 function findFreshCredentialForGrant(
   refreshGrantFingerprint: string,
   excludeId: string,
+  excludeAccessToken?: string,
 ): CodexAccountCredentials | null {
   const now = Date.now();
   const records = loadCodexAccountRecordStore();
   for (const [candidateId, candidate] of Object.entries(records)) {
     if (candidateId === excludeId || candidate.deletedAt != null || !candidate.credential) continue;
     if (recordGrantFingerprint(candidate) !== refreshGrantFingerprint) continue;
+    // A forced refresh follows an upstream 401. Do not treat a duplicate slot carrying the same
+    // rejected bearer as fresh; only a different access token can satisfy that recovery path.
+    if (excludeAccessToken !== undefined && candidate.credential.accessToken === excludeAccessToken) continue;
     if (candidate.credential.expiresAt > now + REFRESH_SKEW_MS) return candidate.credential;
   }
   return null;
 }
 
-export async function getValidCodexToken(id: string): Promise<CodexTokenResult> {
+function assertRefreshGenerationCurrent(
+  id: string,
+  generation: number,
+  refreshGrantFingerprint: string,
+): void {
+  const current = readCodexAccountRecord(id);
+  if (
+    !current
+    || current.deletedAt != null
+    || !current.credential
+    || current.generation !== generation
+    || recordGrantFingerprint(current) !== refreshGrantFingerprint
+  ) {
+    throw new CodexCredentialGenerationConflictError();
+  }
+}
+
+/**
+ * Return a usable Codex bearer, refreshing an expired credential when needed.
+ *
+ * `forceRefresh` is deliberately kept internal. Callers that observed an upstream 401 should use
+ * {@link forceRefreshCodexToken}, which binds the refresh to the exact credential generation and
+ * access token that produced the 401.
+ */
+async function getValidCodexTokenInternal(
+  id: string,
+  forceRefresh = false,
+  observed?: CodexTokenObservation,
+): Promise<CodexTokenResult> {
   const record = readCodexAccountRecord(id);
   const cred = record?.deletedAt == null ? record?.credential : undefined;
   if (!record || !cred) throw new Error("Codex account credential is unavailable; reauthenticate the account.");
   const refreshGrantFingerprint = recordGrantFingerprint(record);
   if (!refreshGrantFingerprint) throw new Error("Codex account credential is unavailable; reauthenticate the account.");
 
-  if (cred.expiresAt > Date.now() + REFRESH_SKEW_MS) {
+  // A forced refresh is only valid for the exact token the caller sent upstream. If another
+  // request has already replaced that generation, let the normal path reuse the newer credential
+  // (or refresh it if it is also expired) instead of rotating a stale grant.
+  if (observed && (record.generation !== observed.generation || cred.accessToken !== observed.accessToken)) {
+    return getValidCodexTokenInternal(id);
+  }
+
+  if (!forceRefresh && cred.expiresAt > Date.now() + REFRESH_SKEW_MS) {
     return { accessToken: cred.accessToken, chatgptAccountId: cred.chatgptAccountId, generation: record.generation };
   }
 
@@ -494,12 +542,13 @@ export async function getValidCodexToken(id: string): Promise<CodexTokenResult> 
   const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]);
   let flight!: RefreshFlight;
   const refreshPromise = withCodexRefreshFileLock(refreshGrantFingerprint, signal, async (): Promise<CodexRefreshResult> => {
-    const current = readCodexAccountRecord(id);
     const lockedRecord = readCodexAccountRecord(id);
     const lockedCred = lockedRecord?.deletedAt == null ? lockedRecord?.credential : undefined;
     if (!lockedRecord || !lockedCred) throw new CodexCredentialGenerationConflictError();
     const startGeneration = lockedRecord.generation;
     const lockedRefreshGrantFingerprint = recordGrantFingerprint(lockedRecord);
+    const lockMatchesObservation = !observed
+      || (lockedRecord.generation === observed.generation && lockedCred.accessToken === observed.accessToken);
     if (lockedRefreshGrantFingerprint !== refreshGrantFingerprint) {
       if (lockedCred.expiresAt > Date.now() + REFRESH_SKEW_MS) {
         return {
@@ -511,7 +560,7 @@ export async function getValidCodexToken(id: string): Promise<CodexTokenResult> 
       }
       throw new CodexCredentialGenerationConflictError();
     }
-    if (lockedCred.expiresAt > Date.now() + REFRESH_SKEW_MS) {
+    if (lockedCred.expiresAt > Date.now() + REFRESH_SKEW_MS && (!forceRefresh || !lockMatchesObservation)) {
       return {
         accessToken: lockedCred.accessToken,
         chatgptAccountId: lockedCred.chatgptAccountId,
@@ -519,7 +568,11 @@ export async function getValidCodexToken(id: string): Promise<CodexTokenResult> 
         credential: lockedCred,
       };
     }
-    const sameGrantFreshCredential = findFreshCredentialForGrant(refreshGrantFingerprint, id);
+    const sameGrantFreshCredential = findFreshCredentialForGrant(
+      refreshGrantFingerprint,
+      id,
+      forceRefresh ? observed?.accessToken : undefined,
+    );
     if (sameGrantFreshCredential) {
       if (!saveCodexAccountCredentialIfGeneration(id, startGeneration, sameGrantFreshCredential)) {
         throw new CodexCredentialGenerationConflictError();
@@ -531,34 +584,77 @@ export async function getValidCodexToken(id: string): Promise<CodexTokenResult> 
         credential: sameGrantFreshCredential,
       };
     }
-    const res = await fetch(CHATGPT_TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: CHATGPT_CLIENT_ID,
-        refresh_token: lockedCred.refreshToken,
-      }).toString(),
-      signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(CHATGPT_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: CHATGPT_CLIENT_ID,
+          refresh_token: lockedCred.refreshToken,
+        }).toString(),
+        signal,
+      });
+    } catch (error) {
+      // Preserve our own stale-flight signal so concurrent callers can distinguish a replaced
+      // owner. Network/timeout failures are transient and must never quarantine the account.
+      if (error instanceof CodexCredentialRefreshStaleError) throw error;
+      throw new TokenRefreshError("unknown", "Codex token refresh request failed; retry later.");
+    }
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      let errDesc: string;
+      let oauthError: string | undefined;
+      let errDescription: string | undefined;
       try {
         const parsed = JSON.parse(errText) as { error?: string; error_description?: string };
-        errDesc = [parsed.error, parsed.error_description].filter(Boolean).join(": ") || `HTTP ${res.status}`;
-      } catch { errDesc = `HTTP ${res.status}`; }
-      const reason = errDesc.includes("invalidated") || errDesc.includes("revoked") ? "revoked" as const
-        : errDesc.includes("expired") ? "expired" as const
-        : "unknown" as const;
-      throw new TokenRefreshError(reason, `Codex token refresh failed (${reason}); reauthenticate the account.`);
+        oauthError = typeof parsed.error === "string" ? parsed.error.trim().toLowerCase() : undefined;
+        errDescription = typeof parsed.error_description === "string" ? parsed.error_description.trim().toLowerCase() : undefined;
+      } catch { /* Non-JSON responses are classified from their status only. */ }
+      const terminalStatus = res.status === 400 || res.status === 401;
+      const detail = `${oauthError ?? ""} ${errDescription ?? ""}`;
+      const expired = terminalStatus && (oauthError === "expired_token"
+        || /(?:refresh[_ ]?token|access[_ ]?token).*(?:expired|invalidated)/i.test(detail)
+        || /(?:expired|invalidated).*(?:refresh[_ ]?token|access[_ ]?token)/i.test(detail));
+      const revoked = terminalStatus && (oauthError === "invalid_grant"
+        || new Set(["revoked", "revoked_token", "refresh_token_revoked", "refresh_token_reused", "invalid_refresh_token", "token_revoked"]).has(oauthError ?? "")
+        || /(?:refresh[_ ]?token|grant).*(?:revoked|invalidated|reused)/i.test(detail)
+        || /(?:revoked|invalidated|reused).*(?:refresh[_ ]?token|grant)/i.test(detail));
+      const reason = expired ? "expired" as const : revoked ? "revoked" as const : "unknown" as const;
+      // A re-login can replace the account while the token endpoint body is being read. Never
+      // classify an old grant's response as terminal for the replacement generation.
+      assertRefreshGenerationCurrent(id, startGeneration, refreshGrantFingerprint);
+      throw new TokenRefreshError(
+        reason,
+        reason === "unknown"
+          ? "Codex token refresh failed temporarily; retry later."
+          : `Codex token refresh failed (${reason}); reauthenticate the account.`,
+        { httpStatus: res.status },
+      );
     }
-    const data = (await res.json()) as { access_token: string; refresh_token?: string; expires_in: number };
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      throw new TokenRefreshError("unknown", "Codex token refresh response was invalid; retry later.", { httpStatus: res.status });
+    }
+    const payload = data && typeof data === "object" ? data as Record<string, unknown> : {};
+    if (
+      typeof payload.access_token !== "string"
+      || payload.access_token.length === 0
+      || typeof payload.expires_in !== "number"
+      || !Number.isFinite(payload.expires_in)
+      || payload.expires_in <= 0
+    ) {
+      throw new TokenRefreshError("unknown", "Codex token refresh response was invalid; retry later.", { httpStatus: res.status });
+    }
 
     const updated: CodexAccountCredentials = {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token ?? lockedCred.refreshToken,
-      expiresAt: Date.now() + data.expires_in * 1000,
+      accessToken: payload.access_token,
+      refreshToken: typeof payload.refresh_token === "string" && payload.refresh_token.length > 0
+        ? payload.refresh_token
+        : lockedCred.refreshToken,
+      expiresAt: Date.now() + payload.expires_in * 1000,
       chatgptAccountId: lockedCred.chatgptAccountId,
     };
     if (!saveCodexAccountCredentialIfGeneration(id, startGeneration, updated)) {
@@ -577,4 +673,18 @@ export async function getValidCodexToken(id: string): Promise<CodexTokenResult> 
     chatgptAccountId: result.chatgptAccountId,
     generation: result.generation,
   };
+}
+
+export function getValidCodexToken(id: string): Promise<CodexTokenResult> {
+  return getValidCodexTokenInternal(id);
+}
+
+/**
+ * Force one refresh after an upstream 401, even when the stored expiry is still in the future.
+ * The observation prevents a stale request from rotating a credential that another request has
+ * already replaced. Existing in-process and cross-process grant locks still provide single-flight
+ * behavior and generation-guarded persistence.
+ */
+export function forceRefreshCodexToken(id: string, observed: CodexTokenObservation): Promise<CodexTokenResult> {
+  return getValidCodexTokenInternal(id, true, observed);
 }

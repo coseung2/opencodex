@@ -3,6 +3,7 @@ import { withCodexAccountLogLabel } from "./account-label";
 import {
   getCodexAccountCredential,
   getValidCodexToken,
+  forceRefreshCodexToken,
   isCodexAccountGenerationLive,
   clearCodexAccountQuotaPauseOwnership,
   markCodexAccountQuotaValidationPending,
@@ -740,17 +741,41 @@ async function fetchFreshPoolAccountQuota(
   const writerGeneration = captureConfigGeneration();
   let requestCredentialGeneration = readCodexAccountRecord(accountId)?.generation;
   try {
-    const { accessToken, chatgptAccountId, generation } = await getValidCodexToken(accountId);
+    let { accessToken, chatgptAccountId, generation } = await getValidCodexToken(accountId);
     requestCredentialGeneration = generation;
     onCredentialGeneration?.(generation);
-    const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+    const fetchUsage = () => fetch("https://chatgpt.com/backend-api/wham/usage", {
       headers: { Authorization: `Bearer ${accessToken}`, "ChatGPT-Account-Id": chatgptAccountId },
       signal: AbortSignal.timeout(8000),
     });
+    let resp = await fetchUsage();
+    let retriedAfter401 = false;
+    if (resp.status === 401) {
+      // WHAM can reject a still-future access token after server-side invalidation. Refresh once
+      // against the exact generation/token used for this probe, then replay the quota request.
+      // A second 401 is authoritative; a refresh endpoint failure remains transient unless the
+      // grant itself was classified as revoked/expired below.
+      retriedAfter401 = true;
+      try {
+        await resp.body?.cancel();
+      } catch { /* Best effort: the replay does not depend on consuming the first body. */ }
+      // If a login/replacement won the race while WHAM was in flight, this response belongs to the
+      // old generation. Leave the replacement untouched and let the next probe use its credential.
+      if (!isCodexAccountGenerationLive(accountId, generation)) {
+        return { quota: getAccountQuota(accountId) ?? existing ?? null, needsReauth: false, credentialGeneration: generation };
+      }
+      const refreshed = await forceRefreshCodexToken(accountId, { generation, accessToken });
+      accessToken = refreshed.accessToken;
+      chatgptAccountId = refreshed.chatgptAccountId;
+      generation = refreshed.generation;
+      requestCredentialGeneration = generation;
+      onCredentialGeneration?.(generation);
+      resp = await fetchUsage();
+    }
     if (!resp.ok) {
       return {
         quota: existing ?? null,
-        needsReauth: resp.status === 401,
+        needsReauth: retriedAfter401 && resp.status === 401,
         credentialGeneration: generation,
       };
     }
@@ -794,7 +819,11 @@ async function fetchFreshPoolAccountQuota(
       };
     }
     if (e instanceof TokenRefreshError) {
-      return { quota: existing ?? null, needsReauth: true, credentialGeneration: requestCredentialGeneration };
+      return {
+        quota: existing ?? null,
+        needsReauth: e.reason === "revoked" || e.reason === "expired",
+        credentialGeneration: requestCredentialGeneration,
+      };
     }
     return { quota: existing ?? null, needsReauth: false, credentialGeneration: requestCredentialGeneration };
   }

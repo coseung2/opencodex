@@ -3,6 +3,7 @@ import {
   CodexCredentialRefreshLockTimeoutError,
   CodexCredentialRefreshBusyError,
   CodexCredentialRefreshStaleError,
+  TokenRefreshError,
   getValidCodexToken,
   isCodexAccountGenerationLive,
 } from "./account-store";
@@ -200,6 +201,11 @@ export class CodexThreadAffinityExpiredError extends Error {
 }
 
 export function shouldMarkAccountNeedsReauthForCodexAuthFailure(cause: unknown): boolean {
+  // Token endpoint failures are split into terminal grant invalidation and transient transport /
+  // service errors by account-store. Only the former proves that a new login is required.
+  if (cause instanceof TokenRefreshError) {
+    return cause.reason === "revoked" || cause.reason === "expired";
+  }
   return !(cause instanceof CodexCredentialGenerationConflictError)
     && !(cause instanceof CodexCredentialRefreshLockTimeoutError)
     && !(cause instanceof CodexCredentialRefreshBusyError)

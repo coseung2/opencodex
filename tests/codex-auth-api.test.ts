@@ -886,6 +886,89 @@ describe("codex-auth API", () => {
     }
   });
 
+  test("pool quota WHAM 401 refreshes once and replays with the replacement token", async () => {
+    const config = makeConfig();
+    seedPoolAccount(config, {
+      id: "pool-wham-replay",
+      email: "pool-wham-replay@example.com",
+      accessToken: "stale-access",
+      refreshToken: "refresh-grant",
+      chatgptAccountId: "account-wham-replay",
+    });
+
+    const originalFetch = globalThis.fetch;
+    let whamCalls = 0;
+    let tokenCalls = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === "https://auth.openai.com/oauth/token") {
+        tokenCalls += 1;
+        return Response.json({ access_token: "fresh-access", expires_in: 3600 });
+      }
+      expect(url).toBe("https://chatgpt.com/backend-api/wham/usage");
+      whamCalls += 1;
+      const headers = new Headers(init?.headers);
+      if (whamCalls === 1) {
+        expect(headers.get("Authorization")).toBe("Bearer stale-access");
+        return Response.json({ error: "invalid token" }, { status: 401 });
+      }
+      expect(headers.get("Authorization")).toBe("Bearer fresh-access");
+      expect(headers.get("ChatGPT-Account-Id")).toBe("account-wham-replay");
+      return Response.json({ rate_limit: { secondary_window: { used_percent: 23, reset_at: 1782628379 } } });
+    }) as typeof fetch;
+
+    try {
+      const req = new Request("http://localhost/api/codex-auth/accounts?refresh=1", { method: "GET" });
+      const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+      expect(resp!.status).toBe(200);
+      const data = await resp!.json() as { accounts: { id: string; quota: unknown; needsReauth?: boolean }[] };
+      const pool = data.accounts.find(account => account.id === "pool-wham-replay");
+      expect(pool).toMatchObject({ needsReauth: false, quota: { weeklyPercent: 23, weeklyResetAt: 1782628379 } });
+      expect(whamCalls).toBe(2);
+      expect(tokenCalls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("pool quota WHAM 401 with a transient token endpoint failure stays retryable", async () => {
+    const config = makeConfig();
+    seedPoolAccount(config, {
+      id: "pool-wham-transient",
+      email: "pool-wham-transient@example.com",
+      accessToken: "stale-access",
+      refreshToken: "refresh-grant",
+      chatgptAccountId: "account-wham-transient",
+    });
+
+    const originalFetch = globalThis.fetch;
+    let whamCalls = 0;
+    let tokenCalls = 0;
+    globalThis.fetch = (async input => {
+      const url = String(input);
+      if (url === "https://auth.openai.com/oauth/token") {
+        tokenCalls += 1;
+        return Response.json({ error: "service unavailable" }, { status: 503 });
+      }
+      expect(url).toBe("https://chatgpt.com/backend-api/wham/usage");
+      whamCalls += 1;
+      return Response.json({ error: "invalid token" }, { status: 401 });
+    }) as typeof fetch;
+
+    try {
+      const req = new Request("http://localhost/api/codex-auth/accounts?refresh=1", { method: "GET" });
+      const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+      expect(resp!.status).toBe(200);
+      const data = await resp!.json() as { accounts: { id: string; quota: unknown; needsReauth?: boolean }[] };
+      const pool = data.accounts.find(account => account.id === "pool-wham-transient");
+      expect(pool).toMatchObject({ needsReauth: false, quota: null });
+      expect(whamCalls).toBe(1);
+      expect(tokenCalls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("GET /api/codex-auth/accounts reconciles and persists a fresh pool plan on a cache miss", async () => {
     const config = makeConfig();
     seedPoolAccount(config, {

@@ -74,6 +74,7 @@ import {
   headersForCodexAuthContext,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
+  shouldMarkAccountNeedsReauthForCodexAuthFailure,
   codexProbeLeaseId,
   codexProbeQuotaScope,
   releaseCodexAuthContextProbeLease,
@@ -81,6 +82,7 @@ import {
   type CodexAuthContext,
 } from "../../codex/auth-context";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
+import { forceRefreshCodexToken } from "../../codex/account-store";
 import {
   computeQuotaCooldown,
   formatCodexProviderForLog,
@@ -510,7 +512,8 @@ export function codexForwardTerminalOutcomeRecorder(
 ): ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined {
   if (!usesCodexForwardPoolAuth(authCtx, provider)) return undefined;
   return (status, httpStatusOverride) => {
-    if (status === "incomplete") {
+    const terminalErrorStatus = httpStatusOverride ?? logCtx?.terminalHttpStatus;
+    if (status === "incomplete" && terminalErrorStatus === undefined) {
       // Normal limit/content-filter/stall terminal — the account served the
       // request. Don't penalize account health; record success to clear any
       // prior soft-avoid so a healthy account isn't stuck avoided.
@@ -535,7 +538,7 @@ export function codexForwardTerminalOutcomeRecorder(
     // the parent's terminalHttpStatus so the semantic status is not lost.
     const outcome = status === "completed"
       ? 200
-      : (httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
+      : (terminalErrorStatus ?? 502);
     recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       threadId,
       fixedAccount: authCtx.fixedAccount,
@@ -843,6 +846,12 @@ async function resolveResponsesCodexAuth(
       };
     }
     if (err instanceof CodexAuthContextError) {
+      if (!shouldMarkAccountNeedsReauthForCodexAuthFailure(err.cause)) {
+        return {
+          ok: false,
+          response: formatErrorResponse(503, "server_error", "Codex token refresh temporarily unavailable; retry shortly"),
+        };
+      }
       const safeAccountLabel = formatCodexProviderForLog(route.providerName, err.accountId, config);
       console.error(`[codex-auth] Pool account ${safeAccountLabel} token failed; reauthentication required`);
       return {
@@ -1745,6 +1754,51 @@ async function handleResponsesInner(
       request.releaseBodyObservation?.();
     }
 
+    // Access tokens can be rejected before their advertised expiry. Give an added
+    // Codex account one grant-locked refresh/replay before recording a permanent 401.
+    // Main-account credentials remain owned by the Codex app and are never refreshed here.
+    if (upstreamResponse.status === 401 && authCtx.kind === "pool"
+      && usesCodexForwardPoolAuth(authCtx, route.provider)) {
+      try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed */ }
+      try {
+        const refreshed = await forceRefreshCodexToken(authCtx.accountId, authCtx);
+        authCtx = { ...authCtx, ...refreshed };
+        options.onCodexAuthContextResolved?.(authCtx);
+        selectedForwardHeaders = headersForCodexAuthContext(req.headers, authCtx);
+        route.provider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
+      } catch (error) {
+        releaseCodexAuthContextProbeLease(authCtx);
+        upstream.abort();
+        if (options.abortSignal?.aborted) return clientCancelledResponse();
+        if (shouldMarkAccountNeedsReauthForCodexAuthFailure(error)) {
+          recordCodexUpstreamOutcome(config, authCtx.accountId, 401, {
+            writerGeneration: authCtx.writerGeneration,
+            fixedAccount: authCtx.fixedAccount,
+            threadId: req.headers.get("x-codex-parent-thread-id"),
+          });
+          return formatErrorResponse(401, "authentication_error", "Codex account needs reauthentication");
+        }
+        return formatErrorResponse(503, "server_error", "Codex token refresh temporarily unavailable; retry shortly");
+      }
+      if (upstream.signal.aborted) return clientCancelledResponse();
+      const refreshedAdapter = resolveAdapter(
+        resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+        config.cacheRetention,
+      );
+      try {
+        request = await refreshedAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+        recordAdapterReasoning(logCtx, request);
+        noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, "oauth-401");
+        upstreamResponse = await fetchWithHeaderTimeout(request.url, {
+          method: request.method, headers: request.headers, body: request.body,
+        }, upstream.signal, connectMs, parsed.stream, providerFetch(route.provider, options.codexWsRuntimeIdentity));
+      } catch (error) {
+        return transportFailureResponse(error);
+      } finally {
+        request.releaseBodyObservation?.();
+      }
+    }
+
     // Native Responses providers return from this passthrough branch before the generic recovery
     // loop below. Preserve the same OAuth contract here: one pre-stream 401 forces one credential
     // refresh and one rebuilt replay. This is required for xAI now that Grok 4.6/4.5 subscription
@@ -1891,7 +1945,7 @@ async function handleResponsesInner(
       if (terminalBodyWillRecord) {
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {
           terminalRecorder(status, httpStatusOverride);
-          if (status === "failed") {
+          if (status === "failed" || status === "incomplete") {
             const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
               || logCtx.terminalHttpStatus === 429
               || logCtx.terminalHttpStatus === 402
@@ -1992,7 +2046,7 @@ async function handleResponsesInner(
         const reportNativeTerminal = recordTerminalOutcomes
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
-            if (status === "failed") {
+            if (status === "failed" || status === "incomplete") {
               const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
                 || logCtx.terminalHttpStatus === 429
                 || logCtx.terminalHttpStatus === 402
@@ -2068,7 +2122,7 @@ async function handleResponsesInner(
         // client-cancel (no terminal seen) is finalized separately via consumeForInspection's onCancel.
         const reportNativeTerminal = (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
           terminalRecorder?.(status, httpStatusOverride);
-          if (status === "failed") {
+          if (status === "failed" || status === "incomplete") {
             const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
               || logCtx.terminalHttpStatus === 429
               || logCtx.terminalHttpStatus === 402

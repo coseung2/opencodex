@@ -173,10 +173,22 @@ exit 1. `--json` returns:
 { provider, autoSwitchThreshold: number, enabled: boolean }
 ```
 
+For Plus/Team/Business, proactive switching prefers the five-hour usage percentage when available.
+A fully used weekly or monthly window also counts as exhausted, even when five-hour usage is lower.
+With quota switching enabled, an existing conversation moves to an eligible account with headroom.
+Accounts needing reauthentication are excluded. A quota error inside a streamed `response.incomplete`
+also cools the serving account, so the next request can switch; an already-started stream is not replayed.
+Normal output-token limits do not trigger an account cooldown.
+
 ### `ocx account login|reauth|code|cancel ...`
 
 Run browser-based or manual-code account authentication from a headless shell. Use
 `ocx account --help` for the provider-specific command shape.
+
+For added Codex accounts, an HTTP 401 before streaming triggers one automatic token refresh
+and one retry on the same account, even if the saved token has not expired yet. Temporary refresh
+failures remain retryable; a revoked or expired refresh grant, or another 401 after refresh, requires
+reauthentication. The main account's credentials remain managed by the Codex app.
 
 ### `ocx account remove <provider> <id|main> --yes [--json]`
 

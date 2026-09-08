@@ -94,6 +94,12 @@ function redirectCanonicalCodexTo(baseUrl: string): void {
     const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(requestUrl);
     const prefix = "/backend-api/codex";
+    if (url.hostname === "auth.openai.com" && url.pathname === "/oauth/token") {
+      return Promise.resolve(Response.json({ error: "invalid_grant" }, { status: 400 }));
+    }
+    if (url.hostname === "chatgpt.com" && url.pathname === "/backend-api/wham/usage") {
+      return Promise.resolve(Response.json({ rate_limit: { primary_window: { used_percent: 10 } } }));
+    }
     if (url.hostname === "chatgpt.com" && url.pathname.startsWith(prefix)) {
       const target = new URL(`${url.pathname.slice(prefix.length)}${url.search}`, baseUrl);
       return originalGlobalFetch(target, init);
@@ -1751,6 +1757,97 @@ describe("server local API auth", () => {
       expect(getCodexUpstreamHealth("pool-b")).toBeNull();
       expect(harness.config.activeCodexAccountId).toBe("pool-a");
     } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test.each([false, true])("Codex pool retries an early 401 after one refresh (stream=%s)", async (stream) => {
+    const harness = await startPoolRetryHarness((_accountId, request) => {
+      if (request.headers.get("authorization") !== "Bearer refreshed-pool-token") {
+        return Response.json({ error: { message: "Invalid authentication token" } }, { status: 401 });
+      }
+      const response = { id: "refreshed-success", status: "completed", output: [] };
+      return stream
+        ? new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        })
+        : Response.json(response);
+    });
+    const redirectedFetch = globalThis.fetch;
+    let refreshes = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname === "auth.openai.com" && url.pathname === "/oauth/token") {
+        refreshes++;
+        return Response.json({ access_token: "refreshed-pool-token", refresh_token: "rotated-pool-refresh", expires_in: 3600 });
+      }
+      return redirectedFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const response = await harness.request({ stream });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("refreshed-success");
+      expect(refreshes).toBe(1);
+      expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-a"]);
+      expect(isAccountNeedsReauth("pool-a")).toBe(false);
+    } finally {
+      globalThis.fetch = redirectedFetch;
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test.each([[429, false], [503, false], [429, true], [503, true]] as const)("transient Codex refresh HTTP %s does not quarantine the account (expired=%s)", async (status, expired) => {
+    const harness = await startPoolRetryHarness(() => Response.json({ error: { message: "Invalid token" } }, { status: 401 }));
+    const redirectedFetch = globalThis.fetch;
+    let refreshes = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname === "auth.openai.com" && url.pathname === "/oauth/token") {
+        refreshes++;
+        return Response.json({ error: "temporarily_unavailable" }, { status });
+      }
+      return redirectedFetch(input, init);
+    }) as typeof fetch;
+    try {
+      if (expired) {
+        saveCodexAccountCredential("pool-a", {
+          accessToken: "expired-pool-token", refreshToken: "pool-a-refresh",
+          expiresAt: Date.now() - 1, chatgptAccountId: "acct-pool-a",
+        });
+      }
+      const response = await harness.request();
+      await response.text();
+      expect(response.status).toBe(503);
+      expect(refreshes).toBe(1);
+      expect(harness.dispatches).toEqual(expired ? [] : ["acct-pool-a"]);
+      expect(isAccountNeedsReauth("pool-a")).toBe(false);
+    } finally {
+      globalThis.fetch = redirectedFetch;
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test("a second Codex 401 after refresh requires reauthentication without a replay loop", async () => {
+    const harness = await startPoolRetryHarness(() => Response.json({ error: { message: "Invalid token" } }, { status: 401 }));
+    const redirectedFetch = globalThis.fetch;
+    let refreshes = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname === "auth.openai.com" && url.pathname === "/oauth/token") {
+        refreshes++;
+        return Response.json({ access_token: "refreshed-pool-token", refresh_token: "rotated-pool-refresh", expires_in: 3600 });
+      }
+      return redirectedFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const response = await harness.request();
+      await response.text();
+      expect(response.status).toBe(401);
+      expect(refreshes).toBe(1);
+      expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-a"]);
+      expect(isAccountNeedsReauth("pool-a")).toBe(true);
+    } finally {
+      globalThis.fetch = redirectedFetch;
       await stopPoolRetryHarness(harness);
     }
   });

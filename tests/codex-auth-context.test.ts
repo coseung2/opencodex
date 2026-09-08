@@ -23,6 +23,7 @@ import {
   CodexCredentialRefreshLockTimeoutError,
   CodexCredentialRefreshBusyError,
   CodexCredentialRefreshStaleError,
+  TokenRefreshError,
   getCodexAccountCredential,
   getValidCodexToken,
   readCodexAccountRecord,
@@ -637,6 +638,9 @@ describe("Codex auth context", () => {
     expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new CodexCredentialRefreshBusyError())).toBe(false);
     expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new CodexCredentialRefreshStaleError())).toBe(false);
     expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new ConfigMutationLockError("busy"))).toBe(false);
+    expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new TokenRefreshError("unknown", "retry later"))).toBe(false);
+    expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new TokenRefreshError("expired", "reauthenticate"))).toBe(true);
+    expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new TokenRefreshError("revoked", "reauthenticate"))).toBe(true);
     expect(shouldMarkAccountNeedsReauthForCodexAuthFailure(new Error("bad token"))).toBe(true);
   });
 

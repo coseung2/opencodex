@@ -137,7 +137,10 @@ first, so a wrapped quota response may make up to three sends on the exhausted a
 rotation. Account changes preserve and replay the conversation context, but provider-side
 prompt-cache reuse across accounts is not guaranteed and the cache may need to warm again.
 
-On a **401/403**, App login clears that account's process-local affinity and requires reauthentication.
+For added Codex accounts, a pre-stream **401** first triggers one token refresh and one retry on
+the same account. A temporary refresh failure remains retryable. A revoked or expired refresh grant,
+another 401 after refresh, or a **403** clears that account's process-local affinity and requires
+reauthentication. The main account's credentials remain managed by the Codex app.
 On a **429**, opencodex honors `Retry-After`, starts the account cooldown, clears affinity, and may
 rotate the request to another eligible Pool account. These failure transitions remain active with
 `autoSwitchThreshold: 0`; that setting disables only usage-based proactive switching.
@@ -150,7 +153,7 @@ and pauses only accounts freshly confirmed at 100%; unknown or failed refreshes 
 
 | Strategy | Behaviour |
 | --- | --- |
-| `quota` (default) | If no active account exists, choose the lowest-usage eligible account. Plus/Team/Business use their 5-hour window when available and fall back to known weekly or 30-day usage while that window is unavailable. Otherwise retain an eligible active account below `autoSwitchThreshold`; after it crosses the threshold, an unbound request or a bound task's next request can move to a lower-usage eligible account. `0` disables this usage-driven re-evaluation, not failure recovery. |
+| `quota` (default) | If no active account exists, choose the lowest-usage eligible account. Plus/Team/Business use their 5-hour window when available and fall back to known weekly or 30-day usage while that window is unavailable. A weekly or 30-day window at 100% always counts as exhausted, even if the 5-hour window has headroom. Otherwise retain an eligible active account below `autoSwitchThreshold`; after it crosses the threshold, an unbound request or a bound task's next request can move to a lower-usage eligible account. `0` disables this usage-driven re-evaluation, not failure recovery. |
 | `round-robin` | Evenly assign unbound requests across eligible accounts. `autoSwitchThreshold` does not change normal round-robin selection. `accountPoolStickyLimit` (1–100) counts assignments on one pick, not successful upstream responses. |
 | `fill-first` | Assign unbound requests to the active account until cooldown, reauthentication, or the configured drain threshold; unknown usage does not force a switch. Healthy bound tasks keep affinity. |
 

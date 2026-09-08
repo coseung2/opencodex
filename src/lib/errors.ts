@@ -362,7 +362,8 @@ export function httpStatusFromTerminalError(error: {
   if (isCyberPolicyCode(error.code) || (error.message ? isCyberPolicyMessage(error.message) : false)) {
     return 400;
   }
-  if (error.type === "rate_limit_error" || error.code === "rate_limit_exceeded") return 429;
+  if (error.type === "rate_limit_error" || error.code === "rate_limit_exceeded"
+    || error.type === "usage_limit_reached" || error.code === "usage_limit_reached") return 429;
   if (error.type === "authentication_error" || error.code === "invalid_api_key") return 401;
   if (
     error.type === "permission_error" ||
@@ -377,6 +378,7 @@ export function httpStatusFromTerminalError(error: {
   if (message && isClientClosedMessage(message)) return 499;
   if (error.type === "invalid_request_error") return 400;
   if (error.type === "proxy_error") return 500;
+  if (message && isRateLimitOrQuotaFailureMessage(message)) return 429;
   if (message) return inferHttpStatusFromAdapterMessage(message);
   return 502;
 }

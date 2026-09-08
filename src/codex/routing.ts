@@ -298,6 +298,9 @@ export function computeCodexUsageScore(quota: {
       ? quota.monthlyPercent
       : CODEX_UNKNOWN_USAGE_SCORE;
   }
+  // A shorter window with headroom cannot make an exhausted longer window usable.
+  // Keep five-hour preference for proactive thresholds below exhaustion.
+  if (quota.weeklyPercent === 100 || quota.monthlyPercent === 100) return 100;
   if (isCodexFiveHourQuotaPlan(plan)
     && typeof quota.fiveHourPercent === "number"
     && Number.isFinite(quota.fiveHourPercent)
