@@ -8,7 +8,7 @@
  *
  * Modelled after src/codex/routing.ts cooldown logic but scoped to plain API-key pools.
  */
-import { saveConfigPreservingClaudeCode } from "../config";
+import { resolveEnvValue, saveConfigPreservingClaudeCode } from "../config";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { resolveProviderTransport, type OcxProviderTransport } from "./xai-transport";
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
@@ -65,6 +65,16 @@ export function hasKeyPoolFailover(provider: OcxProviderConfig): boolean {
   return (provider.apiKeyPool?.length ?? 0) >= 2;
 }
 
+/** Share authoritative allocation exhaustion with reactive 429 recovery. */
+export function recordKeyQuotaExhaustion(providerName: string, keyId: string, until: number, now = Date.now()): void {
+  if (!Number.isFinite(until) || until <= now) return;
+  const id = cooldownKey(providerName, keyId);
+  keyCooldowns.set(id, {
+    cooldownUntil: Math.max(keyCooldowns.get(id)?.cooldownUntil ?? 0, Math.min(until, now + MAX_COOLDOWN_MS)),
+  });
+  sweepExpiredOnWrite(now);
+}
+
 /**
  * Record a 429 for the current key and attempt to switch to the next available one.
  *
@@ -93,8 +103,8 @@ export function rotateKeyOn429(
   // Cool the key that ACTUALLY failed. Under concurrent 429s another request may already have
   // rotated provider.apiKey — cooling the live key would punish an innocent replacement and can
   // exhaust a 2-key pool from a single bad key. CAS semantics: callers pass the key they used.
-  const failedKey = attemptedKey ?? provider.apiKey;
-  const currentEntry = pool.find(e => e.key === failedKey);
+  const failedKey = resolveEnvValue(attemptedKey ?? provider.apiKey);
+  const currentEntry = failedKey ? pool.find(e => resolveEnvValue(e.key) === failedKey) : undefined;
   if (currentEntry) {
     const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
     keyCooldowns.set(cooldownKey(providerName, currentEntry.id), {
@@ -105,7 +115,7 @@ export function rotateKeyOn429(
 
   // Lost the race: someone already rotated away from the failed key. If the live key is healthy,
   // retry with it as-is instead of rotating a second time.
-  if (attemptedKey !== undefined && provider.apiKey !== attemptedKey) {
+  if (attemptedKey !== undefined && resolveEnvValue(provider.apiKey) !== failedKey) {
     const liveEntry = pool.find(e => e.key === provider.apiKey);
     if (liveEntry && !isKeyInCooldown(providerName, liveEntry.id, now)) {
       return { ...provider };
@@ -116,7 +126,7 @@ export function rotateKeyOn429(
   const currentIndex = currentEntry ? pool.indexOf(currentEntry) : -1;
   for (let i = 1; i < pool.length; i++) {
     const candidate = pool[(currentIndex + i) % pool.length]!;
-    if (!isKeyInCooldown(providerName, candidate.id, now)) {
+    if (resolveEnvValue(candidate.key)?.trim() && !isKeyInCooldown(providerName, candidate.id, now)) {
       // Swap active key
       provider.apiKey = candidate.key;
       saveConfigPreservingClaudeCode(config);
@@ -177,7 +187,7 @@ export function rotateProviderTransportOn429(
   return rotated
     ? resolveProviderTransport(
         providerName,
-        { ...routedProvider, apiKey: rotated.apiKey },
+        { ...routedProvider, apiKey: resolveEnvValue(rotated.apiKey) },
         options.promptCacheKey,
       )
     : null;

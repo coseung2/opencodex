@@ -7,6 +7,8 @@ export type StoredAccountQuota = {
   fiveHourPercent?: number;
   weeklyPercent?: number;
   fiveHourResetAt?: number;
+  /** Time the five-hour percentage itself was observed; partial updates do not renew it. */
+  fiveHourObservedAt?: number;
   monthlyPercent?: number;
   weeklyResetAt?: number;
   monthlyResetAt?: number;
@@ -65,6 +67,28 @@ function mayCommitAccountQuota(accountId: string, writerGeneration: number): boo
 // actually exhausted account is still eligible for threshold rotation.
 export const CODEX_UNKNOWN_USAGE_SCORE = 101;
 export const CODEX_EXHAUSTED_USAGE_PERCENT = 100;
+const FIVE_HOUR_OBSERVATION_FRESHNESS_MS = 5 * 60_000;
+
+/** Expired evidence is unknown, not a fresh zero-percent reading. */
+export function liveFiveHourPercent(
+  quota: Pick<StoredAccountQuota, "fiveHourPercent" | "fiveHourResetAt" | "fiveHourObservedAt">,
+  now = Date.now(),
+): number | undefined {
+  const percent = quota.fiveHourPercent;
+  if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0 || percent > 100) return undefined;
+  const reset = quota.fiveHourResetAt;
+  if (typeof reset === "number" && Number.isFinite(reset) && reset > 0) {
+    const resetMs = reset < 1_000_000_000_000 ? reset * 1000 : reset;
+    return now < resetMs ? percent : undefined;
+  }
+  const observed = quota.fiveHourObservedAt;
+  if (typeof observed === "number" && Number.isFinite(observed)) {
+    const age = now - observed;
+    return age >= 0 && age <= FIVE_HOUR_OBSERVATION_FRESHNESS_MS ? percent : undefined;
+  }
+  // Preserve the legacy contract for callers passing fresh parsed values without provenance.
+  return percent;
+}
 
 /** Plans whose WHAM payloads expose a separate rolling five-hour window. */
 export function isCodexFiveHourQuotaPlan(plan: string | null | undefined): boolean {
@@ -74,15 +98,16 @@ export function isCodexFiveHourQuotaPlan(plan: string | null | undefined): boole
 }
 
 export function isCodexQuotaExhausted(
-  quota: Pick<StoredAccountQuota, "fiveHourPercent" | "weeklyPercent" | "monthlyPercent"> | null,
+  quota: Pick<StoredAccountQuota, "fiveHourPercent" | "fiveHourResetAt" | "fiveHourObservedAt" | "weeklyPercent" | "monthlyPercent"> | null,
   plan?: string | null,
+  now = Date.now(),
 ): boolean {
   if (!quota) return false;
   const normalizedPlan = plan?.trim().toLowerCase();
   const values = normalizedPlan === "go" || normalizedPlan === "free"
     ? [quota.monthlyPercent]
     : [
-        ...(isCodexFiveHourQuotaPlan(plan) ? [quota.fiveHourPercent] : []),
+        ...(plan == null || isCodexFiveHourQuotaPlan(plan) ? [liveFiveHourPercent(quota, now)] : []),
         quota.weeklyPercent,
         quota.monthlyPercent,
       ];
@@ -183,6 +208,7 @@ export function setAccountQuotaFromParsed(
 ): void {
   if (!quota) return;
   if (!mayCommitAccountQuota(accountId, writerGeneration)) return;
+  hydrateAccountQuotasFromDisk();
   const existing = accountQuota.get(accountId);
   const next: StoredAccountQuota = { updatedAt: Date.now() };
   const creditsOnly = quota.resetCredits !== undefined && !snapshotHasUsage(quota);
@@ -190,6 +216,7 @@ export function setAccountQuotaFromParsed(
   if (creditsOnly) {
     if (existing?.fiveHourPercent !== undefined) next.fiveHourPercent = existing.fiveHourPercent;
     if (existing?.fiveHourResetAt !== undefined) next.fiveHourResetAt = existing.fiveHourResetAt;
+    if (existing?.fiveHourObservedAt !== undefined) next.fiveHourObservedAt = existing.fiveHourObservedAt;
     if (existing?.weeklyPercent !== undefined) next.weeklyPercent = existing.weeklyPercent;
     if (existing?.weeklyResetAt !== undefined) next.weeklyResetAt = existing.weeklyResetAt;
     if (existing?.monthlyPercent !== undefined) next.monthlyPercent = existing.monthlyPercent;
@@ -205,14 +232,25 @@ export function setAccountQuotaFromParsed(
   const hasMonthly = snapshotHasMonthly(quota);
 
   if (hasFiveHour) {
-    if (quota.fiveHourPercent !== undefined) next.fiveHourPercent = quota.fiveHourPercent;
-    if (quota.fiveHourResetAt !== undefined) next.fiveHourResetAt = quota.fiveHourResetAt;
     // A five-hour-only response can be a partial snapshot; retain a known
     // weekly value until a later response supplies that window.
     if (!hasWeekly && existing?.weeklyPercent !== undefined) {
       next.weeklyPercent = existing.weeklyPercent;
       if (existing.weeklyResetAt !== undefined) next.weeklyResetAt = existing.weeklyResetAt;
     }
+  }
+
+  // A missing percentage is not recovery. Carry the whole observation together: a reset-only
+  // update must not attach a new deadline to an old 100% reading. A real new reading replaces it.
+  const fiveHourPercent = normalizeUsagePercent(quota.fiveHourPercent);
+  if (fiveHourPercent !== undefined) {
+    next.fiveHourPercent = fiveHourPercent;
+    next.fiveHourObservedAt = next.updatedAt;
+    if (quota.fiveHourResetAt !== undefined) next.fiveHourResetAt = quota.fiveHourResetAt;
+  } else {
+    if (existing?.fiveHourPercent !== undefined) next.fiveHourPercent = existing.fiveHourPercent;
+    if (existing?.fiveHourResetAt !== undefined) next.fiveHourResetAt = existing.fiveHourResetAt;
+    if (existing?.fiveHourObservedAt !== undefined) next.fiveHourObservedAt = existing.fiveHourObservedAt;
   }
 
   if (hasWeekly) {
@@ -344,6 +382,7 @@ export function updateAccountQuota(
     ...(existing?.fiveHourPercent !== undefined ? { fiveHourPercent: existing.fiveHourPercent } : {}),
     ...(existing?.weeklyPercent !== undefined ? { weeklyPercent: existing.weeklyPercent } : {}),
     ...(existing?.fiveHourResetAt !== undefined ? { fiveHourResetAt: existing.fiveHourResetAt } : {}),
+    ...(existing?.fiveHourObservedAt !== undefined ? { fiveHourObservedAt: existing.fiveHourObservedAt } : {}),
     ...(existing?.monthlyPercent !== undefined ? { monthlyPercent: existing.monthlyPercent } : {}),
     ...(existing?.weeklyResetAt !== undefined ? { weeklyResetAt: existing.weeklyResetAt } : {}),
     ...(existing?.monthlyResetAt !== undefined ? { monthlyResetAt: existing.monthlyResetAt } : {}),
@@ -380,7 +419,13 @@ function hydrateAccountQuotasFromDisk(): void {
     for (const [accountId, quota] of Object.entries(parsed.quotas)) {
       if (!quota || typeof quota !== "object" || typeof quota.updatedAt !== "number") continue;
       if (now - quota.updatedAt > QUOTA_DISK_MAX_AGE_MS) continue;
-      if (!accountQuota.has(accountId)) accountQuota.set(accountId, quota);
+      if (!accountQuota.has(accountId)) {
+        // Old caches lack a five-hour observation clock. General updatedAt may have been
+        // renewed by weekly/credit updates, so it cannot prove a reset-less reading is live.
+        accountQuota.set(accountId, quota.fiveHourPercent !== undefined && quota.fiveHourObservedAt === undefined
+          ? { ...quota, fiveHourObservedAt: 0 }
+          : quota);
+      }
     }
   } catch {
     // Corrupt/missing cache must never block routing or the dashboard.

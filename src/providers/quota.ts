@@ -941,7 +941,7 @@ interface OpencodeGoUsageWindow {
  * The console shows exactly these percents and reset times, so this replaces the
  * local estimate whenever the endpoint answers.
  */
-async function fetchOpencodeGoUsageApi(apiKey: string | undefined): Promise<{
+export async function fetchOpencodeGoUsageApi(apiKey: string | undefined, timeoutMs = REQUEST_TIMEOUT_MS): Promise<{
   fiveHour: OpencodeGoUsageWindow;
   weekly: OpencodeGoUsageWindow;
   monthly: OpencodeGoUsageWindow;
@@ -952,10 +952,14 @@ async function fetchOpencodeGoUsageApi(apiKey: string | undefined): Promise<{
       Accept: "application/json",
       Authorization: `Bearer ${apiKey.trim()}`,
     },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: "error",
   });
-  if (!response.ok) return null;
-  const body = asRecord(await readQuotaJson(response));
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    return null;
+  }
+  const body = asRecord(await readQuotaJson(response, timeoutMs));
   const usage = asRecord(body?.usage);
   if (!usage) return null;
   const parse = (raw: unknown): OpencodeGoUsageWindow => {

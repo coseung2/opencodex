@@ -103,6 +103,20 @@ API-key providers may hold a literal key or an environment reference. OAuth prov
 credential store populated by `ocx login`; subscription-backed Claude Code launch behavior is
 configured under [`claudeCode.authMode`](/reference/configuration/server/#claude-code).
 
+## OpenCode Go key-pool switching
+
+With two or more `apiKeyPool` entries on the canonical OpenCode Go endpoint, Responses requests
+(including translated Chat requests) check the active key's allocation before sending. A 5-hour,
+weekly, or monthly window at 100% moves the request to the next eligible key. Exact usage observations
+are cached for 15 seconds; failed probes and local estimates never exclude a key. Probes are bounded
+to eight distinct keys per request, after which unprobed candidates remain eligible for normal recovery.
+
+Both the Chat wire and native Responses wire (including Muse) also rotate on a pre-stream 429.
+Retries preserve the request and session metadata, and skip keys already known to be exhausted or
+cooling down. If preflight finds all keys blocked, the response is 429 with `Retry-After`. A passed allocation
+reset permits the key to be considered again. Streaming output already delivered is not replayed.
+Keys must have independent available allocations for switching to restore service.
+
 ## Provider diagnostic outbound safety
 
 Dashboard connection tests and live model discovery use a bounded GET-only transport. Without an
@@ -144,6 +158,12 @@ reauthentication. The main account's credentials remain managed by the Codex app
 On a **429**, opencodex honors `Retry-After`, starts the account cooldown, clears affinity, and may
 rotate the request to another eligible Pool account. These failure transitions remain active with
 `autoSwitchThreshold: 0`; that setting disables only usage-based proactive switching.
+
+For Plus/Team/Business, partial weekly or credit updates retain the last observed 5-hour usage
+and its original reset time. A live 5-hour reading at 100% can trigger switching even without a
+weekly reading. Once its reset time passes, routing falls back to known longer-window usage;
+without a reset time, a new 5-hour observation is usable for five minutes. Partial updates do not
+renew that clock. Pro and Pro Lite continue to use their longer-window quota.
 
 Pausing an account preserves its quota metadata but excludes it from switching, failover, recovery
 probes, and manual activation. It also clears that account's thread affinities. In-flight requests keep

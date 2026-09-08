@@ -153,7 +153,7 @@ export function isNativeModelQuotaExhausted(
   const resolvedAccountId = resolvePoolFallbackAccountId(config, accountId);
   if (!resolvedAccountId) return false;
   const quota = getAccountQuota(resolvedAccountId);
-  const usage = computeCodexUsageScore(quota, getPoolAccountPlan(config, resolvedAccountId));
+  const usage = computeCodexUsageScore(quota, getPoolAccountPlan(config, resolvedAccountId), now);
   if (usage >= CODEX_UNKNOWN_USAGE_SCORE) return false;
   return usage >= quotaThreshold(config);
 }

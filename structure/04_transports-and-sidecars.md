@@ -16,6 +16,17 @@ Caller-owned `provider.fetch` executors are also deferred: they receive literal/
 redirect blocking, but cannot inherit DNS classification or peer pinning without a verified-peer
 executor contract. Main-request migration must not treat that branch as fixed-transport equivalent.
 
+## OpenCode Go allocation selection
+
+`src/providers/opencode-go-pool.ts` selects a key before Responses adapter construction, using only
+the canonical Go `/usage` response. Its bounded, hashed-identity cache carries usage observations,
+not raw keys. Quota probe errors remain unknown; local usage estimates never gate routing. Confirmed
+exhaustion shares cooldown state with API-key 429 recovery, so a reactive retry cannot return to a
+key preflight already excluded. Native Responses (Muse) has a bounded pre-stream key retry path
+before its early return; the translated Chat path retains the generic recovery loop. Selection
+preserves routed metadata and stored environment references, and checks concurrent configuration
+changes before committing the replacement. Already-delivered streaming output is never replayed.
+
 ## Responses HTTP/SSE
 
 `/v1/responses` is the main Codex-facing endpoint. The server parses Responses input, routes to a

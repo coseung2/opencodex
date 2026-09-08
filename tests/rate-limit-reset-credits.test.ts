@@ -5,6 +5,7 @@ import {
   setAccountQuotaFromParsed,
   updateAccountQuota,
   getAccountQuota,
+  liveFiveHourPercent,
   clearAccountQuota,
   type WhamUsageResponse,
 } from "../src/codex/quota";
@@ -319,7 +320,7 @@ describe("rate-limit reset credits", () => {
       });
     });
 
-    it("clears a stale five-hour row when a later weekly-only snapshot arrives", () => {
+    it("retains the five-hour observation on weekly-only updates but expires it at its own reset", () => {
       clearAccountQuota();
       setAccountQuotaFromParsed("five-hour-stale", {
         fiveHourPercent: 88,
@@ -332,10 +333,15 @@ describe("rate-limit reset credits", () => {
         weeklyResetAt: 1787200000,
       });
       expect(getAccountQuota("five-hour-stale")).toEqual({
+        fiveHourPercent: 88,
+        fiveHourResetAt: 1787000000,
+        fiveHourObservedAt: expect.any(Number),
         weeklyPercent: 25,
         weeklyResetAt: 1787200000,
         updatedAt: expect.any(Number),
       });
+      expect(liveFiveHourPercent(getAccountQuota("five-hour-stale")!, 1787000000_000 - 1)).toBe(88);
+      expect(liveFiveHourPercent(getAccountQuota("five-hour-stale")!, 1787000000_000)).toBeUndefined();
     });
 
     it("classifies a ~30d primary header as monthly and clears stale weekly", () => {
@@ -383,6 +389,7 @@ describe("rate-limit reset credits", () => {
       expect(getAccountQuota("dual-window")).toEqual({
         fiveHourPercent: 23,
         fiveHourResetAt: 1787000000,
+        fiveHourObservedAt: expect.any(Number),
         weeklyPercent: 47,
         weeklyResetAt: 1787600000,
         updatedAt: expect.any(Number),

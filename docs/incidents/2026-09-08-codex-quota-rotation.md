@@ -32,3 +32,36 @@ remains owned by the Codex app.
   enumeration test. Its isolated file passed all 25 tests, and the unchanged test passed again in the
   final complete suite. This was not treated as a quota/auth regression or a reason to weaken the test.
 - Runtime restart is still deferred to the user. Live post-restart recovery remains to be verified.
+
+## Follow-up: five-hour exhaustion lost during partial quota refresh
+
+- Date: 2026-09-08, Asia/Seoul (UTC+09:00).
+- Symptoms: the user still observed Plus/Team accounts staying selected after the five-hour
+  allocation was consumed. The running repository-backed proxy started at 13:47, after the earlier
+  quota patch; the earlier pending-restart note no longer explained the report.
+- Confirmed defect: `setAccountQuotaFromParsed` replaced a complete observation with a weekly-only
+  update, discarding five-hour usage. A synthetic Plus observation of five-hour 100% / weekly 16%
+  changed from routing score 100 to 16 after a weekly-only 16% refresh. The exact sequence of the
+  user's failed request was not captured, so this is a reproduced defect, not a proven attribution
+  of every reported failure. Upstream references: #2646, #3110, and #3605.
+- Response: retain the five-hour percentage, reset timestamp, and observation timestamp together
+  across partial updates, including the first update after disk hydration. A new percentage replaces
+  that tuple. Ignore it for routing after its reset (seconds and milliseconds supported); without a
+  reset, use the actual observation for five minutes, never renewed by weekly/credit-only updates.
+  Reset-less legacy cache readings without observation provenance cannot prove current exhaustion.
+  Pass the request clock through selection, affinity, priority, fill-first, and subagent scoring.
+  Preserve Plus/Team/Business five-hour preference and Pro/Pro Lite longer-window policy.
+- Regression evidence: before the patch, seven new cases failed for partial-update rotation,
+  reset-time recovery, observation preservation, and missing-plan exhaustion. An unrelated existing
+  LRU test also exceeded its standalone five-second timeout on that run. After the core patch,
+  the routing/subagent suites passed 151 tests with no failures. Additional disk-cache regressions
+  are included in the full-suite gate.
+- Final validation: `bun run test` passed 7,322 tests, skipped 11, and failed 0 across 506 files in
+  11 Windows batches. Typecheck, privacy scan, and diff whitespace checks passed. The documentation
+  build passed with 221 pages. The reset-credit suite also passed all 34 tests, including the changed
+  partial-snapshot contract.
+- Runtime activation: the management drain-and-restart endpoint accepted the restart with zero
+  active turns. The replacement repository-backed Bun proxy started at 15:49:40, reported `healthz`
+  status `ok`, and was not draining. A real `gpt-5.6-sol` request returned HTTP 200 and
+  `response.completed`, with no failed/incomplete terminal. Live traffic was not deliberately driven
+  to quota exhaustion; the exhaustion/rebind sequence is verified by the regression tests.

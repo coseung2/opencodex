@@ -103,6 +103,7 @@ import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentE
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
 import type { InboundWire } from "../../providers/registry";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
+import { isOpenCodeGoKeyDestination, selectOpenCodeGoPoolKey } from "../../providers/opencode-go-pool";
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
 import { isOpenCodeMuseResponses, resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
@@ -1556,6 +1557,19 @@ async function handleResponsesInner(
     parsed.options.promptCacheKey,
     route.providerName === "github-copilot" ? getOAuthCredentialApiBaseUrl(route.providerName) : undefined,
   );
+  const goSelection = await selectOpenCodeGoPoolKey(config, route.providerName, route.provider, options.abortSignal);
+  if (options.abortSignal?.aborted) {
+    releaseCodexAuthContextProbeLease(authCtx);
+    return clientCancelledResponse();
+  }
+  if (goSelection.unavailable) {
+    const exhausted = goSelection.configurationChanged
+      ? formatErrorResponse(503, "server_error", "OpenCode Go pool configuration changed; retry the request.")
+      : formatErrorResponse(429, "rate_limit_error", "OpenCode Go pool allocations are exhausted; retry after a window resets.");
+    exhausted.headers.set("Retry-After", String(goSelection.retryAfterSeconds));
+    return exhausted;
+  }
+  route.provider = goSelection.provider;
   const adapterProvider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
   logCtx.providerAdapter = adapter.name;
@@ -1905,6 +1919,37 @@ async function handleResponsesInner(
           // Keep subagent quota-failure health keyed to the account that actually served.
           subagentFallbackAccountId = retry.authCtx.accountId;
         }
+      }
+    }
+    // Muse's native Responses branch returns before the generic API-key recovery loop below.
+    // Handle a newly observed Go limit here too, before any upstream bytes reach the caller.
+    const attemptedGoKeys = new Set<string | undefined>();
+    while (upstreamResponse.status === 429 && isOpenCodeGoKeyDestination(route.provider)
+      && hasKeyPoolFailover(route.provider) && !attemptedGoKeys.has(route.provider.apiKey)) {
+      attemptedGoKeys.add(route.provider.apiKey);
+      const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
+        retryAfter: upstreamResponse.headers.get("retry-after"),
+        attemptedKey: route.provider.apiKey,
+        promptCacheKey: parsed.options.promptCacheKey,
+      });
+      if (!rotated || attemptedGoKeys.has(rotated.apiKey)) break;
+      try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+      route.provider = rotated;
+      const retryAdapter = resolveAdapter(
+        resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+        config.cacheRetention,
+      );
+      try {
+        request = await retryAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+        recordAdapterReasoning(logCtx, request);
+        noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, "key-429");
+        upstreamResponse = await fetchWithHeaderTimeout(request.url, {
+          method: request.method, headers: request.headers, body: request.body,
+        }, upstream.signal, connectMs, parsed.stream, providerFetch(route.provider, options.codexWsRuntimeIdentity));
+      } catch (error) {
+        return transportFailureResponse(error);
+      } finally {
+        request.releaseBodyObservation?.();
       }
     }
     const headers = sanitizePassthroughHeaders(upstreamResponse.headers);

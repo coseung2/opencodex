@@ -39,7 +39,7 @@ import {
   parseUsageQuota,
   updateAccountQuota,
 } from "../src/codex/auth-api";
-import { CODEX_UNKNOWN_USAGE_SCORE, isCodexQuotaExhausted, setAccountQuotaFromParsed } from "../src/codex/quota";
+import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota, isCodexQuotaExhausted, setAccountQuotaFromParsed } from "../src/codex/quota";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
 import { routeModel } from "../src/router";
 import { consumeForInspection, createSseInspector } from "../src/server/relay";
@@ -159,6 +159,90 @@ describe("codex routing", () => {
     updateAccountQuota("a", 85);
     updateAccountQuota("b", 20);
     expect(resolveCodexAccountForThread("new-thread", config)).toBe("b");
+  });
+
+  test.each(["plus", "team", "business"])("%s keeps five-hour exhaustion through partial updates and rebinds the next request", plan => {
+    const now = Date.now();
+    const reset = Math.floor(now / 1000) + 3600;
+    const config = makeConfig({
+      autoSwitchThreshold: 100,
+      codexAccounts: ["a", "b"].map(id => ({ id, email: `${id}@test`, plan, isMain: false })),
+    });
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 20, fiveHourResetAt: reset, weeklyPercent: 16 });
+    setAccountQuotaFromParsed("b", { fiveHourPercent: 40, fiveHourResetAt: reset, weeklyPercent: 30 });
+    expect(resolveCodexAccountForThread("partial-window", config, now)).toBe("a");
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 100, fiveHourResetAt: reset });
+    setAccountQuotaFromParsed("a", { weeklyPercent: 16 });
+    expect(getAccountQuota("a")).toMatchObject({ fiveHourPercent: 100, fiveHourResetAt: reset, weeklyPercent: 16 });
+    expect(resolveCodexAccountForThread("partial-window", config, now + 1)).toBe("b");
+    expect(resolveCodexAccountForThread("partial-new", config, now + 2)).toBe("b");
+  });
+
+  test.each([1, 1000])("five-hour reset uses the request clock with timestamp scale %i", scale => {
+    const now = 1_800_000_000_000;
+    const reset = now + 60_000;
+    const config = makeConfig({
+      autoSwitchThreshold: 100,
+      codexAccounts: ["a", "b"].map(id => ({ id, email: `${id}@test`, plan: "plus", isMain: false })),
+    });
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 100, fiveHourResetAt: reset / scale, weeklyPercent: 16 });
+    setAccountQuotaFromParsed("b", { weeklyPercent: 30 });
+    expect(pickLowestUsageCodexAccount(config, undefined, now)).toBe("b");
+    expect(pickLowestUsageCodexAccount(config, undefined, reset)).toBe("a");
+    expect(resolveCodexAccountForThread("recovered", config, reset)).toBe("a");
+  });
+
+  test("metadata-only and credit-only updates cannot renew a retained five-hour observation", () => {
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 100, weeklyPercent: 16 });
+    const observed = getAccountQuota("a")!;
+    setAccountQuotaFromParsed("a", { fiveHourResetAt: 2_000_000_000, weeklyPercent: 17 });
+    setAccountQuotaFromParsed("a", { resetCredits: 2 });
+    expect(getAccountQuota("a")).toMatchObject({ fiveHourPercent: 100, weeklyPercent: 17 });
+    expect(getAccountQuota("a")!.fiveHourResetAt).toBeUndefined();
+    expect(computeCodexUsageScore(getAccountQuota("a"), "plus", observed.updatedAt + 1)).toBe(100);
+    expect(computeCodexUsageScore(getAccountQuota("a"), "plus", observed.updatedAt + 5 * 60_000 + 1)).toBe(17);
+  });
+
+  test("fresh five-hour-only exhaustion rotates even before plan discovery", () => {
+    const config = makeConfig({ autoSwitchThreshold: 100 });
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 100 });
+    setAccountQuotaFromParsed("b", { weeklyPercent: 20 });
+    expect(resolveCodexAccountForThread("unknown-plan-full-window", config)).toBe("b");
+  });
+
+  test("the first partial update after restart preserves the persisted five-hour deadline", () => {
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    writeFileSync(join(TEST_DIR, "codex-quota-cache.json"), JSON.stringify({
+      version: 1,
+      quotas: { a: { fiveHourPercent: 100, fiveHourResetAt: reset, weeklyPercent: 16, updatedAt: Date.now() } },
+    }));
+    setAccountQuotaFromParsed("a", { weeklyPercent: 17 });
+    expect(getAccountQuota("a")).toMatchObject({ fiveHourPercent: 100, fiveHourResetAt: reset, weeklyPercent: 17 });
+    expect(computeCodexUsageScore(getAccountQuota("a"), "team")).toBe(100);
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 0, weeklyPercent: 17 });
+    expect(computeCodexUsageScore(getAccountQuota("a"), "team")).toBe(0);
+    expect(getAccountQuota("a")!.fiveHourResetAt).toBeUndefined();
+  });
+
+  test("legacy reset-less disk observations cannot indefinitely exclude recovered accounts", () => {
+    writeFileSync(join(TEST_DIR, "codex-quota-cache.json"), JSON.stringify({
+      version: 1,
+      quotas: { a: { fiveHourPercent: 100, weeklyPercent: 16, updatedAt: Date.now() } },
+    }));
+    expect(computeCodexUsageScore(getAccountQuota("a"), "plus")).toBe(16);
+  });
+
+  test.each(["pro", "prolite"])("%s keeps weekly routing after a retained five-hour observation", plan => {
+    const config = makeConfig({
+      autoSwitchThreshold: 100,
+      codexAccounts: ["a", "b"].map(id => ({ id, email: `${id}@test`, plan, isMain: false })),
+    });
+    setAccountQuotaFromParsed("a", { fiveHourPercent: 100, weeklyPercent: 16 });
+    setAccountQuotaFromParsed("a", { weeklyPercent: 17 });
+    setAccountQuotaFromParsed("b", { weeklyPercent: 30 });
+    expect(resolveCodexAccountForThread("weekly-only-plan", config)).toBe("a");
+    setAccountQuotaFromParsed("a", { weeklyPercent: 100 });
+    expect(resolveCodexAccountForThread("weekly-only-plan", config)).toBe("b");
   });
 
   test.each(["plus", "team", "business"] as const)("%s rotation uses five-hour allocation instead of weekly allocation", (plan) => {
