@@ -19,7 +19,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::ProcessStatus::{
     GetPerformanceInfo, K32GetProcessMemoryInfo, PERFORMANCE_INFORMATION,
     PROCESS_MEMORY_COUNTERS_EX,
@@ -140,6 +144,7 @@ impl AuthCancellation {
 
 #[derive(Clone, PartialEq, Eq)]
 enum ModalHit {
+    CopyAuthUrl,
     Preset(usize),
     Tab(ProviderCatalogTab),
     AddKey,
@@ -164,6 +169,7 @@ enum ProviderModal {
         waiting_provider: Option<String>,
         waiting_codex: bool,
         auth_details: Option<AuthFlowResponse>,
+        url_copied_at: Option<Instant>,
         cancel: Option<Arc<AuthCancellation>>,
         scroll: i32,
         selected_tab: ProviderCatalogTab,
@@ -1606,6 +1612,30 @@ fn auth_detail_lines(details: &AuthFlowResponse) -> Vec<String> {
     lines
 }
 
+unsafe fn copy_to_clipboard(hwnd: HWND, text: &str) -> windows::core::Result<()> {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let memory = GlobalAlloc(GMEM_MOVEABLE, wide.len() * size_of::<u16>())?;
+    let destination = GlobalLock(memory) as *mut u16;
+    if destination.is_null() {
+        let error = windows::core::Error::from_win32();
+        let _ = GlobalFree(memory);
+        return Err(error);
+    }
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), destination, wide.len());
+    let _ = GlobalUnlock(memory);
+    if let Err(error) = OpenClipboard(hwnd) {
+        let _ = GlobalFree(memory);
+        return Err(error);
+    }
+    // CF_UNICODETEXT; ownership transfers to Windows only on success.
+    let result = EmptyClipboard().and_then(|_| SetClipboardData(13, HANDLE(memory.0)));
+    let _ = CloseClipboard();
+    if result.is_err() {
+        let _ = GlobalFree(memory);
+    }
+    result.map(|_| ())
+}
+
 unsafe fn destroy_api_key_edit(app: &mut App) {
     if let Some(edit) = app.api_key_edit.take() {
         let edit = HWND(edit as *mut _);
@@ -1655,6 +1685,7 @@ fn open_provider_modal(hwnd: HWND) {
             waiting_provider: None,
             waiting_codex: false,
             auth_details: None,
+            url_copied_at: None,
             cancel: None,
             scroll: 0,
             selected_tab: ProviderCatalogTab::Free,
@@ -2795,6 +2826,31 @@ unsafe extern "system" fn window_proc(
             if let Some(action) = modal_action {
                 match action {
                     ModalHit::Cancel => with_app(|app| unsafe { close_provider_modal(app, true) }),
+                    ModalHit::CopyAuthUrl => with_app(|app| {
+                        if let Some(ProviderModal::Picker {
+                            auth_details: Some(details),
+                            url_copied_at,
+                            error,
+                            ..
+                        }) = &mut app.provider_modal
+                        {
+                            if let Some(url) = details
+                                .url
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|url| !url.is_empty())
+                            {
+                                match unsafe { copy_to_clipboard(hwnd, url) } {
+                                    Ok(()) => *url_copied_at = Some(Instant::now()),
+                                    Err(_) => {
+                                        *error = Some(
+                                            "URL을 복사하지 못했습니다. 다시 눌러주세요.".into(),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }),
                     ModalHit::AddKey => unsafe { submit_api_key(hwnd) },
                     ModalHit::ResetCreditUse => with_app(|app| {
                         if let Some(ProviderModal::ResetCredits {
@@ -4036,6 +4092,7 @@ unsafe fn draw_provider_modal(
             waiting_provider,
             waiting_codex,
             auth_details,
+            url_copied_at,
             scroll,
             selected_tab,
             ..
@@ -4116,17 +4173,35 @@ unsafe fn draw_provider_modal(
                 if let Some(details) = auth_details {
                     for (index, line) in auth_detail_lines(details).iter().take(5).enumerate() {
                         let top = 144 + index as i32 * 44;
+                        let is_url = details
+                            .url
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|url| !url.is_empty())
+                            .is_some_and(|url| *line == format!("URL: {url}"));
                         draw_text(
                             dc,
                             line,
                             RECT {
                                 left: 40,
                                 top,
-                                right: width - 40,
+                                right: width - if is_url { 84 } else { 40 },
                                 bottom: top + 42,
                             },
                             DT_LEFT | DT_WORDBREAK,
                         );
+                        if is_url {
+                            let rect = RECT {
+                                left: width - 80,
+                                top,
+                                right: width - 36,
+                                bottom: top + 44,
+                            };
+                            let copied = url_copied_at
+                                .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+                            draw_copy_icon(dc, rect, copied);
+                            app.modal_hits.push((rect, ModalHit::CopyAuthUrl));
+                        }
                     }
                 } else {
                     draw_text(
@@ -4576,6 +4651,34 @@ unsafe fn draw_provider_modal(
         }
         None => {}
     }
+}
+
+unsafe fn draw_copy_icon(dc: HDC, rect: RECT, copied: bool) {
+    let x = (rect.left + rect.right) / 2 - 8;
+    let y = (rect.top + rect.bottom) / 2 - 8;
+    let pen = CreatePen(
+        PS_SOLID,
+        1,
+        COLORREF(if copied { 0x006ee7a8 } else { 0x00d4d0cc }),
+    );
+    let old_pen = SelectObject(dc, pen);
+    let paths: &[&[(i32, i32)]] = if copied {
+        &[&[(1, 8), (6, 13), (16, 3)]]
+    } else {
+        &[
+            &[(3, 11), (0, 11), (0, 0), (11, 0), (11, 3)],
+            &[(5, 5), (16, 5), (16, 16), (5, 16), (5, 5)],
+        ]
+    };
+    for path in paths {
+        let _ = MoveToEx(dc, x + path[0].0, y + path[0].1, None);
+        for &(dx, dy) in &path[1..] {
+            let _ = LineTo(dc, x + dx, y + dy);
+        }
+    }
+    let _ = SelectObject(dc, old_pen);
+    let _ = DeleteObject(pen);
+    set_text_color(dc, 0x00d4d0cc);
 }
 
 unsafe fn draw_lucide_icon(dc: HDC, glyph: &str, rect: RECT, color: u32) {

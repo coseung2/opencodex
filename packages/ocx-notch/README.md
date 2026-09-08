@@ -41,6 +41,7 @@ Startup failures and Rust panics are written to the bounded diagnostic log `%LOC
 
 ## Interaction
 
+- Click the small copy icon beside an authorization URL to copy the full URL. A green check confirms the copy.
 - Click the power control to run `ocx stop` while OCX is online or `ocx start` while it is offline. The control stays busy until the command finishes; health polling determines the resulting online/offline state.
 - Online shutdown uses OCX's authenticated `POST /api/stop` graceful-stop endpoint directly, with CLI fallback for older OCX versions. Power transitions probe health immediately and then every ~75ms with a short timeout so the control reflects the real listener state quickly.
 - The header keeps Private and WS on separate rows, with fixed 0-to-Max segmented gauges beside them. The unboxed power and minus controls retain generous invisible hit areas and show hover/pressed feedback.
