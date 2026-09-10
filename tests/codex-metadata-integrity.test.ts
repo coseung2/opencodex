@@ -38,6 +38,7 @@ describe("Codex metadata integrity", () => {
       "session_id",
       "session-id",
       "thread-id",
+      "x-opencode-session",
       "chatgpt-account-id",
       "x-codex-parent-thread-id",
     ]) {
@@ -152,6 +153,7 @@ describe("Codex metadata integrity", () => {
         originator: "codex_cli_rs",
         session_id: "sess-real-2",
         "thread-id": "thread-real-2",
+        "x-opencode-session": "hermes-gateway",
       }),
     });
     const sync = request as { headers: Record<string, string> };
@@ -159,5 +161,6 @@ describe("Codex metadata integrity", () => {
     expect(sync.headers.originator).toBe("codex_cli_rs");
     expect(sync.headers.session_id).toBe("sess-real-2");
     expect(sync.headers["thread-id"]).toBe("thread-real-2");
+    expect(sync.headers["x-opencode-session"]).toBe("hermes-gateway");
   });
 });

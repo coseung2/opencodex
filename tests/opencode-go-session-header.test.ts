@@ -24,6 +24,13 @@ function codexHeaders(child = "child-thread-a"): Record<string, string> {
   };
 }
 
+function hermesHeaders(): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    "x-opencode-session": "hermes-gateway",
+  };
+}
+
 function upstreamResponse(url: string): Response {
   if (url.endsWith("/responses")) {
     return Response.json({
@@ -52,6 +59,7 @@ async function captureRequest(input: {
   model?: string;
   child?: string;
   provider?: OcxProviderConfig;
+  headers?: Record<string, string>;
 } = {}): Promise<{ url: string; headers: Headers }> {
   const providerName = input.providerName ?? "opencode-go";
   const model = input.model ?? MUSE_MODEL;
@@ -68,7 +76,7 @@ async function captureRequest(input: {
   const response = await handleResponses(
     new Request("http://localhost/v1/responses", {
       method: "POST",
-      headers: codexHeaders(input.child),
+      headers: input.headers ?? codexHeaders(input.child),
       body: JSON.stringify({ model: `${providerName}/${model}`, input: "ping", stream: false }),
     }),
     config,
@@ -123,6 +131,12 @@ describe("OpenCode Go session affinity (#3344)", () => {
     });
     expect(captured.headers.get(SESSION_HEADER)).toBe("operator-session");
     expect([...captured.headers.keys()].filter(name => name === SESSION_HEADER)).toHaveLength(1);
+  });
+
+  test("derives Go affinity from a relayed OpenCode session when Codex headers are absent", async () => {
+    const captured = await captureRequest({ headers: hermesHeaders() });
+    expect(captured.headers.get(SESSION_HEADER)).toMatch(/^ocx_[0-9a-f]{32}$/);
+    expect(captured.headers.get(SESSION_HEADER)).not.toBe("hermes-gateway");
   });
 
   test("keeps generated affinity runtime-only and omits it without a stable lane", async () => {

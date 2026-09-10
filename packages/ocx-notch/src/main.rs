@@ -8,7 +8,9 @@ mod subagents;
 
 use crate::callback_relay::CallbackRelay;
 use crate::model::*;
-use crate::models::{ModelRow, ModelsState, SelectedModelsResponse};
+use crate::models::{
+    ModelRow, ModelVisibilityRequest, ModelsState, SelectedModelsResponse, VisibilityTarget,
+};
 use crate::subagents::{
     InjectionModelResponse, SubagentModelsRequest, SubagentModelsResponse, SubagentState,
 };
@@ -98,12 +100,26 @@ enum ContentTab {
     Subagents,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct ModelHit {
-    provider: String,
-    id: String,
-    native: bool,
-    enabled: bool,
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ModelHit {
+    ToggleProvider(String),
+    SetProviderVisibility {
+        provider: String,
+        enabled: bool,
+    },
+    SetModelVisibility {
+        provider: String,
+        id: String,
+        native: bool,
+        enabled: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderVisibility {
+    AllOn,
+    AllOff,
+    Mixed,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -327,6 +343,7 @@ struct App {
     hot_tab: Option<ContentTab>,
     scroll_offset: i32,
     expanded_providers: HashSet<String>,
+    expanded_model_providers: HashSet<String>,
     provider_hits: Vec<(RECT, String)>,
     account_pause_hits: Vec<(RECT, AccountControl)>,
     account_switch_hits: Vec<(RECT, AccountSwitchControl)>,
@@ -552,7 +569,7 @@ impl App {
             };
         }
         if self.content_tab == ContentTab::Models {
-            return models_content_height(&self.state.models);
+            return models_content_height(&self.state.models, &self.expanded_model_providers);
         }
         if self.content_tab == ContentTab::Subagents {
             return subagent_content_height(&self.state.subagents);
@@ -898,6 +915,7 @@ fn run() -> windows::core::Result<()> {
             hot_tab: None,
             scroll_offset: 0,
             expanded_providers: HashSet::new(),
+            expanded_model_providers: HashSet::new(),
             provider_hits: Vec::new(),
             account_pause_hits: Vec::new(),
             account_switch_hits: Vec::new(),
@@ -3844,7 +3862,18 @@ unsafe extern "system" fn window_proc(
                 open_reset_credit_modal(hwnd, control);
             }
             if let Some(action) = model_action {
-                handle_model_action(hwnd, action);
+                match action {
+                    ModelHit::ToggleProvider(provider) => {
+                        with_app(|app| {
+                            if !app.expanded_model_providers.remove(&provider) {
+                                app.expanded_model_providers.insert(provider);
+                            }
+                        });
+                        resize_for_state(hwnd);
+                        let _ = InvalidateRect(hwnd, None, false);
+                    }
+                    action => handle_model_action(hwnd, action),
+                }
             }
             if let Some(action) = subagent_action {
                 handle_subagent_action(hwnd, action);
@@ -4000,6 +4029,7 @@ unsafe extern "system" fn window_proc(
                 app.pressed_account_delete = None;
                 app.pressed_reauth_control = None;
                 app.pressed_reset_credit_control = None;
+                app.pressed_model_hit = None;
                 app.pressed_subagent_hit = None;
                 app.pressed_modal_hit = None;
                 app.button_inside = false;
@@ -4810,32 +4840,64 @@ unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
 }
 
 fn handle_model_action(hwnd: HWND, action: ModelHit) {
-    let key = ModelsState::mutation_key(&action.provider, &action.id, action.native);
-    let mut row = None;
+    let mut mutation = None;
     with_app(|app| {
-        if app.state.models.mutating.contains(&key) {
+        let (provider, rows, enabled) = match &action {
+            ModelHit::SetModelVisibility {
+                provider,
+                id,
+                native,
+                enabled,
+            } => {
+                let Some(row) = app
+                    .state
+                    .models
+                    .rows
+                    .iter()
+                    .find(|row| row.provider == *provider && row.id == *id && row.native == *native)
+                    .cloned()
+                else {
+                    return;
+                };
+                (provider.clone(), vec![row], *enabled)
+            }
+            ModelHit::SetProviderVisibility { provider, enabled } => {
+                let rows = app
+                    .state
+                    .models
+                    .rows
+                    .iter()
+                    .filter(|row| row.provider == *provider)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if rows.is_empty() {
+                    return;
+                }
+                (provider.clone(), rows, *enabled)
+            }
+            ModelHit::ToggleProvider(_) => return,
+        };
+        let keys = rows
+            .iter()
+            .map(|row| ModelsState::mutation_key(&row.provider, &row.id, row.native))
+            .collect::<Vec<_>>();
+        if keys
+            .iter()
+            .any(|key| app.state.models.mutating.contains(key))
+        {
             return;
         }
-        let Some(found) = app
-            .state
-            .models
-            .rows
-            .iter()
-            .find(|row| {
-                row.provider == action.provider
-                    && row.id == action.id
-                    && row.native == action.native
-            })
-            .cloned()
-        else {
-            return;
-        };
-        app.state.models.mutating.insert(key.clone());
+        app.state.models.mutating.extend(keys.iter().cloned());
         app.state.models.message = None;
-        row = Some(found);
+        mutation = Some((provider, rows, keys, enabled));
     });
-    let Some(row) = row else {
+    let Some((provider, requested_rows, keys, enabled)) = mutation else {
         return;
+    };
+    let mutation_label = if requested_rows.len() == 1 {
+        format!("/{}", requested_rows[0].id)
+    } else {
+        format!(" ({} models)", requested_rows.len())
     };
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
@@ -4843,16 +4905,16 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
         let result: Result<(Vec<ModelRow>, SelectedModelsResponse), String> = (|| {
-            let _: serde_json::Value = api::put_json(
-                "/api/model-visibility",
-                &ModelsState::request(&row, action.enabled),
-            )?;
+            let request = provider_visibility_request(&provider, &requested_rows, enabled);
+            let _: serde_json::Value = api::put_json("/api/model-visibility", &request)?;
             let rows = api::get_json("/api/models", 30_000)?;
             let selected = api::get_json("/api/selected-models", 30_000)?;
             Ok((rows, selected))
         })();
         with_app(|app| {
-            app.state.models.mutating.remove(&key);
+            for key in &keys {
+                app.state.models.mutating.remove(key);
+            }
             match result {
                 Ok((rows, selected)) => {
                     app.state.models.apply_rows(rows);
@@ -4862,10 +4924,10 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
                     // toggle instead of maintaining a second local catalog.
                     app.force_refresh.store(true, Ordering::Release);
                     app.state.models.message = Some(format!(
-                        "{} {}/{}",
-                        if action.enabled { "Enabled" } else { "Hidden" },
-                        action.provider,
-                        action.id
+                        "{} {}{}",
+                        if enabled { "Enabled" } else { "Hidden" },
+                        provider,
+                        mutation_label
                     ));
                 }
                 Err(error) => {
@@ -4879,7 +4941,45 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
     });
 }
 
-fn models_content_height(state: &ModelsState) -> i32 {
+fn provider_visibility(state: &ModelsState, provider: &str) -> ProviderVisibility {
+    let mut visible = 0;
+    let mut total = 0;
+    for row in state.rows.iter().filter(|row| row.provider == provider) {
+        total += 1;
+        if state.visible(row) {
+            visible += 1;
+        }
+    }
+    match (visible, total) {
+        (0, _) => ProviderVisibility::AllOff,
+        (visible, total) if visible == total => ProviderVisibility::AllOn,
+        _ => ProviderVisibility::Mixed,
+    }
+}
+
+fn provider_visibility_request<'a>(
+    provider: &'a str,
+    rows: &'a [ModelRow],
+    enabled: bool,
+) -> ModelVisibilityRequest<'a> {
+    if let [row] = rows {
+        return ModelsState::request(row, enabled);
+    }
+    ModelVisibilityRequest {
+        scope: "models",
+        provider,
+        targets: rows
+            .iter()
+            .map(|row| VisibilityTarget {
+                id: &row.id,
+                native: row.native,
+            })
+            .collect(),
+        enabled,
+    }
+}
+
+fn models_content_height(state: &ModelsState, expanded: &HashSet<String>) -> i32 {
     if !state.loaded() {
         return 100;
     }
@@ -4892,9 +4992,12 @@ fn models_content_height(state: &ModelsState) -> i32 {
         .map(|row| row.provider.as_str())
         .collect::<HashSet<_>>()
         .len() as i32;
-    44 + provider_count * 34
-        + state.rows.len() as i32 * 38
-        + if state.message.is_some() { 34 } else { 0 }
+    let visible_rows = state
+        .rows
+        .iter()
+        .filter(|row| expanded.contains(&row.provider))
+        .count() as i32;
+    44 + provider_count * 34 + visible_rows * 38 + if state.message.is_some() { 34 } else { 0 }
 }
 
 unsafe fn draw_models(
@@ -4967,10 +5070,23 @@ unsafe fn draw_models(
     for row in &state.rows {
         if row.provider != provider {
             provider = &row.provider;
+            let expanded = app.expanded_model_providers.contains(provider);
+            let aggregate = provider_visibility(state, provider);
+            let busy = state
+                .rows
+                .iter()
+                .filter(|candidate| candidate.provider == provider)
+                .any(|candidate| {
+                    state.mutating.contains(&ModelsState::mutation_key(
+                        &candidate.provider,
+                        &candidate.id,
+                        candidate.native,
+                    ))
+                });
             let heading = RECT {
                 left,
                 top: y,
-                right,
+                right: right - 76,
                 bottom: y + 34,
             };
             if visible(&heading) {
@@ -4978,12 +5094,58 @@ unsafe fn draw_models(
                 set_text_color(dc, 0x00f0ece8);
                 draw_text(
                     dc,
-                    provider,
-                    heading,
+                    if expanded { "▾" } else { "▸" },
+                    RECT {
+                        left: heading.left,
+                        right: heading.left + 20,
+                        ..heading
+                    },
                     DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                 );
+                draw_text(
+                    dc,
+                    provider,
+                    RECT {
+                        left: heading.left + 20,
+                        right: heading.right,
+                        ..heading
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+                app.model_hits
+                    .push((heading, ModelHit::ToggleProvider(provider.to_string())));
+
+                let toggle = RECT {
+                    left: right - 68,
+                    top: heading.top + 3,
+                    right,
+                    bottom: heading.bottom - 3,
+                };
+                let (label, selected, enabled) = if busy {
+                    ("Saving...", false, false)
+                } else {
+                    match aggregate {
+                        ProviderVisibility::AllOn => ("On", true, true),
+                        ProviderVisibility::AllOff => ("Off", false, true),
+                        ProviderVisibility::Mixed => ("Mixed", false, true),
+                    }
+                };
+                draw_subagent_button(dc, toggle, label, enabled, selected, small_font);
+                if !busy {
+                    app.model_hits.push((
+                        toggle,
+                        ModelHit::SetProviderVisibility {
+                            provider: provider.to_string(),
+                            enabled: aggregate != ProviderVisibility::AllOn,
+                        },
+                    ));
+                }
             }
             y += 34;
+        }
+
+        if !app.expanded_model_providers.contains(provider) {
+            continue;
         }
 
         let row_rect = RECT {
@@ -5038,7 +5200,7 @@ unsafe fn draw_models(
             if !busy {
                 app.model_hits.push((
                     toggle,
-                    ModelHit {
+                    ModelHit::SetModelVisibility {
                         provider: row.provider.clone(),
                         id: row.id.clone(),
                         native: row.native,
@@ -7167,6 +7329,34 @@ fn minimize_hit_rect(width: i32) -> RECT {
 mod account_control_tests {
     use super::*;
 
+    fn model_row(provider: &str, id: &str, disabled: bool, native: bool) -> ModelRow {
+        ModelRow {
+            provider: provider.into(),
+            id: id.into(),
+            namespaced: if native {
+                id.into()
+            } else {
+                format!("{provider}/{id}")
+            },
+            disabled,
+            native,
+            display_name: None,
+        }
+    }
+
+    fn loaded_model_state() -> ModelsState {
+        let mut state = ModelsState::default();
+        state.apply_rows(vec![
+            model_row("kiro", "auto", false, false),
+            model_row("kiro", "claude", false, false),
+            model_row("openai", "gpt-native", true, true),
+        ]);
+        state.apply_selected(SelectedModelsResponse {
+            selected: [("kiro".into(), vec!["auto".into(), "claude".into()])].into(),
+        });
+        state
+    }
+
     #[test]
     fn all_content_tabs_are_clickable_at_the_minimum_window_width() {
         for tab in [
@@ -7186,6 +7376,57 @@ mod account_control_tests {
                 Some(tab)
             );
         }
+    }
+
+    #[test]
+    fn model_providers_start_collapsed_and_only_expanded_rows_add_height() {
+        let state = loaded_model_state();
+        let mut expanded = HashSet::new();
+
+        assert_eq!(models_content_height(&state, &expanded), 44 + 2 * 34);
+        expanded.insert("kiro".to_string());
+        assert_eq!(
+            models_content_height(&state, &expanded),
+            44 + 2 * 34 + 2 * 38
+        );
+        assert!(!expanded.contains("openai"));
+    }
+
+    #[test]
+    fn provider_aggregate_reports_partial_and_partial_enables_next() {
+        let mut state = loaded_model_state();
+        state.selected.insert("kiro".into(), vec!["auto".into()]);
+
+        let aggregate = provider_visibility(&state, "kiro");
+        assert_eq!(aggregate, ProviderVisibility::Mixed);
+        assert!(aggregate != ProviderVisibility::AllOn);
+
+        state.selected.insert("kiro".into(), Vec::new());
+        assert_eq!(
+            provider_visibility(&state, "kiro"),
+            ProviderVisibility::AllOn
+        );
+    }
+
+    #[test]
+    fn provider_visibility_request_contains_every_native_aware_target() {
+        let rows = vec![
+            model_row("openai", "gpt-routed", false, false),
+            model_row("openai", "gpt-native", true, true),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(provider_visibility_request("openai", &rows, true)).unwrap(),
+            serde_json::json!({
+                "scope": "models",
+                "provider": "openai",
+                "targets": [
+                    {"id": "gpt-routed"},
+                    {"id": "gpt-native", "native": true}
+                ],
+                "enabled": true
+            })
+        );
     }
 
     #[test]

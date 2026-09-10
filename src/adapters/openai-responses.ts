@@ -28,6 +28,7 @@ export const FORWARD_HEADERS = [
   "session_id",
   "session-id",
   "thread-id",
+  "x-opencode-session",
   "x-client-request-id",
   "x-codex-beta-features",
   "x-codex-installation-id",
