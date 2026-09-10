@@ -19,6 +19,7 @@ import { useProvidersCrud } from "./use-providers-crud";
 import { useProvidersFetch } from "./use-providers-fetch";
 import { ProvidersPageModals } from "./providers-page-modals";
 import { buildAccountLoginStatus, buildAddModalAccountRows } from "./providers-page-utils";
+import type { KiroOrganizationLogin } from "../components/KiroLoginModal";
 
 export default function Providers({ apiBase }: { apiBase: string }) {
   const t = useT();
@@ -40,6 +41,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const [codexLoginOpen, setCodexLoginOpen] = useState(false);
   const [modelsRefreshToken, setModelsRefreshToken] = useState(0);
   const [oauthTosPending, setOauthTosPending] = useState<{ provider: string; addAccount: boolean } | null>(null);
+  const [kiroLoginOpen, setKiroLoginOpen] = useState(false);
   const aliveRef = useRef(true);
   // Which apiBase this instance has already bootstrapped. StrictMode double-invokes the mount
   // effect and its deferred load is deliberately uncancellable, so the guard lives here.
@@ -187,6 +189,11 @@ export default function Providers({ apiBase }: { apiBase: string }) {
 
   const requestLoginOAuth = (provider: string, addAccount = false) => {
     if (busy === provider) return;
+    if (provider === "kiro" && addAccount) {
+      setLoginInfo(null);
+      setKiroLoginOpen(true);
+      return;
+    }
     if (oauthTosRisk(provider)) {
       setOauthTosPending({ provider, addAccount });
       return;
@@ -218,7 +225,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const accountLoginStatus = buildAccountLoginStatus(config, oauthStatusWithCodex);
   const isForwardProvider = (name: string) => config.providers[name]?.authMode === "forward";
 
-  const onAccountLogin = async (provider: string) => {
+  const onAccountLogin = async (provider: string, addAccount = false) => {
     if (provider === "openai") {
       if (busy === "openai") return;
       const configured = config.providers.openai;
@@ -252,7 +259,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     }
     // API-key rows have no OAuth login path (catalog hides the button).
     if (config.providers[provider]?.authMode === "oauth" || oauthProviders.includes(provider)) {
-      requestLoginOAuth(provider);
+      requestLoginOAuth(provider, addAccount);
     }
   };
 
@@ -344,6 +351,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         busy={busy}
         addModalAccountRows={addModalAccountRows}
         accountLoginStatus={accountLoginStatus}
+        loginInfo={loginInfo}
         removeConfirmName={removeConfirmName}
         removeDefaultProvider={removeConfirmName === config.defaultProvider
           ? Object.entries(config.providers).find(([name, provider]) => name !== removeConfirmName && provider.disabled !== true)?.[0] ?? null
@@ -352,6 +360,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         jsonLeaveOpen={jsonLeaveOpen}
         jsonSaving={jsonSaving}
         oauthTosPending={oauthTosPending}
+        kiroLoginOpen={kiroLoginOpen}
         onCloseAdd={() => {
           if (busy) void cancelLoginOAuth(busy);
           setAdding(false);
@@ -390,6 +399,15 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           if (!pending) return;
           setOauthTosPending(null);
           void loginOAuth(pending.provider, pending.addAccount);
+        }}
+        onCancelKiroLogin={() => {
+          setKiroLoginOpen(false);
+          setLoginInfo(null);
+        }}
+        onSubmitKiroLogin={(organization?: KiroOrganizationLogin) => {
+          setKiroLoginOpen(false);
+          setLoginInfo(null);
+          void loginOAuth("kiro", true, undefined, organization);
         }}
       />
     </>

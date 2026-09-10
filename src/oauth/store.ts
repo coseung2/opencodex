@@ -27,6 +27,7 @@ import {
   type GenerationContext,
 } from "../lib/state-store-sweeper";
 import { validateCopilotApiBaseUrl } from "./github-copilot";
+import { kiroAccountIdentity } from "./kiro-identity";
 import type { OAuthCredentialSource, OAuthCredentials, ProviderAccount, ProviderAccountSet } from "./types";
 
 type AuthStore = Record<string, ProviderAccountSet>;
@@ -472,11 +473,11 @@ export async function saveCredential(
     const set = store[provider];
     // Kiro social logins share one device-scoped CodeWhisperer profile ARN, so the
     // profile ARN cannot distinguish Google accounts. Prefer the signed-in email for
-    // Kiro identity so a second Google account appends a pool row instead of silently
-    // replacing the first. Other providers keep accountId-first identity semantics.
+    // social identity. SSO accounts require a user identity, qualified by region or
+    // the imported organization profile; the profile alone cannot identify a user.
     const identityKey = (candidate: OAuthCredentials): string | undefined =>
       provider === "kiro"
-        ? (candidate.email ?? candidate.accountId)
+        ? kiroAccountIdentity(candidate)
         : (candidate.accountId ?? candidate.email);
     const identity = identityKey(safe);
     if (!set || SINGLE_SLOT_PROVIDERS.has(provider)) {
@@ -495,7 +496,12 @@ export async function saveCredential(
       // Kiro legacy rows created before email was extracted carry only the profile ARN.
       // Upgrade an email-less row in place when the new credential proves it is the
       // same underlying Kiro profile, instead of appending a duplicate for the same human.
-      if (provider === "kiro" && safe.email && safe.kiro?.profileArn) {
+      if (
+        provider === "kiro"
+        && safe.kiro?.authType !== "aws_sso_oidc"
+        && safe.email
+        && safe.kiro?.profileArn
+      ) {
         const legacy = set.accounts.find(a =>
           a.credential.email === undefined
           && a.credential.kiro?.profileArn === safe.kiro?.profileArn,

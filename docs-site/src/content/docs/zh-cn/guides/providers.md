@@ -93,7 +93,7 @@ provider 仍保持 deny-by-default。
 
 OAuth 凭据中带有稳定账号 id 或邮箱的提供商可以保存多个登录。Providers 页面会在下拉列表中显示这些
 账号，允许继续添加，并在不登出其他账号的情况下切换当前账号。只有没有身份信息的 Kimi 凭据会替换
-当前 active slot；Kiro 账户以配置文件 ARN 为键。`chatgpt` 始终只有一个 slot，因为 Codex 账号池使用独立存储。令牌仍保存在
+当前 active slot；Kiro 账户以解析出的账户身份为键；组织登录使用用户与组织的组合。`chatgpt` 始终只有一个 slot，因为 Codex 账号池使用独立存储。令牌仍保存在
 `~/.opencodex/auth.json` 中；`/api/oauth/accounts` 只返回脱敏后的 metadata。
 
 ### Kiro 凭据导入
@@ -105,9 +105,15 @@ Kiro 登录需要 Kiro CLI：Unix 使用 `curl -fsSL https://cli.kiro.dev/instal
 - `KIROCLI_DB_PATH` 用于选择非标准位置的 Kiro CLI SQLite 数据库；指定的数据库必须已经存在。
 - `KIROCLI_TOKEN_KEY` 在存在多个含糊的令牌行时选择确切的 `auth_kv` 行键。缺少选择值时，登录会失败而不会猜测。
 
-导入的凭据会保存到 `~/.opencodex/auth.json`。**添加账户**的回滚是独立流程：恢复之前的快照时会替换数据库，并删除当前的 WAL、SHM 和 journal 边车文件。
+导入的凭据会保存到 `~/.opencodex/auth.json`。在**添加账户**中，可以为普通 Kiro Builder ID 选择**个人账户**，也可以为 IAM Identity Center 选择**组织账户**。个人账户仍通过本地 `kiro-cli` 完成，组织账户完全不使用本地 CLI。
 
-由于回滚依赖快照，当会话存储已存在但无法捕获时（文件不可读、架构不匹配、令牌选择有歧义），当 `KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` 将导入路径指向与活动 CLI 存储不同的位置时，或当主 CLI 数据库没有可识别的令牌行时，**添加账户**会拒绝将 `kiro-cli` 登出。请修复或删除常规 `kiro-cli` 数据路径下的损坏数据库，并取消仅用于导入的选择器后重试。对于完全没有现有 `kiro-cli` 会话的机器，不受影响。
+组织账户需要填写 Start URL（`https://<portal>.awsapps.com/start`，支持 AWS 生成的 `d-...` 地址和自定义门户名）及 AWS 区域。OpenCodex 会自行执行 AWS SSO OIDC 设备授权：注册客户端、针对该门户发起设备授权、在浏览器中自动打开 AWS 返回的验证 URL，并在仪表板和 Notch 中显示一次性用户代码。该地址由 AWS 针对你的门户返回，通常就是访问门户本身（`https://<portal>.awsapps.com/start/#/device?user_code=...`），而不是 `device.sso` 主机，因此请直接使用打开的链接，不要假定固定地址。请在该页面手动确认并批准；随后 OpenCodex 会轮询直到 AWS 签发令牌，解析账户身份，并以用户与组织的组合（而非单一标识符）为键添加到 Kiro 账户池。区域会随该账户保存为 `ssoRegion`，以便后续令牌刷新仍指向同一个 AWS 端点；Start URL 及其他填写的值仅用于发起该授权请求，不会保存。现有账户不受影响，取消或失败时账户池保持不变。
+
+由于组织账户路径不触碰 Kiro CLI，它在未安装 `kiro-cli` 的机器上同样可用，也不会打断已登录的 `kiro-cli` 会话。
+
+以下 Kiro CLI 会话处理仅适用于强制重新登录的**个人账户**路径。该路径会快照当前会话、将 `kiro-cli` 登出，并把新登录导入为另一个 Kiro 池账户。回滚在恢复之前的快照时会替换数据库，并删除当前的 WAL、SHM 和 journal 边车文件。
+
+由于回滚依赖快照，当会话存储已存在但无法捕获时（文件不可读、架构不匹配、令牌选择有歧义），当 `KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` 将导入路径指向与活动 CLI 存储不同的位置时，或当主 CLI 数据库没有可识别的令牌行时，个人账户路径会拒绝将 `kiro-cli` 登出。请修复或删除常规 `kiro-cli` 数据路径下的损坏数据库，并取消仅用于导入的选择器后重试。对于完全没有现有 `kiro-cli` 会话的机器，不受影响。
 
 ## 3. API 密钥目录
 

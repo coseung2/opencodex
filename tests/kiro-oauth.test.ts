@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OAUTH_PROVIDERS, runLogin } from "../src/oauth";
-import { inspectKiroCliSqlite, kiroCliInstallGuidance, loginKiro, readKiroCliSqlite, refreshKiroToken, resolveKiroApiRegion, resolveKiroProfileArn, resolveKiroRegion, settleKiroLoginTransaction } from "../src/oauth/kiro";
+import { inspectKiroCliSqlite, kiroCliInstallGuidance, loginKiro, normalizeKiroOrganizationLogin, readKiroCliSqlite, refreshKiroToken, resolveKiroApiRegion, resolveKiroProfileArn, resolveKiroRegion, settleKiroLoginTransaction } from "../src/oauth/kiro";
 
 // Windows CI cold runners take 5-7s for the real SQLite create/inspect cycles here
 // (same flake class as 810fa115); the default 5s harness timeout is too tight.
@@ -161,6 +161,41 @@ function seedCustomTokenDb(path: string, rows: Array<[string, Record<string, unk
 }
 
 describe("kiro oauth — import-first", () => {
+  test("normalizes generated and custom AWS access portal Start URLs", () => {
+    expect(normalizeKiroOrganizationLogin({
+      startUrl: " HTTPS://D-ABC123.awsapps.com/start/ ",
+      region: " us-east-1 ",
+    })).toEqual({ startUrl: "https://d-abc123.awsapps.com/start", region: "us-east-1" });
+    expect(normalizeKiroOrganizationLogin({
+      startUrl: "https://your-company.awsapps.com/start",
+      region: "ap-northeast-1",
+    })).toEqual({ startUrl: "https://your-company.awsapps.com/start", region: "ap-northeast-1" });
+  });
+
+  test("rejects malformed or deceptive Kiro organization portal inputs", () => {
+    const invalidUrls = [
+      "http://d-example.awsapps.com/start",
+      `https://${"user"}:${"secret"}${"@"}d-example.awsapps.com/start`,
+      "https://d-example.awsapps.com:443/start",
+      "https://d-example.awsapps.com.evil.test/start",
+      "https://awsapps.com/start",
+      "https://-bad.awsapps.com/start",
+      "https://bad-.awsapps.com/start",
+      "https://d-example.awsapps.com/other",
+      "https://d-example.awsapps.com/start?next=1",
+      "https://d-example.awsapps.com/start#code",
+      "https://d-example.awsapps.com/start\n",
+      `https://${"a".repeat(2050)}.awsapps.com/start`,
+    ];
+    for (const startUrl of invalidUrls) {
+      expect(() => normalizeKiroOrganizationLogin({ startUrl, region: "us-east-1" })).toThrow();
+    }
+    expect(() => normalizeKiroOrganizationLogin({
+      startUrl: "https://d-example.awsapps.com/start",
+      region: "$(whoami)",
+    })).toThrow(/invalid region/i);
+  });
+
   test("Kiro CLI install guidance uses PowerShell on Windows and keeps the Unix command elsewhere", () => {
     expect(kiroCliInstallGuidance("win32")).toContain("irm 'https://cli.kiro.dev/install.ps1' | iex");
     expect(kiroCliInstallGuidance("win32")).not.toContain("curl -fsSL https://cli.kiro.dev/install | bash");

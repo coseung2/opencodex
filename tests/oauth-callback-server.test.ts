@@ -33,3 +33,40 @@ describe("OAuth callback server defaults", () => {
     expect(flow.callbackBindHostname).toBe("127.0.0.1");
   });
 });
+
+test("client-browser OAuth advertises its callback without binding the VM port", async () => {
+  let auth: { callbackUri?: string } | undefined;
+  let manualState: string | undefined;
+  class RemoteFlow extends OAuthCallbackFlow {
+    constructor() {
+      super({
+        clientBrowser: true,
+        onAuth: info => { auth = info; },
+        onManualCodeInput: async expectedState => {
+          manualState = expectedState;
+          return `http://127.0.0.1:45678/exact/callback?code=remote-code&state=${expectedState}`;
+        },
+      }, {
+        preferredPort: 45678,
+        callbackPath: "/exact/callback",
+        callbackHostname: "127.0.0.1",
+        callbackBindHostname: "127.0.0.1",
+        redirectUri: "http://127.0.0.1:45678/exact/callback",
+      });
+    }
+    async generateAuthUrl() { return { url: "https://example.test/authorize" }; }
+    async exchangeToken(code: string) {
+      return { access: code, refresh: "refresh", expires: Date.now() + 60_000 };
+    }
+  }
+
+  const blocker = Bun.serve({ hostname: "127.0.0.1", port: 45678, fetch: () => new Response("occupied") });
+  try {
+    const credential = await new RemoteFlow().login();
+    expect(credential.access).toBe("remote-code");
+    expect(manualState).toBeTruthy();
+    expect(auth?.callbackUri).toBe("http://127.0.0.1:45678/exact/callback");
+  } finally {
+    blocker.stop(true);
+  }
+});

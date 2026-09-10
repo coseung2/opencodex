@@ -3038,6 +3038,23 @@ describe("codex-auth API", () => {
     expect(data).toMatchObject({ status: "error", error: "Login cancelled" });
   });
 
+  test.each([
+    "/api/codex-auth/login",
+    "/api/codex-auth/login/code",
+    "/api/codex-auth/login/cancel",
+  ])("POST %s rejects non-object JSON bodies with a controlled 400", async (pathname) => {
+    for (const body of [null, [], 1, "invalid"]) {
+      const req = new Request(`http://localhost${pathname}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const resp = await handleCodexAuthAPI(req, new URL(req.url), makeConfig());
+      expect(resp!.status).toBe(400);
+      expect(await resp!.json()).toEqual({ error: "body must be a JSON object" });
+    }
+  });
+
   describe("POST /api/codex-auth/login/code", () => {
     async function startPendingFlow() {
       const oauth = await import("../src/oauth");
@@ -3093,6 +3110,22 @@ describe("codex-auth API", () => {
         expect(submitSpy).toHaveBeenCalledTimes(1);
         expect(submitSpy).toHaveBeenCalledWith("chatgpt", pasted);
         expect(responseText).not.toContain(pasted);
+      } finally {
+        submitSpy.mockRestore();
+        await flow.cleanup();
+      }
+    });
+
+    test("accepts callbackUrl as the remote relay field", async () => {
+      const flow = await startPendingFlow();
+      const callbackUrl = "http://localhost:1455/auth/callback?code=secret-code&state=expected";
+      const submitSpy = spyOn(flow.oauth, "submitManualLoginCode").mockReturnValue({ ok: true });
+      try {
+        const req = codeRequest({ flowId: flow.flowId, callbackUrl });
+        const resp = await handleCodexAuthAPI(req, new URL(req.url), makeConfig());
+        expect(resp!.status).toBe(202);
+        expect(submitSpy).toHaveBeenCalledWith("chatgpt", callbackUrl);
+        expect(await resp!.text()).not.toContain(callbackUrl);
       } finally {
         submitSpy.mockRestore();
         await flow.cleanup();

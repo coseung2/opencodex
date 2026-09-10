@@ -45,6 +45,9 @@ opencodex --version
 ```
 
 On Windows x64, `ocx-notch` launches the native Notch companion bundled in the same npm package.
+Expand a provider's account pool and click **Delete** on an account row to remove a
+Codex, OAuth, or API-key pool entry after confirmation. The main Codex account cannot be
+removed here. Failed deletions keep the account visible and show an error in the status bar.
 On Linux, macOS, and non-x64 Windows systems, that command exits with an explicit unsupported-platform
 message; `ocx` and `opencodex` remain fully supported.
 

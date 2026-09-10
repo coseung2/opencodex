@@ -130,13 +130,56 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // the provider's loopback callback server (inside this process) captures the redirect in the
   // background, then the credential is persisted. The GUI opens the URL and polls /api/oauth/status.
   if (url.pathname === "/api/oauth/login" && req.method === "POST") {
-    const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; addAccount?: boolean; accountId?: string; reauth?: boolean };
-    const provider = (body.provider ?? "").trim().toLowerCase();
+    const parsedBody = await readManagementJsonBodyOr(req, {});
+    if (!isPlainRecord(parsedBody)) return jsonResponse({ error: "body must be a JSON object" }, 400);
+    const body = parsedBody;
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
     if (namespaceCollision) return jsonResponse({ error: namespaceCollision }, 409);
-    const accountId = body.accountId?.trim();
+    if (body.accountId !== undefined && typeof body.accountId !== "string") {
+      return jsonResponse({ error: "accountId must be a string" }, 400);
+    }
+    const accountId = typeof body.accountId === "string" ? body.accountId.trim() : undefined;
     const reauth = body.reauth === true || Boolean(accountId);
+    if (body.clientBrowser !== undefined && typeof body.clientBrowser !== "boolean") {
+      return jsonResponse({ error: "clientBrowser must be a boolean" }, 400);
+    }
+    const clientBrowser = body.clientBrowser === true;
+    if (body.kiroOrganization !== undefined && provider !== "kiro") {
+      return jsonResponse({ error: "Kiro organization login is only valid for the kiro provider" }, 400);
+    }
+    let kiroOrganization: { startUrl: string; region: string } | undefined;
+    if (body.kiroOrganization !== undefined) {
+      if (
+        body.addAccount !== true
+        || accountId !== undefined
+        || body.reauth !== undefined
+        || !isPlainRecord(body.kiroOrganization)
+      ) {
+        return jsonResponse({ error: "Kiro organization login requires a fresh add-account request" }, 400);
+      }
+      const startUrl = body.kiroOrganization.startUrl;
+      const region = body.kiroOrganization.region;
+      if (
+        Object.keys(body.kiroOrganization).some(key => key !== "startUrl" && key !== "region")
+        || typeof startUrl !== "string"
+        || typeof region !== "string"
+        || !startUrl.trim()
+        || !region.trim()
+      ) {
+        return jsonResponse({ error: "Kiro organization login requires Start URL and region" }, 400);
+      }
+      try {
+        const { normalizeKiroOrganizationLogin } = await import("../../oauth/kiro");
+        kiroOrganization = normalizeKiroOrganizationLogin({ startUrl, region });
+      } catch {
+        return jsonResponse({ error: "Invalid Kiro organization Start URL or region" }, 400);
+      }
+    }
+    if (clientBrowser && provider === "kiro" && !kiroOrganization) {
+      return jsonResponse({ error: "Kiro personal CLI login is unavailable remotely; use organization login" }, 400);
+    }
     try {
       if (accountId) {
         const { getAccountSet } = await import("../../oauth/store");
@@ -149,9 +192,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       // request may already have mutated live config and yielded before its save.
       const persistedBaseline = readConfigDiagnostics().config;
       // addAccount / reauth forces a fresh browser identity (skips local-CLI token import).
-      const { url: authUrl, instructions, deviceCode } = await startLoginFlow(provider, {
+      const { flowId, url: authUrl, instructions, deviceCode, callbackUri } = await startLoginFlow(provider, {
         forceLogin: body.addAccount === true || reauth,
+        ...(clientBrowser ? { clientBrowser: true } : {}),
         ...(accountId ? { reauthAccountId: accountId } : {}),
+        ...(kiroOrganization ? { kiroOrganization } : {}),
       }, {
         // startLoginFlow returns the authorization URL before background persistence completes.
         // Three-way reconcile settled disk changes so a failed login cannot leave a provider
@@ -161,21 +206,26 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
           reconcileLiveStateStores();
         },
       });
-      if (authUrl && !deviceCode) {
+      if (authUrl && !clientBrowser) {
         // Open the browser server-side (the proxy runs on the user's machine) — the GUI's
         // window.open is popup-blocked because it runs after an await, not a direct click.
+        // Device authorization also opens locally so Kiro organization login takes the user
+        // directly to the verification page while the code remains visible in the client.
         const { openUrl } = await import("../../lib/open-url");
         openUrl(authUrl);
       }
-      return jsonResponse({ url: authUrl, instructions, deviceCode });
+      return jsonResponse({ ...(clientBrowser ? { flowId } : {}), url: authUrl, instructions, deviceCode, callbackUri });
     } catch (err) {
       if (err instanceof OAuthMutationBusyError) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const duplicateLoginMessage = `A login for ${provider} is already in progress`;
+      const kiroCliMessage = provider === "kiro" && /^Kiro CLI (?:could not prepare|login did not complete)/.test(message)
+        ? message
+        : undefined;
       return jsonResponse({
         error: message === duplicateLoginMessage
           ? duplicateLoginMessage
-          : publicOAuthAuthenticationErrorMessage(err),
+          : kiroCliMessage ?? publicOAuthAuthenticationErrorMessage(err),
       }, 409);
     }
   }
@@ -183,25 +233,30 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // Cancel an in-progress browser/device OAuth login (GUI "Cancel" / modal close). Guarded by
   // the same public predicate as /api/oauth/login — only publicly startable flows are cancellable.
   if (url.pathname === "/api/oauth/login/cancel" && req.method === "POST") {
-    const body = await readManagementJsonBodyOr(req, {}) as { provider?: string };
-    const provider = (body.provider ?? "").trim().toLowerCase();
+    const body = await readManagementJsonBodyOr(req, {});
+    if (!isPlainRecord(body)) return jsonResponse({ error: "body must be a JSON object" }, 400);
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
+    const flowId = typeof body.flowId === "string" ? body.flowId.trim() : undefined;
     const { cancelLoginFlow } = await import("../../oauth");
-    const cancelled = cancelLoginFlow(provider);
+    const cancelled = cancelLoginFlow(provider, flowId);
     return jsonResponse({ ok: true, cancelled });
   }
 
   // Manual fallback for browser OAuth: paste the final redirect URL (or authorization code)
   // when the browser cannot reach the loopback callback (remote/SSH/blocked localhost).
   if (url.pathname === "/api/oauth/login/code" && req.method === "POST") {
-    const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; input?: string; code?: string };
-    const provider = (body.provider ?? "").trim().toLowerCase();
+    const parsedBody = await readManagementJsonBodyOr(req, {});
+    if (!isPlainRecord(parsedBody)) return jsonResponse({ error: "body must be a JSON object" }, 400);
+    const body = parsedBody;
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
-    const input = typeof body.input === "string" ? body.input : typeof body.code === "string" ? body.code : "";
+    const input = typeof body.callbackUrl === "string" ? body.callbackUrl : typeof body.input === "string" ? body.input : typeof body.code === "string" ? body.code : "";
     // Authorization responses are measured in hundreds of bytes; never accept the
     // generic management-body allowance here.
     if (input.length > 4096) return jsonResponse({ error: "input too long" }, 400);
-    const result = submitManualLoginCode(provider, input);
+    const flowId = typeof body.flowId === "string" ? body.flowId.trim() : undefined;
+    const result = submitManualLoginCode(provider, input, flowId);
     if (!result.ok) return jsonResponse({ error: result.error }, 409);
     return jsonResponse({ ok: true });
   }
@@ -209,7 +264,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   if (url.pathname === "/api/oauth/status" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
-    return jsonResponse(getLoginStatus(provider));
+    const flowId = url.searchParams.get("flowId")?.trim() || undefined;
+    return jsonResponse(getLoginStatus(provider, flowId));
   }
 
   if (url.pathname === "/api/oauth/logout" && req.method === "POST") {

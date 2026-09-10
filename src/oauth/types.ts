@@ -52,9 +52,11 @@ export interface ProviderAccountSet {
 }
 
 export interface OAuthController {
-  onAuth?(info: { url: string; instructions?: string; deviceCode?: string }): void;
+  onAuth?(info: { url: string; instructions?: string; deviceCode?: string; callbackUri?: string }): void;
   onProgress?(message: string): void;
   onManualCodeInput?(expectedState?: string): Promise<string>;
+  /** The browser and callback relay live on a separate client machine. */
+  clientBrowser?: boolean;
   signal?: AbortSignal;
 }
 

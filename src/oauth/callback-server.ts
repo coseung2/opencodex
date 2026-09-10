@@ -110,10 +110,12 @@ export abstract class OAuthCallbackFlow {
   /** Execute the OAuth login flow. */
   async login(): Promise<OAuthCredentials> {
     const state = this.generateState();
-    const { servers, redirectUri } = await this.#startCallbackServer(state);
+    const { servers, redirectUri } = this.ctrl.clientBrowser
+      ? { servers: [] as BunServer[], redirectUri: this.redirectUri ?? `http://${this.callbackHostname}:${this.preferredPort}${this.callbackPath}` }
+      : await this.#startCallbackServer(state);
     try {
       const { url: authUrl, instructions } = await this.generateAuthUrl(state, redirectUri);
-      this.ctrl.onAuth?.({ url: authUrl, instructions });
+      this.ctrl.onAuth?.({ url: authUrl, instructions, callbackUri: redirectUri });
       this.ctrl.onProgress?.("Waiting for browser authentication...");
       const { code } = await this.#waitForCallback(state);
       this.ctrl.onProgress?.("Exchanging authorization code for tokens...");

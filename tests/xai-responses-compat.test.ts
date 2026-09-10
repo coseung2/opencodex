@@ -26,6 +26,22 @@ const apiProvider = {
 };
 
 describe("xAI Responses custom-tool compatibility", () => {
+  test("undeclared custom history retains required item identity with store:false", () => {
+    const raw = { model: "grok-4.6", store: false, input: [
+      { type: "custom_tool_call", call_id: "call_history", name: "old_tool", input: "synthetic" },
+      { type: "custom_tool_call_output", call_id: "call_history", output: "done" },
+    ] };
+    const build = (provider: typeof apiProvider) => JSON.parse(createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: raw.model, context: { messages: [] }, stream: false, options: {}, _rawBody: raw,
+    }, { headers: new Headers() }).body);
+    const first = build(apiProvider);
+    expect(first.input[0].id).toMatch(/^ctc_[a-f0-9]{32}$/);
+    expect(build(apiProvider).input[0].id).toBe(first.input[0].id);
+    expect(first.input[0]).toMatchObject(raw.input[0]);
+    expect(first.input[1]).toEqual(raw.input[1]);
+    expect(build({ ...apiProvider, baseUrl: "https://custom.test/v1" }).input).toEqual(raw.input);
+    expect(raw.input[0]).not.toHaveProperty("id");
+  });
   test("lowers a bare custom tool and its replay items without touching ordinary functions", () => {
     const raw = {
       tools: [

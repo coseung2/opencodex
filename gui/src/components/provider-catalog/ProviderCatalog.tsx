@@ -6,6 +6,9 @@
  */
 import { useMemo, useState } from "react";
 import { useT } from "../../i18n/shared";
+import type { LoginHint } from "../provider-workspace/types";
+import { LoginUrlBlock } from "../login-url-block";
+import { useCopyFeedback } from "../use-copy-feedback";
 import {
   bucketPresets,
   filterPresets,
@@ -38,6 +41,7 @@ export default function ProviderCatalog({
   accountRows = EMPTY_ACCOUNT_ROWS,
   accountStatus = EMPTY_ACCOUNT_STATUS,
   busyProvider = null,
+  loginHint = null,
   onLogin,
   onCancelLogin,
   onLogout,
@@ -52,11 +56,13 @@ export default function ProviderCatalog({
   accountRows?: AccountLoginRow[];
   accountStatus?: Record<string, AccountLoginStatus>;
   busyProvider?: string | null;
-  onLogin?: (provider: string) => void;
+  loginHint?: LoginHint | null;
+  onLogin?: (provider: string, addAccount?: boolean) => void;
   onCancelLogin?: (provider: string) => void;
   onLogout?: (provider: string) => void;
 }) {
   const t = useT();
+  const deviceCodeCopy = useCopyFeedback<string>();
   const [tier, setTier] = useState<CatalogTier>(initialTier);
   const [query, setQuery] = useState("");
 
@@ -145,12 +151,21 @@ export default function ProviderCatalog({
         {tier === "accounts" && accountRows.map(row => {
           const status = accountStatus[row.id];
           const busy = busyProvider === row.id;
+          const hintForThis = busy && loginHint?.provider === row.id ? loginHint : null;
+          const deviceCode = hintForThis?.deviceCode ?? "";
+          const deviceCodeOutcome = deviceCodeCopy.outcomeFor(deviceCode);
+          const deviceCodeCopyLabel = deviceCodeOutcome === "copied"
+            ? t("prov.codeCopied")
+            : deviceCodeOutcome === "unavailable"
+              ? t("prov.linkCopyUnavailable")
+              : t("prov.copyCode");
           const loggedIn = !!status?.loggedIn;
           const statusText = loggedIn
             ? (status?.email ?? row.statusLabel ?? t("modal.accountLoggedIn"))
             : (status?.error ?? row.statusLabel ?? t("modal.accountLoggedOut"));
           return (
-            <div key={row.id} className="list-row provider-catalog-account-row">
+            <div key={row.id}>
+            <div className="list-row provider-catalog-account-row">
               <div>
                 <div className="title">{row.label}</div>
                 <div className="sub">{statusText}</div>
@@ -172,13 +187,44 @@ export default function ProviderCatalog({
                     )}
                   </>
                 ) : loggedIn ? (
-                  onLogout && <button type="button" className="btn btn-ghost" onClick={() => onLogout(row.id)}>{t("modal.accountLogout")}</button>
+                  <>
+                    {onLogin && (
+                      <button type="button"
+                        className="btn btn-ghost"
+                        disabled={busy}
+                        onClick={() => { if (!busy) onLogin(row.id, true); }}
+                      >
+                        {t("modal.accountAdd")}
+                      </button>
+                    )}
+                    {onLogout && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { if (!busy) onLogout(row.id); }}>{t("modal.accountLogout")}</button>}
+                  </>
                 ) : busy ? (
                   onCancelLogin && <button type="button" className="btn btn-ghost" onClick={() => onCancelLogin(row.id)}>{t("common.cancel")}</button>
                 ) : (
                   onLogin && <button type="button" className="btn btn-primary" onClick={() => onLogin(row.id)}>{t("modal.accountLogin")}</button>
                 )}
               </div>
+            </div>
+            {hintForThis && (
+              <div className="pwi-auth-wait" role="status">
+                <span className="pwi-spin-inline" aria-hidden="true" />
+                <div className="pwi-auth-wait-copy">
+                  <div className="pwi-auth-wait-title">{t("prov.waitingBrowser")}</div>
+                  {deviceCode && (
+                    <div className="pwi-device-code-wrap">
+                      <span>{t("prov.deviceCode")}</span>
+                      <code className="pwi-device-code">{deviceCode}</code>
+                      <button type="button" className="btn btn-primary btn-sm"
+                        onClick={() => deviceCodeCopy.copy(deviceCode, deviceCode)}>
+                        <span aria-live="polite">{deviceCodeCopyLabel}</span>
+                      </button>
+                    </div>
+                  )}
+                  <LoginUrlBlock url={hintForThis.url ?? ""} />
+                </div>
+              </div>
+            )}
             </div>
           );
         })}

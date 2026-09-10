@@ -79,6 +79,43 @@ describe("OAuth manual login code fallback", () => {
     expect(submitManualLoginCode("xai", "   ")).toEqual({ ok: false, error: "empty code" });
   });
 
+  test("remote relay requires its owning flow and exact full callback URL", async () => {
+    const originalLogin = (await import("../src/oauth")).OAUTH_PROVIDERS.xai.login;
+    (await import("../src/oauth")).OAUTH_PROVIDERS.xai.login = async ctrl => {
+      ctrl.onAuth?.({ url: "https://example.test/auth", callbackUri: "http://127.0.0.1:1455/exact" });
+      await ctrl.onManualCodeInput?.("expected-state");
+      return { access: "a", refresh: "r", expires: Date.now() + 60_000 };
+    };
+    try {
+      const started = await startLoginFlow("xai", { clientBrowser: true });
+      expect(getLoginStatus("xai", `${started.flowId}-wrong`)).toMatchObject({
+        done: true, expired: true, error: "Login flow expired or unknown",
+      });
+      expect(getLoginStatus("xai")).toMatchObject({
+        done: true, expired: true, error: "Login flow expired or unknown",
+      });
+      expect(submitManualLoginCode("xai", "http://127.0.0.1:1455/exact?code=a&state=expected-state")).toEqual({
+        ok: false, error: "flowId required for remote login",
+      });
+      expect(submitManualLoginCode("xai", "raw-code", started.flowId)).toEqual({
+        ok: false, error: "remote callback relay requires the full callback URL",
+      });
+      expect(submitManualLoginCode("xai", "http://127.0.0.1:1455/wrong?code=a&state=expected-state", started.flowId)).toEqual({
+        ok: false, error: "callback URL does not match this login flow",
+      });
+      expect(submitManualLoginCode("xai", "http://127.0.0.1:1455/exact?code=a&state=expected-state", `${started.flowId}-wrong`)).toEqual({
+        ok: false, error: "login flow expired or unknown",
+      });
+      expect(submitManualLoginCode("xai", "http://127.0.0.1:1455/exact?code=a&state=wrong", started.flowId)).toEqual({
+        ok: false, error: "state mismatch — paste the redirect URL from THIS login attempt",
+      });
+    } finally {
+      (await import("../src/oauth")).OAUTH_PROVIDERS.xai.login = originalLogin;
+      cancelLoginFlow("xai");
+      clearLoginState("xai");
+    }
+  });
+
   test("OAuth pending code rejects 4097 UTF-8 bytes in the owner", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -242,6 +279,12 @@ describe("OAuth manual login code fallback", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+
+      for (const body of [null, [], 1, "invalid"]) {
+        const invalid = await post(body);
+        expect(invalid.status).toBe(400);
+        expect(await invalid.json()).toEqual({ error: "body must be a JSON object" });
+      }
 
       const unknown = await post({ provider: "not-a-provider", input: "code" });
       expect(unknown.status).toBe(400);

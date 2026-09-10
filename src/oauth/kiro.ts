@@ -1,8 +1,8 @@
 /**
  * Kiro (AWS CodeWhisperer) OAuth — import-first.
  *
- * Normal login imports the locally installed kiro-cli session. Account-add login deliberately
- * asks kiro-cli to switch identities in its supported browser flow, then imports that fresh session.
+ * Normal login imports the locally installed kiro-cli session. Personal account-add login asks
+ * kiro-cli to switch identities; organization account-add uses AWS SSO OIDC directly.
  *
  * Ported from jawcode packages/ai/src/providers/kiro.ts (readKiroCliSqlite, refreshKiroDesktopToken).
  * profileArn/region/client registration are persisted per OCX account so switching the account pool
@@ -29,6 +29,10 @@ import {
 import { homedir } from "node:os";
 import { KIRO_BUILDER_ID_SERVICE_PROFILE_ARN } from "../adapters/kiro-constants";
 import { getAccountSet, saveAccountCredential } from "./store";
+import {
+  loginKiroOrganizationDevice,
+  type KiroDeviceLoginDependencies,
+} from "./kiro-device";
 
 const DEFAULT_REGION = "us-east-1";
 const REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
@@ -66,11 +70,21 @@ export class KiroTokenRefreshError extends Error {
   }
 }
 
-export type KiroCliRunner = (args: string[], signal?: AbortSignal) => Promise<KiroCliCommandResult>;
+export type KiroCliRunner = (
+  args: string[],
+  signal?: AbortSignal,
+) => Promise<KiroCliCommandResult>;
 
 export interface KiroLoginOptions {
   forceLogin?: boolean;
+  organization?: KiroOrganizationLogin;
   cliRunner?: KiroCliRunner;
+  deviceDependencies?: KiroDeviceLoginDependencies;
+}
+
+export interface KiroOrganizationLogin {
+  startUrl: string;
+  region: string;
 }
 
 export function kiroCliInstallGuidance(platform = process.platform): string {
@@ -78,6 +92,49 @@ export function kiroCliInstallGuidance(platform = process.platform): string {
     ? `install the Kiro CLI in PowerShell (\`${KIRO_CLI_WINDOWS_INSTALL_COMMAND}\`)`
     : `install the Kiro CLI (\`${KIRO_CLI_UNIX_INSTALL_COMMAND}\`)`;
 }
+
+export function normalizeKiroOrganizationLogin(
+  organization: KiroOrganizationLogin | undefined,
+): KiroOrganizationLogin | undefined {
+  if (!organization) return undefined;
+  const rawStartUrl = organization.startUrl;
+  const startUrl = rawStartUrl.trim();
+  if (
+    startUrl.length === 0
+    || startUrl.length > 2048
+    || /[\u0000-\u001f\u007f]/.test(rawStartUrl)
+  ) {
+    throw new Error("Kiro organization Start URL must be a valid AWS access portal URL.");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(startUrl);
+  } catch {
+    throw new Error("Kiro organization Start URL must be a valid AWS access portal URL.");
+  }
+  const host = parsed.hostname.toLowerCase();
+  const authorityEnd = startUrl.indexOf("/", "https://".length);
+  const authority = startUrl.slice("https://".length, authorityEnd === -1 ? undefined : authorityEnd);
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.port !== ""
+    || authority.includes(":")
+    || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.awsapps\.com$/.test(host)
+    || !/^\/start\/?$/.test(parsed.pathname)
+    || parsed.search !== ""
+    || parsed.hash !== ""
+  ) {
+    throw new Error("Kiro organization Start URL must use https://<portal>.awsapps.com/start.");
+  }
+  return {
+    startUrl: `https://${host}/start`,
+    region: requireKiroRegion(organization.region),
+  };
+}
+
+const KIRO_WHOAMI_OUTPUT_LIMIT = 64 * 1024;
 
 const pendingKiroLoginTransactions = new WeakMap<OAuthCredentials, KiroCliSessionSnapshot>();
 /** Forced logins that started with no native CLI DB must logout on persistence failure. */
@@ -144,7 +201,10 @@ function throwIfKiroLoginCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("Kiro login cancelled.");
 }
 
-async function defaultKiroCliRunner(args: string[], signal?: AbortSignal): Promise<KiroCliCommandResult> {
+async function defaultKiroCliRunner(
+  args: string[],
+  signal?: AbortSignal,
+): Promise<KiroCliCommandResult> {
   throwIfKiroLoginCancelled(signal);
   let child: ReturnType<typeof Bun.spawn>;
   try {
@@ -162,9 +222,31 @@ async function defaultKiroCliRunner(args: string[], signal?: AbortSignal): Promi
   // AbortSignal does not replay an abort that lands between the pre-check and listener registration.
   if (signal?.aborted) abort();
   try {
-    const [exitCode, stdout] = await Promise.all([
+    let stdout = "";
+    const readStream = async (stream: unknown, capture: boolean): Promise<void> => {
+      if (!(stream instanceof ReadableStream)) return;
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          if (capture && stdout.length < KIRO_WHOAMI_OUTPUT_LIMIT) {
+            stdout += chunk.slice(0, KIRO_WHOAMI_OUTPUT_LIMIT - stdout.length);
+          }
+        }
+        const tail = decoder.decode();
+        if (capture && stdout.length < KIRO_WHOAMI_OUTPUT_LIMIT) {
+          stdout += tail.slice(0, KIRO_WHOAMI_OUTPUT_LIMIT - stdout.length);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    };
+    const [exitCode] = await Promise.all([
       child.exited,
-      child.stdout instanceof ReadableStream ? new Response(child.stdout).text() : Promise.resolve(""),
+      readStream(child.stdout, args[0] === "whoami"),
     ]);
     throwIfKiroLoginCancelled(signal);
     return { exitCode, stdout };
@@ -335,6 +417,10 @@ export function readKiroCliSqlite(): ImportedKiroToken | null {
  */
 export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions = {}): Promise<OAuthCredentials> {
   const runner = options.cliRunner ?? defaultKiroCliRunner;
+  const organization = normalizeKiroOrganizationLogin(options.organization);
+  if (options.forceLogin && organization) {
+    return loginKiroOrganizationDevice(ctrl, organization, options.deviceDependencies);
+  }
   // A prior process may have exited after switching the external CLI account but before
   // settlement. Recover that durable transaction before either importing or switching again.
   restoreStaleKiroCliSessionRecovery();
@@ -365,10 +451,14 @@ export async function loginKiro(ctrl: OAuthController, options: KiroLoginOptions
     try {
       const logout = await runner(["logout"], ctrl.signal);
       throwIfKiroLoginCancelled(ctrl.signal);
-      if (logout.exitCode !== 0) throw new Error("Kiro CLI could not prepare a fresh login.");
+      if (logout.exitCode !== 0) {
+        throw new Error(`Kiro CLI could not prepare a fresh login (exit code ${logout.exitCode}).`);
+      }
       const login = await runner(["login"], ctrl.signal);
       throwIfKiroLoginCancelled(ctrl.signal);
-      if (login.exitCode !== 0) throw new Error("Kiro CLI login did not complete successfully.");
+      if (login.exitCode !== 0) {
+        throw new Error(`Kiro CLI login did not complete successfully (exit code ${login.exitCode}).`);
+      }
       const fresh = readKiroCliSqliteCredential();
       if (!fresh) throw new Error("Kiro CLI login completed but no credential could be imported.");
       const credential = await oauthCredentialFromImported(fresh, runner, ctrl.signal);

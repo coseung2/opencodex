@@ -13,7 +13,6 @@ type TargetProvenance = "live-oauth-list" | "config" | "codex";
 const MAIN_ALIAS = "main";
 const MAIN_CODEX_ID = "__main__";
 /** Replacement-style single-slot OAuth (no stable identity; not HTTP-derivable). */
-const REPLACEMENT_STYLE_OAUTH = new Set(["kiro"]);
 
 const ACCOUNT_USAGE = `Usage:
   ocx account list [provider] [--json] [--all]
@@ -148,9 +147,6 @@ async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
       if (providerCodexAccountMode("openai", config.providers?.openai) === "direct") {
         notes.push("openai is in direct mode — the selection takes effect when pool mode is enabled");
       }
-    }
-    if (t.type === "oauth" && REPLACEMENT_STYLE_OAUTH.has(t.name)) {
-      notes.push(`${t.name}: single login slot — re-login replaces the current account`);
     }
   }
 

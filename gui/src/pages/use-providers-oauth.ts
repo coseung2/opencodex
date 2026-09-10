@@ -1,8 +1,9 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import type { TFn } from "../i18n/shared";
 import { readJsonIfOk } from "../fetch-json";
 import type { OAuthAccount, OAuthStatus } from "./providers-shared";
 import { oauthLabel } from "./providers-shared";
+import type { KiroOrganizationLogin } from "../components/KiroLoginModal";
 
 export function useProvidersOAuth({
   apiBase,
@@ -37,25 +38,41 @@ export function useProvidersOAuth({
   fetchProviderQuotas: (refresh?: boolean) => Promise<void>;
   bumpModelsRefresh: () => void;
 }) {
-  const cancelLoginOAuth = useCallback(async (provider: string) => {
-    const gen = (oauthLoginGenerationRef.current.get(provider) ?? 0) + 1;
-    oauthLoginGenerationRef.current.set(provider, gen);
+  const postCancel = useCallback(async (provider: string) => {
     try {
       await fetch(`${apiBase}/api/oauth/login/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider }),
+        keepalive: true,
       });
-    } catch { /* ignore */ }
+    } catch { /* best effort */ }
+  }, [apiBase]);
+
+  useEffect(() => () => {
+    for (const [provider, generation] of oauthLoginGenerationRef.current) {
+      if (generation > 0) void postCancel(provider);
+    }
+  }, [oauthLoginGenerationRef, postCancel]);
+
+  const cancelLoginOAuth = useCallback(async (provider: string) => {
+    const gen = (oauthLoginGenerationRef.current.get(provider) ?? 0) + 1;
+    oauthLoginGenerationRef.current.set(provider, gen);
+    await postCancel(provider);
     if (!aliveRef.current) return;
     if (oauthLoginGenerationRef.current.get(provider) === gen) {
       setBusy(current => current === provider ? null : current);
       setLoginInfo(current => current?.provider === provider ? null : current);
     }
     notify(t("prov.loginCancelled", { provider: oauthLabel(provider) }), false);
-  }, [aliveRef, apiBase, notify, oauthLoginGenerationRef, setBusy, setLoginInfo, t]);
+  }, [aliveRef, notify, oauthLoginGenerationRef, postCancel, setBusy, setLoginInfo, t]);
 
-  const loginOAuth = async (provider: string, addAccount = false, accountId?: string) => {
+  const loginOAuth = async (
+    provider: string,
+    addAccount = false,
+    accountId?: string,
+    kiroOrganization?: KiroOrganizationLogin,
+  ) => {
     const nextGen = (oauthLoginGenerationRef.current.get(provider) ?? 0) + 1;
     oauthLoginGenerationRef.current.set(provider, nextGen);
     const generation = nextGen;
@@ -71,6 +88,7 @@ export function useProvidersOAuth({
           provider,
           ...(addAccount || reauthTargetId ? { addAccount: true } : {}),
           ...(reauthTargetId ? { accountId: reauthTargetId, reauth: true } : {}),
+          ...(kiroOrganization ? { kiroOrganization } : {}),
         }),
       });
       if (oauthLoginGenerationRef.current.get(provider) !== generation || !aliveRef.current) return;
@@ -139,11 +157,7 @@ export function useProvidersOAuth({
         }
       }
       if (!finished && oauthLoginGenerationRef.current.get(provider) === generation && aliveRef.current) {
-        await fetch(`${apiBase}/api/oauth/login/cancel`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider }),
-        }).catch(() => {});
+        await postCancel(provider);
         notify(t("prov.loginTimeout", { provider: oauthLabel(provider) }), false);
         setLoginInfo(null);
       }

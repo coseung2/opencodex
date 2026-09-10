@@ -1,9 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod callback_relay;
 mod model;
+mod models;
+mod subagents;
 
+use crate::callback_relay::CallbackRelay;
 use crate::model::*;
+use crate::models::{ModelRow, ModelsState, SelectedModelsResponse};
+use crate::subagents::{
+    InjectionModelResponse, SubagentModelsRequest, SubagentModelsResponse, SubagentState,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -42,9 +50,14 @@ const MENU_EXIT: usize = 2;
 const MENU_THRESHOLD_DOWN: usize = 3;
 const MENU_THRESHOLD_UP: usize = 4;
 const MENU_PROVIDER_ADD: usize = 5;
+const MENU_CONNECTION: usize = 6;
 const MENU_THRESHOLD_BASE: usize = 1_000;
 const API_KEY_EDIT_ID: i32 = 30_001;
 const ACCOUNT_ID_EDIT_ID: i32 = 30_002;
+const KIRO_START_URL_EDIT_ID: i32 = 30_003;
+const KIRO_REGION_EDIT_ID: i32 = 30_004;
+const CONNECTION_URL_EDIT_ID: i32 = 30_005;
+const CONNECTION_TOKEN_EDIT_ID: i32 = 30_006;
 const DEFAULT_WIDTH: i32 = 640;
 const MIN_WIDTH: i32 = 320;
 const MAX_WIDTH: i32 = 1_200;
@@ -77,10 +90,31 @@ enum Button {
     Minimize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContentTab {
     Providers,
     Logs,
+    Models,
+    Subagents,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ModelHit {
+    provider: String,
+    id: String,
+    native: bool,
+    enabled: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum SubagentHit {
+    ToggleFeatured(String),
+    MoveFeatured(usize, isize),
+    CycleModel,
+    CycleEffort,
+    ToggleGuidance,
+    ToggleSyncDefaults,
+    Save,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -148,9 +182,15 @@ enum ModalHit {
     Preset(usize),
     Tab(ProviderCatalogTab),
     AddKey,
+    KiroPersonal,
+    KiroOrganization,
+    KiroOrganizationSubmit,
     ResetCreditUse,
     ResetCreditConfirm,
     ResetCreditConfirmCancel,
+    ConnectionModeLocal,
+    ConnectionModeRemote,
+    ConnectionSave,
     Cancel,
 }
 
@@ -181,6 +221,17 @@ enum ProviderModal {
         /// True when the provider already exists: submitting adds the key to its
         /// multi-key pool (POST /api/providers/keys) instead of replacing the row.
         add_key: bool,
+    },
+    KiroAccountChoice,
+    KiroOrganization {
+        error: Option<String>,
+    },
+    /// Local/Remote connection setup. `remote` is the mode being edited, not the
+    /// mode currently in force: nothing changes until Save succeeds.
+    Connection {
+        remote: bool,
+        submitting: bool,
+        error: Option<String>,
     },
     ResetCredits {
         control: ResetCreditControl,
@@ -236,6 +287,8 @@ enum Update {
     AutoSwitch(Result<AutoSwitchState, String>),
     Pools(Vec<AccountPool>),
     OpenAiPool(Result<AccountPool, String>),
+    Models(Result<(Vec<ModelRow>, SelectedModelsResponse), String>),
+    Subagents(Result<(SubagentModelsResponse, InjectionModelResponse), String>),
 }
 
 #[derive(Default)]
@@ -248,6 +301,11 @@ struct ViewState {
     private_commit: u64,
     system_memory: Option<SystemMemory>,
     details: Option<MemoryDetails>,
+    /// True when this Notch is pointed at a central OCX. Mirrors
+    /// `api::is_remote()`, refreshed whenever the connection changes.
+    remote: bool,
+    /// Why a stored remote connection is unusable, when it is.
+    connection_error: Option<String>,
     configs: Vec<ProviderConfig>,
     quotas: Vec<QuotaReport>,
     usage: Vec<UsageProvider>,
@@ -257,6 +315,8 @@ struct ViewState {
     providers: Vec<ProviderView>,
     auto_switch_threshold: u32,
     active_codex_account_id: Option<String>,
+    models: ModelsState,
+    subagents: SubagentState,
 }
 
 struct App {
@@ -270,17 +330,24 @@ struct App {
     provider_hits: Vec<(RECT, String)>,
     account_pause_hits: Vec<(RECT, AccountControl)>,
     account_switch_hits: Vec<(RECT, AccountSwitchControl)>,
+    account_delete_hits: Vec<(RECT, AccountSwitchControl)>,
     account_reauth_hits: Vec<(RECT, ReauthControl)>,
     account_reset_credit_hits: Vec<(RECT, ResetCreditControl)>,
+    model_hits: Vec<(RECT, ModelHit)>,
+    subagent_hits: Vec<(RECT, SubagentHit)>,
     modal_hits: Vec<(RECT, ModalHit)>,
     hot_account_control: Option<AccountControl>,
     hot_account_switch: Option<AccountSwitchControl>,
+    hot_account_delete: Option<AccountSwitchControl>,
     hot_reauth_control: Option<ReauthControl>,
     hot_reset_credit_control: Option<ResetCreditControl>,
     pressed_account_control: Option<AccountControl>,
     pressed_account_switch: Option<AccountSwitchControl>,
+    pressed_account_delete: Option<AccountSwitchControl>,
     pressed_reauth_control: Option<ReauthControl>,
     pressed_reset_credit_control: Option<ResetCreditControl>,
+    pressed_model_hit: Option<ModelHit>,
+    pressed_subagent_hit: Option<SubagentHit>,
     pressed_modal_hit: Option<ModalHit>,
     account_mutations: HashSet<String>,
     account_switch_mutations: HashSet<String>,
@@ -291,6 +358,10 @@ struct App {
     modal_generation: u64,
     api_key_edit: Option<isize>,
     account_id_edit: Option<isize>,
+    kiro_start_url_edit: Option<isize>,
+    kiro_region_edit: Option<isize>,
+    connection_url_edit: Option<isize>,
+    connection_token_edit: Option<isize>,
     context_menu_open: bool,
     pause_overrides: HashMap<String, bool>,
     width: i32,
@@ -317,14 +388,13 @@ impl App {
                     working_set,
                     private_commit,
                     system_memory,
-                } => {
-                    self.state.pid = pid;
-                    self.state.working_set = working_set;
-                    self.state.private_commit = private_commit;
-                    if let Some(system_memory) = system_memory {
-                        self.state.system_memory = Some(system_memory);
-                    }
-                }
+                } => apply_local_process_memory(
+                    &mut self.state,
+                    pid,
+                    working_set,
+                    private_commit,
+                    system_memory,
+                ),
                 Update::Health(result) => match result {
                     Ok(health) => {
                         self.state.online = true;
@@ -343,7 +413,7 @@ impl App {
                 },
                 Update::MemoryDetails(result) => {
                     if let Ok(details) = result {
-                        self.state.details = Some(details);
+                        apply_memory_details(&mut self.state, details);
                     }
                 }
                 Update::Usage(result) => match result {
@@ -377,6 +447,32 @@ impl App {
                     Ok(pool) => self.install_pool(pool),
                     Err(error) => self.state.status = error,
                 },
+                Update::Models(result) => {
+                    if self.state.models.mutating.is_empty() {
+                        match result {
+                            Ok((rows, selected)) => {
+                                self.state.models.apply_rows(rows);
+                                self.state.models.apply_selected(selected);
+                                self.state.models.message = None;
+                            }
+                            Err(error) => self.state.models.message = Some(error),
+                        }
+                    }
+                }
+                Update::Subagents(result) => {
+                    // A periodic refresh must not discard edits that have not
+                    // reached the server yet. Save performs its own refresh.
+                    if !self.state.subagents.dirty && !self.state.subagents.saving {
+                        match result {
+                            Ok((models, injection)) => {
+                                self.state.subagents.apply_models(models);
+                                self.state.subagents.apply_injection(injection);
+                                self.state.subagents.message = None;
+                            }
+                            Err(error) => self.state.subagents.message = Some(error),
+                        }
+                    }
+                }
             }
         }
         mark_codex_active_account(
@@ -454,6 +550,12 @@ impl App {
             } else {
                 self.state.logs.len() as i32 * LOG_ROW_HEIGHT
             };
+        }
+        if self.content_tab == ContentTab::Models {
+            return models_content_height(&self.state.models);
+        }
+        if self.content_tab == ContentTab::Subagents {
+            return subagent_content_height(&self.state.subagents);
         }
         let mut height = 0;
         for provider in &self.state.providers {
@@ -591,6 +693,42 @@ fn account_height(account: &AccountView) -> i32 {
     }
 }
 
+/// Install a local process sample. Ignored in remote mode: the pid belongs to the
+/// VM, so a local sample would describe an unrelated process on this PC.
+fn apply_local_process_memory(
+    state: &mut ViewState,
+    pid: u32,
+    working_set: u64,
+    private_commit: u64,
+    system_memory: Option<SystemMemory>,
+) {
+    if state.remote {
+        return;
+    }
+    state.pid = pid;
+    state.working_set = working_set;
+    state.private_commit = private_commit;
+    if let Some(system_memory) = system_memory {
+        state.system_memory = Some(system_memory);
+    }
+}
+
+/// Install `/api/system/memory`. In remote mode this is the only memory source,
+/// so the server's own figures drive the header; local machine capacity is
+/// dropped because it does not describe the VM.
+fn apply_memory_details(state: &mut ViewState, details: MemoryDetails) {
+    if state.remote {
+        state.working_set = details.rss.unwrap_or(0);
+        state.private_commit = details
+            .observed_bytes
+            .or(details.heap_total)
+            .or(details.heap_used)
+            .unwrap_or(0);
+        state.system_memory = None;
+    }
+    state.details = Some(details);
+}
+
 fn reset_credit_count(account: &AccountView) -> Option<u32> {
     account
         .quota
@@ -605,7 +743,12 @@ fn format_credit_timestamp(value: &str) -> String {
     };
     let time: String = rest.chars().take(5).collect();
     if date.len() == 10 && time.len() == 5 {
-        format!("{}.{:}.{:} {time} UTC", &date[0..4], &date[5..7], &date[8..10])
+        format!(
+            "{}.{:}.{:} {time} UTC",
+            &date[0..4],
+            &date[5..7],
+            &date[8..10]
+        )
     } else {
         value.chars().take(24).collect()
     }
@@ -613,10 +756,78 @@ fn format_credit_timestamp(value: &str) -> String {
 
 fn main() {
     install_panic_logger();
+    match parse_cli(std::env::args().skip(1)) {
+        Ok(Cli::Window) => {}
+        Ok(Cli::Connect(base_url)) => {
+            // Token arrives on stdin, never on the command line, and is never echoed.
+            std::process::exit(match api::save_connection_from_stdin(&base_url) {
+                Ok(()) => {
+                    println!("Connected to {}", api::connection_base_url());
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            });
+        }
+        Ok(Cli::Local) => {
+            std::process::exit(match api::save_connection(None, None) {
+                Ok(()) => {
+                    println!("Using the local OCX");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            });
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            eprintln!("usage: ocx-notch [--connect <http://host:port> | --local]");
+            std::process::exit(2);
+        }
+    }
     if let Err(error) = run() {
         append_diagnostic_log("startup-error", &format!("{error:?}"));
         std::process::exit(1);
     }
+}
+
+/// How this process was invoked. Bootstrap modes configure the connection and
+/// exit; the default opens the notch window.
+#[derive(Debug, PartialEq, Eq)]
+enum Cli {
+    Window,
+    /// `--connect <base-url>`: read the management token from stdin and store the
+    /// remote profile.
+    Connect(String),
+    /// `--local`: return to local mode and drop the stored credential.
+    Local,
+}
+
+fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return Ok(Cli::Window);
+    };
+    let mode = match first.as_str() {
+        "--local" => Cli::Local,
+        // The token is deliberately not accepted here: an argv credential would
+        // be visible to every process on the machine.
+        "--connect" | "--remote-server" => {
+            let base_url = args
+                .next()
+                .ok_or_else(|| format!("{first} needs a server address"))?;
+            Cli::Connect(base_url)
+        }
+        other => return Err(format!("Unknown option: {other}")),
+    };
+    if args.next().is_some() {
+        return Err("Too many arguments".into());
+    }
+    Ok(mode)
 }
 
 fn run() -> windows::core::Result<()> {
@@ -678,6 +889,8 @@ fn run() -> windows::core::Result<()> {
             state: ViewState {
                 status: "Loading OCX…".into(),
                 auto_switch_threshold: 80,
+                remote: api::is_remote(),
+                connection_error: api::connection_error(),
                 ..Default::default()
             },
             expanded: false,
@@ -688,17 +901,24 @@ fn run() -> windows::core::Result<()> {
             provider_hits: Vec::new(),
             account_pause_hits: Vec::new(),
             account_switch_hits: Vec::new(),
+            account_delete_hits: Vec::new(),
             account_reauth_hits: Vec::new(),
             account_reset_credit_hits: Vec::new(),
+            model_hits: Vec::new(),
+            subagent_hits: Vec::new(),
             modal_hits: Vec::new(),
             hot_account_control: None,
             hot_account_switch: None,
+            hot_account_delete: None,
             hot_reauth_control: None,
             hot_reset_credit_control: None,
             pressed_account_control: None,
             pressed_account_switch: None,
+            pressed_account_delete: None,
             pressed_reauth_control: None,
             pressed_reset_credit_control: None,
+            pressed_model_hit: None,
+            pressed_subagent_hit: None,
             pressed_modal_hit: None,
             account_mutations: HashSet::new(),
             account_switch_mutations: HashSet::new(),
@@ -709,6 +929,10 @@ fn run() -> windows::core::Result<()> {
             modal_generation: 0,
             api_key_edit: None,
             account_id_edit: None,
+            kiro_start_url_edit: None,
+            kiro_region_edit: None,
+            connection_url_edit: None,
+            connection_token_edit: None,
             context_menu_open: false,
             pause_overrides: HashMap::new(),
             width: initial_width,
@@ -766,6 +990,8 @@ fn start_workers(
         let mut last_slow = refresh_seed(now, Duration::from_secs(600));
         let mut last_details = refresh_seed(now, Duration::from_secs(60));
         let mut last_logs = refresh_seed(now, Duration::from_secs(60));
+        let mut last_models = refresh_seed(now, Duration::from_secs(600));
+        let mut last_subagents = refresh_seed(now, Duration::from_secs(600));
         let mut slow_interval = Duration::from_secs(300);
         loop {
             let forced = force_refresh.swap(false, Ordering::Relaxed);
@@ -824,8 +1050,34 @@ fn start_workers(
                 );
                 last_active = Instant::now();
             }
-            if want_details.load(Ordering::Relaxed)
-                && (forced || last_details.elapsed() >= Duration::from_secs(45))
+            if forced || last_models.elapsed() >= Duration::from_secs(300) {
+                let models = (|| {
+                    let rows = api::get_json("/api/models", 30_000)?;
+                    let selected = api::get_json("/api/selected-models", 30_000)?;
+                    Ok((rows, selected))
+                })();
+                send_update(hwnd, &api_tx, Update::Models(models));
+                last_models = Instant::now();
+            }
+            if forced || last_subagents.elapsed() >= Duration::from_secs(300) {
+                let subagents = (|| {
+                    let models = api::get_json("/api/subagent-models", 30_000)?;
+                    let injection = api::get_json("/api/injection-model", 30_000)?;
+                    Ok((models, injection))
+                })();
+                send_update(hwnd, &api_tx, Update::Subagents(subagents));
+                last_subagents = Instant::now();
+            }
+            // Remote mode has no local process to sample, so server memory is the
+            // only source and is polled on the health cadence rather than only
+            // while the details row is visible.
+            let details_interval = if api::is_remote() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(45)
+            };
+            if (api::is_remote() || want_details.load(Ordering::Relaxed))
+                && (forced || last_details.elapsed() >= details_interval)
             {
                 send_update(
                     hwnd,
@@ -840,7 +1092,9 @@ fn start_workers(
 
     thread::spawn(move || loop {
         let current_pid = pid.load(Ordering::Relaxed);
-        if current_pid != 0 {
+        // Never OpenProcess in remote mode: the pid belongs to the VM, and any
+        // local pid that happens to match would report an unrelated process.
+        if current_pid != 0 && !api::is_remote() {
             if let Some((working_set, private_commit)) = sample_process(current_pid) {
                 let system_memory = sample_system_memory();
                 send_update(
@@ -884,6 +1138,19 @@ fn send_update(hwnd: isize, tx: &Sender<Update>, update: Update) {
 }
 
 fn launch_power_action(hwnd: HWND, action: &'static str) {
+    // Remote mode owns no process here. The control is hidden, and this second
+    // check keeps any future caller from starting or stopping the local OCX
+    // while the notch is pointed at a central server.
+    if api::is_remote() {
+        with_app(|app| {
+            app.power_pending = false;
+            app.state.status = "Remote mode does not control the server process".into();
+        });
+        unsafe {
+            let _ = InvalidateRect(hwnd, None, false);
+        }
+        return;
+    }
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
         let result = if action == "stop" {
@@ -955,11 +1222,7 @@ fn account_action_rect(width: i32, top: i32, identity_width: i32, has_reset_cred
     } else {
         0
     };
-    let max_left = (width
-        - 244
-        - ACCOUNT_ACTION_GAP
-        - ACCOUNT_ACTION_WIDTH
-        - reset_credit_width)
+    let max_left = (width - 244 - ACCOUNT_ACTION_GAP - ACCOUNT_ACTION_WIDTH - reset_credit_width)
         .max(min_left);
     let left = (ACCOUNT_IDENTITY_LEFT + identity_width.max(0) + ACCOUNT_ACTION_GAP)
         .min(max_left)
@@ -1131,7 +1394,12 @@ fn submit_reset_credit(hwnd: HWND) {
     });
 }
 
-fn set_pool_account_paused(pools: &mut [AccountPool], provider: &str, id: &str, paused: bool) -> bool {
+fn set_pool_account_paused(
+    pools: &mut [AccountPool],
+    provider: &str,
+    id: &str,
+    paused: bool,
+) -> bool {
     let Some(account) = pools
         .iter_mut()
         .find(|pool| pool.provider == provider)
@@ -1187,7 +1455,12 @@ fn launch_pause_action(hwnd: HWND, control: AccountControl, paused: bool) {
                 }
                 Err(error) => {
                     app.pause_overrides.remove(&control.id);
-                    set_pool_account_paused(&mut app.state.pools, &control.provider, &control.id, !paused);
+                    set_pool_account_paused(
+                        &mut app.state.pools,
+                        &control.provider,
+                        &control.id,
+                        !paused,
+                    );
                     app.rebuild_provider_views();
                     app.state.status = error;
                 }
@@ -1201,6 +1474,71 @@ fn launch_pause_action(hwnd: HWND, control: AccountControl, paused: bool) {
 
 fn account_switch_mutation_key(provider: &str, id: &str) -> String {
     format!("{provider}:{id}")
+}
+
+fn launch_delete_action(hwnd: HWND, control: AccountSwitchControl) {
+    let mut identity = None;
+    with_app(|app| {
+        identity = app
+            .state
+            .pools
+            .iter()
+            .find(|pool| pool.provider == control.provider)
+            .and_then(|pool| {
+                pool.accounts.iter().find(|account| {
+                    account.id == control.id && !account.is_main && account.id != "__main__"
+                })
+            })
+            .map(|account| account.identity.clone());
+    });
+    let Some(identity) = identity else {
+        return;
+    };
+    let prompt: Vec<u16> = format!("{identity}\n\n이 계정을 풀에서 삭제할까요?")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    if unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR(prompt.as_ptr()),
+            w!("계정 삭제"),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    } != IDYES
+    {
+        return;
+    }
+    with_app(|app| {
+        app.account_mutations.insert(control.id.clone());
+        app.state.status = "계정 삭제 중…".into();
+    });
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::delete_account(&control.provider, &control.kind, &control.id);
+        with_app(|app| {
+            app.account_mutations.remove(&control.id);
+            match result {
+                Ok(()) => {
+                    if let Some(pool) = app
+                        .state
+                        .pools
+                        .iter_mut()
+                        .find(|pool| pool.provider == control.provider)
+                    {
+                        pool.accounts.retain(|account| account.id != control.id);
+                    }
+                    app.rebuild_provider_views();
+                    app.state.status = "계정을 삭제했습니다".into();
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => app.state.status = format!("계정 삭제 실패: {error}"),
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
@@ -1220,7 +1558,11 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
                 .pools
                 .iter()
                 .find(|pool| pool.provider == control.provider)
-                .and_then(|pool| pool.accounts.iter().find(|account| account.id == control.id))
+                .and_then(|pool| {
+                    pool.accounts
+                        .iter()
+                        .find(|account| account.id == control.id)
+                })
                 .map(|account| account.paused)
                 .unwrap_or(false);
         if needs_unpause {
@@ -1232,7 +1574,11 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
                 .iter_mut()
                 .find(|pool| pool.provider == control.provider)
             {
-                if let Some(account) = pool.accounts.iter_mut().find(|account| account.id == control.id) {
+                if let Some(account) = pool
+                    .accounts
+                    .iter_mut()
+                    .find(|account| account.id == control.id)
+                {
                     account.paused = false;
                 }
             }
@@ -1244,7 +1590,11 @@ fn launch_switch_action(hwnd: HWND, control: AccountSwitchControl) {
             .pools
             .iter()
             .find(|pool| pool.provider == control.provider)
-            .and_then(|pool| pool.accounts.iter().find(|account| account.id == control.id))
+            .and_then(|pool| {
+                pool.accounts
+                    .iter()
+                    .find(|account| account.id == control.id)
+            })
             .map(|account| account.identity.clone())
             .unwrap_or_else(|| control.id.clone());
         app.state.status = format!("Switching to {identity}…");
@@ -1304,12 +1654,8 @@ fn oauth_auth_finished(status: &AuthStatusResponse) -> bool {
     status.done
 }
 
-fn codex_cancel_body(flow_id: &str) -> serde_json::Value {
-    serde_json::json!({"flowId": flow_id})
-}
-
 fn cancel_codex_flow(flow_id: &str) -> Result<(), String> {
-    api::post_empty("/api/codex-auth/login/cancel", &codex_cancel_body(flow_id))
+    api::cancel_login_flow(api::LoginFlow::Codex, Some(flow_id))
 }
 
 fn retry_codex_login_after_conflict<T>(
@@ -1326,10 +1672,18 @@ fn retry_codex_login_after_conflict<T>(
 }
 
 fn start_codex_reauth(control: &ReauthControl) -> Result<AuthFlowResponse, String> {
-    let body = serde_json::json!({"id": control.id, "reauth": true});
+    let body = api::codex_login_body(Some(&control.id), true);
     retry_codex_login_after_conflict(
         || api::post_json("/api/codex-auth/login", &body),
-        || api::post_empty("/api/codex-auth/login/cancel", &serde_json::json!({})),
+        // Remote flows are flow-scoped and must never cancel another client's
+        // attempt, so a blind provider-wide retry cancel is local-only.
+        || {
+            if api::is_remote() {
+                Err("Another sign-in for this account is already in progress".into())
+            } else {
+                api::post_empty("/api/codex-auth/login/cancel", &serde_json::json!({}))
+            }
+        },
     )
 }
 
@@ -1348,11 +1702,12 @@ fn cancel_oauth_if_requested(cancel: &AuthCancellation, provider: &str) -> Resul
     if !cancel.is_requested() {
         return Ok(());
     }
-    api::post_empty(
-        "/api/oauth/login/cancel",
-        &serde_json::json!({"provider": provider}),
-    )?;
+    cancel_oauth_flow(provider, cancel.flow_id().as_deref())?;
     Err("재인증이 취소되었습니다".into())
+}
+
+fn cancel_oauth_flow(provider: &str, flow_id: Option<&str>) -> Result<(), String> {
+    api::cancel_login_flow(api::LoginFlow::Provider(provider), flow_id)
 }
 
 fn reauth_mutation_key(control: &ReauthControl) -> String {
@@ -1464,15 +1819,23 @@ fn launch_reauth(hwnd: HWND, control: ReauthControl) {
             flow.and_then(|flow| {
                 let flow_id = flow
                     .flow_id
+                    .clone()
                     .ok_or_else(|| "OCX가 인증 흐름을 시작하지 못했습니다".to_string())?;
                 cancel.publish_flow_id(flow_id.clone());
+                // Remote: bind the loopback listener, then open this PC's browser.
+                let mut relay = start_client_browser_login(&flow, Some(&flow_id))?;
                 cancel_codex_if_requested(&cancel)?;
                 loop {
                     cancel_codex_if_requested(&cancel)?;
                     let remaining = deadline
                         .checked_duration_since(Instant::now())
                         .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
-                    thread::sleep(remaining.min(Duration::from_secs(2)));
+                    wait_between_status_polls(
+                        &mut relay,
+                        api::LoginFlow::Codex,
+                        Some(&flow_id),
+                        remaining.min(Duration::from_secs(2)),
+                    )?;
                     cancel_codex_if_requested(&cancel)?;
                     let timeout = auth_poll_timeout(deadline)
                         .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
@@ -1490,45 +1853,55 @@ fn launch_reauth(hwnd: HWND, control: ReauthControl) {
         } else {
             let started: Result<AuthFlowResponse, String> = api::post_json(
                 "/api/oauth/login",
-                &serde_json::json!({"provider": control.provider, "accountId": control.id, "reauth": true}),
+                &api::oauth_reauth_login_body(&control.provider, &control.id),
             );
-            started.and_then(|_| loop {
-                cancel_oauth_if_requested(&cancel, &control.provider)?;
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
-                thread::sleep(remaining.min(Duration::from_secs(2)));
-                cancel_oauth_if_requested(&cancel, &control.provider)?;
-                let timeout = auth_poll_timeout(deadline)
-                    .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
-                let path = format!(
-                    "/api/oauth/status?provider={}",
-                    api::encode_component(&control.provider)
-                );
-                let status: AuthStatusResponse = api::get_json(&path, timeout)?;
-                cancel_oauth_if_requested(&cancel, &control.provider)?;
-                if let Some(error) = auth_failed(&status) {
-                    return Err(error);
+            started.and_then(|flow| {
+                if let Some(flow_id) = flow.flow_id.clone() {
+                    cancel.publish_flow_id(flow_id);
                 }
-                if oauth_auth_finished(&status) {
-                    let config = ProviderConfig {
-                        name: control.provider.clone(),
-                        auth_mode: Some("oauth".into()),
-                        disabled: false,
-                    };
-                    let pool = api::fetch_account_pool(&config);
-                    let account = pool
-                        .accounts
-                        .iter()
-                        .find(|account| account.id == control.id)
-                        .ok_or_else(|| {
-                            "로그인은 완료됐지만 OCX에서 대상 계정을 찾지 못했습니다".to_string()
-                        })?;
-                    return if account.needs_reauth {
-                        Err("로그인은 완료됐지만 이 계정은 여전히 재인증이 필요합니다".into())
-                    } else {
-                        Ok(())
-                    };
+                let mut relay = start_client_browser_login(&flow, flow.flow_id.as_deref())?;
+                let flow_id = flow.flow_id.clone();
+                loop {
+                    cancel_oauth_if_requested(&cancel, &control.provider)?;
+                    let remaining = deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
+                    wait_between_status_polls(
+                        &mut relay,
+                        api::LoginFlow::Provider(&control.provider),
+                        flow_id.as_deref(),
+                        remaining.min(Duration::from_secs(2)),
+                    )?;
+                    cancel_oauth_if_requested(&cancel, &control.provider)?;
+                    let timeout = auth_poll_timeout(deadline)
+                        .ok_or_else(|| "재인증 시간이 초과되었습니다".to_string())?;
+                    let path = api::oauth_status_path(&control.provider, flow_id.as_deref());
+                    let status: AuthStatusResponse = api::get_json(&path, timeout)?;
+                    cancel_oauth_if_requested(&cancel, &control.provider)?;
+                    if let Some(error) = auth_failed(&status) {
+                        return Err(error);
+                    }
+                    if oauth_auth_finished(&status) {
+                        let config = ProviderConfig {
+                            name: control.provider.clone(),
+                            auth_mode: Some("oauth".into()),
+                            disabled: false,
+                        };
+                        let pool = api::fetch_account_pool(&config);
+                        let account = pool
+                            .accounts
+                            .iter()
+                            .find(|account| account.id == control.id)
+                            .ok_or_else(|| {
+                                "로그인은 완료됐지만 OCX에서 대상 계정을 찾지 못했습니다"
+                                    .to_string()
+                            })?;
+                        return if account.needs_reauth {
+                            Err("로그인은 완료됐지만 이 계정은 여전히 재인증이 필요합니다".into())
+                        } else {
+                            Ok(())
+                        };
+                    }
                 }
             })
         };
@@ -1573,7 +1946,9 @@ fn provider_catalog_tab(preset: &ProviderPreset) -> ProviderCatalogTab {
             ProviderCatalogTab::Accounts
         }
         ProviderPresetAction::ApiKey
-            if preset.free_tier || preset.key_optional || preset.auth.eq_ignore_ascii_case("local") =>
+            if preset.free_tier
+                || preset.key_optional
+                || preset.auth.eq_ignore_ascii_case("local") =>
         {
             ProviderCatalogTab::Free
         }
@@ -1612,6 +1987,144 @@ fn auth_detail_lines(details: &AuthFlowResponse) -> Vec<String> {
     lines
 }
 
+// ShellExecuteW opens the user's default browser. The crate's `windows` feature
+// set does not include Win32_UI_Shell, so the one entry point used here is
+// declared directly instead of widening a dependency this worker does not own.
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut std::ffi::c_void,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> *mut std::ffi::c_void;
+}
+
+/// True when a server-supplied authorization URL is safe to hand to the shell:
+/// http/https only, no whitespace, control, quoting or non-ASCII characters, so
+/// the string cannot become an argument to anything but the browser.
+fn openable_authorization_url(url: &str) -> bool {
+    let scheme_ok = ["https://", "http://"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+    });
+    scheme_ok
+        && url.len() <= 4096
+        && url.len() > 8
+        && !url.chars().any(|ch| {
+            ch.is_control() || ch.is_whitespace() || !ch.is_ascii() || matches!(ch, '"' | '\'')
+        })
+}
+
+/// Open the authorization URL in this PC's default browser. Used only in remote
+/// mode: a local OCX opens the browser itself, on the same machine.
+fn open_authorization_url(url: &str) -> Result<(), String> {
+    if !openable_authorization_url(url) {
+        return Err("The server sent an authorization URL that cannot be opened".into());
+    }
+    let operation: Vec<u16> = "open\0".encode_utf16().collect();
+    let file: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    // SW_SHOWNORMAL(1). ShellExecuteW reports failure as an HINSTANCE <= 32.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if (result as isize) <= 32 {
+        return Err("Could not open the browser for sign-in".into());
+    }
+    Ok(())
+}
+
+/// Start the client half of a remote browser login.
+///
+/// The loopback listener is bound *before* the browser opens, so a fast redirect
+/// cannot hit a closed port. A device-code flow carries no `callbackUri`; there
+/// is nothing to receive locally, and the user confirms the code on the provider
+/// page instead. Local mode returns `None`: the server owns both browser and
+/// callback on this same machine.
+fn start_client_browser_login(
+    details: &AuthFlowResponse,
+    flow_id: Option<&str>,
+) -> Result<Option<CallbackRelay>, String> {
+    if !api::is_remote() {
+        return Ok(None);
+    }
+    let callback_uri = details
+        .callback_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if callback_uri.is_some() && flow_id.is_none() {
+        return Err("The server started a browser sign-in without a flow identifier".into());
+    }
+    let relay = match callback_uri {
+        Some(uri) => Some(CallbackRelay::bind(uri)?),
+        None => None,
+    };
+    if let Some(url) = details
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        open_authorization_url(url)?;
+    }
+    Ok(relay)
+}
+
+/// Relay a captured callback to the flow that issued it, then close the port.
+/// The relay is consumed once: a replayed redirect finds nothing listening.
+fn relay_pending_callback(
+    relay: &mut Option<CallbackRelay>,
+    flow: api::LoginFlow<'_>,
+    flow_id: &str,
+) -> Result<(), String> {
+    let Some(active) = relay.as_mut() else {
+        return Ok(());
+    };
+    if let Some(callback_url) = active.try_callback()? {
+        api::submit_login_callback(flow, flow_id, &callback_url)?;
+        *relay = None;
+    }
+    Ok(())
+}
+
+/// Wait out one status-poll interval while staying responsive to the browser
+/// redirect. Without a relay this is a plain sleep, preserving local timing.
+fn wait_between_status_polls(
+    relay: &mut Option<CallbackRelay>,
+    flow: api::LoginFlow<'_>,
+    flow_id: Option<&str>,
+    interval: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + interval;
+    if relay.is_none() {
+        thread::sleep(interval);
+        return Ok(());
+    }
+    let Some(flow_id) = flow_id else {
+        thread::sleep(interval);
+        return Ok(());
+    };
+    while Instant::now() < deadline {
+        relay_pending_callback(relay, flow, flow_id)?;
+        if relay.is_none() {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(120)));
+    }
+    Ok(())
+}
+
 unsafe fn copy_to_clipboard(hwnd: HWND, text: &str) -> windows::core::Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let memory = GlobalAlloc(GMEM_MOVEABLE, wide.len() * size_of::<u16>())?;
@@ -1643,6 +2156,27 @@ unsafe fn destroy_api_key_edit(app: &mut App) {
         let _ = DestroyWindow(edit);
     }
     if let Some(edit) = app.account_id_edit.take() {
+        let edit = HWND(edit as *mut _);
+        let _ = SetWindowTextW(edit, w!(""));
+        let _ = DestroyWindow(edit);
+    }
+    for edit in [app.kiro_start_url_edit.take(), app.kiro_region_edit.take()]
+        .into_iter()
+        .flatten()
+    {
+        let edit = HWND(edit as *mut _);
+        let _ = SetWindowTextW(edit, w!(""));
+        let _ = DestroyWindow(edit);
+    }
+    // The token field is cleared before the window dies so the credential does
+    // not linger in an edit control's buffer.
+    for edit in [
+        app.connection_url_edit.take(),
+        app.connection_token_edit.take(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let edit = HWND(edit as *mut _);
         let _ = SetWindowTextW(edit, w!(""));
         let _ = DestroyWindow(edit);
@@ -1733,7 +2267,7 @@ fn open_provider_modal(hwnd: HWND) {
     });
 }
 
-fn begin_oauth_preset(hwnd: HWND, provider: String) {
+fn begin_oauth_preset(hwnd: HWND, provider: String, organization: Option<(String, String)>) {
     if !api::valid_provider_name(&provider) {
         with_app(|app| {
             if let Some(ProviderModal::Picker { error, .. }) = &mut app.provider_modal {
@@ -1772,13 +2306,15 @@ fn begin_oauth_preset(hwnd: HWND, provider: String) {
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(300);
-        let flow: Result<AuthFlowResponse, String> = api::post_json(
-            "/api/oauth/login",
-            // addAccount forces a fresh browser identity instead of re-importing the
-            // current local CLI session, so "add account" really adds a new pool row
-            // (kiro, anthropic, xai, ...) rather than silently refreshing the old one.
-            &serde_json::json!({"provider": provider, "addAccount": true}),
-        );
+        // addAccount forces a fresh browser identity instead of re-importing the
+        // current local CLI session, so "add account" really adds a new pool row.
+        let flow: Result<AuthFlowResponse, String> = match organization.as_ref() {
+            Some((start_url, region)) => api::start_oauth_account_login_with_kiro_organization(
+                &provider,
+                Some(api::KiroOrganizationLoginRequest { start_url, region }),
+            ),
+            None => api::start_oauth_account_login(&provider),
+        };
         let result = flow.and_then(|flow| {
             with_app(|app| {
                 if app.modal_generation == generation {
@@ -1792,21 +2328,31 @@ fn begin_oauth_preset(hwnd: HWND, provider: String) {
             unsafe {
                 let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
             }
+            let flow_id = flow.flow_id.clone();
+            if let Some(flow_id) = flow_id.clone() {
+                cancel.publish_flow_id(flow_id);
+            }
+            let mut relay = start_client_browser_login(&flow, flow_id.as_deref())?;
             cancel_oauth_if_requested(&cancel, &provider)?;
             loop {
                 cancel_oauth_if_requested(&cancel, &provider)?;
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .ok_or_else(|| "Provider sign-in timed out".to_string())?;
-                thread::sleep(remaining.min(Duration::from_secs(2)));
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    let _ = cancel_oauth_flow(&provider, flow_id.as_deref());
+                    return Err("Provider sign-in timed out".to_string());
+                };
+                wait_between_status_polls(
+                    &mut relay,
+                    api::LoginFlow::Provider(&provider),
+                    flow_id.as_deref(),
+                    remaining.min(Duration::from_secs(2)),
+                )?;
                 cancel_oauth_if_requested(&cancel, &provider)?;
-                let timeout = auth_poll_timeout(deadline)
-                    .ok_or_else(|| "Provider sign-in timed out".to_string())?;
+                let Some(timeout) = auth_poll_timeout(deadline) else {
+                    let _ = cancel_oauth_flow(&provider, flow_id.as_deref());
+                    return Err("Provider sign-in timed out".to_string());
+                };
                 let status: AuthStatusResponse = api::get_json(
-                    &format!(
-                        "/api/oauth/status?provider={}",
-                        api::encode_component(&provider)
-                    ),
+                    &api::oauth_status_path(&provider, flow_id.as_deref()),
                     timeout,
                 )?;
                 cancel_oauth_if_requested(&cancel, &provider)?;
@@ -1858,6 +2404,382 @@ fn begin_oauth_preset(hwnd: HWND, provider: String) {
     });
 }
 
+fn kiro_organization_request(start_url: &str, region: &str) -> Result<(String, String), String> {
+    if start_url.len() > 2048
+        || start_url.chars().any(char::is_control)
+        || region.chars().any(char::is_control)
+    {
+        return Err("정식 AWS Start URL (*.awsapps.com/start)을 입력하세요.".into());
+    }
+    let start_url = start_url.trim();
+    let region = region.trim();
+    let authority_and_path = start_url.get(8..).filter(|_| {
+        start_url
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    });
+    let (authority, path) = authority_and_path
+        .and_then(|value| value.split_once('/'))
+        .unwrap_or_default();
+    let host = authority.to_ascii_lowercase();
+    let portal = host.strip_suffix(".awsapps.com").unwrap_or_default();
+    let valid_portal = (1..=63).contains(&portal.len())
+        && !portal.contains('.')
+        && portal
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && portal
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && portal
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    let valid_host = valid_portal
+        && authority.len() == host.len()
+        && !authority.contains(['@', ':', '?', '#'])
+        && matches!(path, "start" | "start/");
+    if !valid_host {
+        return Err("정식 AWS Start URL (*.awsapps.com/start)을 입력하세요.".into());
+    }
+    let region_parts: Vec<&str> = region.split('-').collect();
+    let valid_region = region_parts.len() >= 3
+        && region_parts[0].len() == 2
+        && region_parts[0]
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase())
+        && region_parts[1..region_parts.len() - 1]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_lowercase()))
+        && region_parts
+            .last()
+            .is_some_and(|part| part.len() == 1 && part.bytes().all(|byte| byte.is_ascii_digit()));
+    if !valid_region {
+        return Err("AWS region을 입력하세요. 예: us-east-1".into());
+    }
+    Ok((format!("https://{host}/start"), region.to_string()))
+}
+
+fn prepare_kiro_auth_picker() {
+    with_app(|app| {
+        app.provider_modal = Some(ProviderModal::Picker {
+            presets: Vec::new(),
+            loading: false,
+            error: None,
+            waiting_provider: None,
+            waiting_codex: false,
+            auth_details: None,
+            url_copied_at: None,
+            cancel: None,
+            scroll: 0,
+            selected_tab: ProviderCatalogTab::Accounts,
+        });
+    });
+}
+
+/// True when a login, re-authentication, or account mutation is in flight.
+///
+/// Switching servers mid-flow would point the next request — including a
+/// callback relay — at a different OCX than the one that issued the flow, so the
+/// connection modal refuses to save while anything is outstanding.
+fn connection_change_busy(app: &App) -> bool {
+    let mutations = app.reauth_mutations.len()
+        + app.account_mutations.len()
+        + app.account_switch_mutations.len()
+        + app.reset_credit_mutations.len();
+    let login_waiting = matches!(
+        &app.provider_modal,
+        Some(ProviderModal::Picker {
+            waiting_provider: Some(_),
+            ..
+        })
+    );
+    connection_change_blocked(mutations, login_waiting)
+}
+
+/// The rule behind [`connection_change_busy`]: any outstanding login or account
+/// mutation blocks a connection change, because the next request would otherwise
+/// reach a different server than the one that issued the flow.
+fn connection_change_blocked(active_mutations: usize, login_waiting: bool) -> bool {
+    active_mutations > 0 || login_waiting
+}
+
+/// Open the Local/Remote connection modal, pre-filled with the current mode and
+/// address. The stored token is never read back into the UI: the vault is
+/// write-only from here, so a remote edit always re-enters the credential.
+unsafe fn show_connection_modal(hwnd: HWND) {
+    let remote = api::is_remote();
+    let base_url = api::connection_base_url();
+    let busy = APP.get().is_some_and(|app| {
+        let app = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        connection_change_busy(&app)
+    });
+    with_app(|app| {
+        destroy_api_key_edit(app);
+        app.expanded = true;
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        app.provider_modal = Some(ProviderModal::Connection {
+            remote,
+            submitting: false,
+            error: busy.then(|| {
+                "Finish or cancel the sign-in in progress before changing the connection"
+                    .to_string()
+            }),
+        });
+        if let Ok(instance) = GetModuleHandleW(None) {
+            for (id, top, password, slot) in [
+                (
+                    CONNECTION_URL_EDIT_ID,
+                    236,
+                    false,
+                    &mut app.connection_url_edit,
+                ),
+                (
+                    CONNECTION_TOKEN_EDIT_ID,
+                    316,
+                    true,
+                    &mut app.connection_token_edit,
+                ),
+            ] {
+                if let Ok(edit) = CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    w!("EDIT"),
+                    w!(""),
+                    WINDOW_STYLE(
+                        WS_CHILD.0
+                            | WS_VISIBLE.0
+                            | WS_TABSTOP.0
+                            | ES_AUTOHSCROLL as u32
+                            | if password { ES_PASSWORD as u32 } else { 0 },
+                    ),
+                    60,
+                    top,
+                    (app.width - 120).max(180),
+                    30,
+                    hwnd,
+                    HMENU(id as *mut _),
+                    instance,
+                    None,
+                ) {
+                    if password {
+                        let _ = SendMessageW(edit, 0x00CC, WPARAM('●' as usize), LPARAM(0));
+                    }
+                    *slot = Some(edit.0 as isize);
+                }
+            }
+            if let Some(edit) = app.connection_url_edit {
+                if remote {
+                    let value: Vec<u16> = base_url.encode_utf16().chain(Some(0)).collect();
+                    let _ = SetWindowTextW(HWND(edit as *mut _), PCWSTR(value.as_ptr()));
+                }
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(HWND(edit as *mut _));
+            }
+        }
+    });
+    resize_for_state(hwnd);
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
+/// Apply the edited connection. Local mode clears the stored profile; remote mode
+/// validates and probes the address/credential inside `api::save_connection`, so
+/// a rejected server or token leaves the previous connection in place.
+unsafe fn submit_connection(hwnd: HWND) {
+    let mut submission = None;
+    with_app(|app| {
+        if connection_change_busy(app) {
+            if let Some(ProviderModal::Connection { error, .. }) = &mut app.provider_modal {
+                *error = Some(
+                    "Finish or cancel the sign-in in progress before changing the connection"
+                        .into(),
+                );
+            }
+            return;
+        }
+        let Some(ProviderModal::Connection {
+            remote,
+            submitting,
+            error,
+        }) = &mut app.provider_modal
+        else {
+            return;
+        };
+        if *submitting {
+            return;
+        }
+        if !*remote {
+            *submitting = true;
+            *error = None;
+            submission = Some((None, app.modal_generation));
+            return;
+        }
+        let (Some(url_edit), Some(token_edit)) =
+            (app.connection_url_edit, app.connection_token_edit)
+        else {
+            return;
+        };
+        let base_url = native_edit_text(url_edit);
+        let token = native_edit_text(token_edit);
+        if base_url.trim().is_empty() || token.trim().is_empty() {
+            *error = Some("Enter the server address and the management token".into());
+            return;
+        }
+        *submitting = true;
+        *error = None;
+        submission = Some((Some((base_url, token)), app.modal_generation));
+    });
+    let Some((remote, generation)) = submission else {
+        return;
+    };
+    // The token leaves the edit control immediately; the worker thread owns the
+    // only remaining copy until save_connection consumes it.
+    with_app(|app| {
+        if let Some(edit) = app.connection_token_edit {
+            let _ = SetWindowTextW(HWND(edit as *mut _), w!(""));
+        }
+    });
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let mut remote = remote;
+        let result = match remote.as_mut() {
+            Some((base_url, token)) => {
+                let outcome = api::save_connection(Some(base_url), Some(token));
+                token.as_bytes_mut().fill(0);
+                outcome
+            }
+            None => api::save_connection(None, None),
+        };
+        drop(remote);
+        with_app(|app| {
+            match result {
+                Ok(()) => {
+                    app.state.remote = api::is_remote();
+                    app.state.connection_error = api::connection_error();
+                    // The previous server's data must not linger next to the new
+                    // connection's status line.
+                    app.state.pid = 0;
+                    app.state.working_set = 0;
+                    app.state.private_commit = 0;
+                    app.state.system_memory = None;
+                    app.state.details = None;
+                    app.state.pools.clear();
+                    app.state.providers.clear();
+                    app.state.configs.clear();
+                    app.state.quotas.clear();
+                    app.state.usage.clear();
+                    app.state.logs.clear();
+                    app.state.status = if app.state.remote {
+                        format!("Connected to {}", api::connection_base_url())
+                    } else {
+                        "Using the local OCX".into()
+                    };
+                    if app.modal_generation == generation {
+                        destroy_api_key_edit(app);
+                        app.provider_modal = None;
+                        app.modal_generation = app.modal_generation.wrapping_add(1);
+                    }
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => {
+                    if app.modal_generation == generation {
+                        if let Some(ProviderModal::Connection {
+                            submitting,
+                            error: modal_error,
+                            ..
+                        }) = &mut app.provider_modal
+                        {
+                            *submitting = false;
+                            *modal_error = Some(error);
+                        }
+                    }
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+unsafe fn show_kiro_account_choice(hwnd: HWND) {
+    with_app(|app| {
+        destroy_api_key_edit(app);
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        app.provider_modal = Some(ProviderModal::KiroAccountChoice);
+    });
+    resize_for_state(hwnd);
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
+unsafe fn show_kiro_organization(hwnd: HWND) {
+    with_app(|app| {
+        destroy_api_key_edit(app);
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        app.provider_modal = Some(ProviderModal::KiroOrganization { error: None });
+        if let Ok(instance) = GetModuleHandleW(None) {
+            for (id, top, slot) in [
+                (KIRO_START_URL_EDIT_ID, 220, &mut app.kiro_start_url_edit),
+                (KIRO_REGION_EDIT_ID, 300, &mut app.kiro_region_edit),
+            ] {
+                if let Ok(edit) = CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    w!("EDIT"),
+                    w!(""),
+                    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32),
+                    60,
+                    top,
+                    (app.width - 120).max(180),
+                    30,
+                    hwnd,
+                    HMENU(id as *mut _),
+                    instance,
+                    None,
+                ) {
+                    *slot = Some(edit.0 as isize);
+                }
+            }
+            if let Some(edit) = app.kiro_start_url_edit {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(HWND(edit as *mut _));
+            }
+        }
+    });
+    resize_for_state(hwnd);
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
+unsafe fn native_edit_text(edit: isize) -> String {
+    let edit = HWND(edit as *mut _);
+    let length = GetWindowTextLengthW(edit).max(0) as usize;
+    let mut buffer = vec![0u16; length + 1];
+    let read = GetWindowTextW(edit, &mut buffer) as usize;
+    let value = String::from_utf16_lossy(&buffer[..read]);
+    buffer.fill(0);
+    value
+}
+
+unsafe fn submit_kiro_organization(hwnd: HWND) {
+    let mut request = None;
+    with_app(|app| {
+        let (Some(start_url), Some(region)) = (app.kiro_start_url_edit, app.kiro_region_edit)
+        else {
+            return;
+        };
+        match kiro_organization_request(&native_edit_text(start_url), &native_edit_text(region)) {
+            Ok(value) => request = Some(value),
+            Err(message) => {
+                if let Some(ProviderModal::KiroOrganization { error }) = &mut app.provider_modal {
+                    *error = Some(message);
+                }
+            }
+        }
+    });
+    if let Some(request) = request {
+        with_app(|app| destroy_api_key_edit(app));
+        prepare_kiro_auth_picker();
+        begin_oauth_preset(hwnd, "kiro".into(), Some(request));
+    }
+}
+
 fn begin_codex_account(hwnd: HWND) {
     let cancel = Arc::new(AuthCancellation::default());
     let mut generation = 0;
@@ -1893,7 +2815,7 @@ fn begin_codex_account(hwnd: HWND) {
     thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(300);
         let flow: Result<AuthFlowResponse, String> =
-            api::post_json("/api/codex-auth/login", &serde_json::json!({}));
+            api::post_json("/api/codex-auth/login", &api::codex_login_body(None, false));
         let result = flow.and_then(|flow| {
             let flow_id = flow
                 .flow_id
@@ -1912,13 +2834,19 @@ fn begin_codex_account(hwnd: HWND) {
             unsafe {
                 let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
             }
+            let mut relay = start_client_browser_login(&flow, Some(&flow_id))?;
             cancel_codex_if_requested(&cancel)?;
             loop {
                 cancel_codex_if_requested(&cancel)?;
                 let remaining = deadline
                     .checked_duration_since(Instant::now())
                     .ok_or_else(|| "OpenAI account login timed out".to_string())?;
-                thread::sleep(remaining.min(Duration::from_secs(2)));
+                wait_between_status_polls(
+                    &mut relay,
+                    api::LoginFlow::Codex,
+                    Some(&flow_id),
+                    remaining.min(Duration::from_secs(2)),
+                )?;
                 cancel_codex_if_requested(&cancel)?;
                 let timeout = auth_poll_timeout(deadline)
                     .ok_or_else(|| "OpenAI account login timed out".to_string())?;
@@ -2010,11 +2938,7 @@ unsafe fn show_api_key_preset(hwnd: HWND, preset: ProviderPreset, add_key: bool)
                         | WS_VISIBLE.0
                         | WS_TABSTOP.0
                         | ES_AUTOHSCROLL as u32
-                        | if local_auth {
-                            0
-                        } else {
-                            ES_PASSWORD as u32
-                        },
+                        | if local_auth { 0 } else { ES_PASSWORD as u32 },
                 ),
                 60,
                 key_top,
@@ -2371,7 +3295,7 @@ unsafe extern "system" fn window_proc(
                 app.drain_updates();
                 if api_key_edit_needs_cleanup(
                     app.provider_modal.is_some(),
-                    app.api_key_edit.is_some(),
+                    app.api_key_edit.is_some() || app.connection_token_edit.is_some(),
                 ) {
                     unsafe { destroy_api_key_edit(app) };
                 }
@@ -2440,7 +3364,7 @@ unsafe extern "system" fn window_proc(
                     button_down = app.pressed_modal_hit.is_some();
                     return;
                 }
-                app.power_hot = point_in(&power_hit_rect(app.width), x, y);
+                app.power_hot = !app.state.remote && point_in(&power_hit_rect(app.width), x, y);
                 app.minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
                 let account_control = app
                     .account_pause_hits
@@ -2449,6 +3373,11 @@ unsafe extern "system" fn window_proc(
                     .map(|(_, control)| control.clone());
                 let account_switch = app
                     .account_switch_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
+                let account_delete = app
+                    .account_delete_hits
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
@@ -2462,6 +3391,16 @@ unsafe extern "system" fn window_proc(
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
+                let model_hit = app
+                    .model_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, hit)| hit.clone());
+                let subagent_hit = app
+                    .subagent_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, hit)| hit.clone());
                 let resize_edge = if x < RESIZE_EDGE {
                     Some(ResizeEdge::Left)
                 } else if x >= app.width - RESIZE_EDGE {
@@ -2477,6 +3416,15 @@ unsafe extern "system" fn window_proc(
                     app.drag_moved = false;
                     app.pressed_account_control = None;
                     app.pressed_account_switch = None;
+                } else if let Some(control) = account_delete {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_account_control = None;
+                    app.pressed_account_switch = None;
+                    app.pressed_account_delete = Some(control);
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
                 } else if let Some(control) = account_switch {
                     app.resize_origin = None;
                     app.pressed_button = None;
@@ -2512,6 +3460,22 @@ unsafe extern "system" fn window_proc(
                     app.pressed_account_switch = None;
                     app.pressed_reauth_control = None;
                     app.pressed_reset_credit_control = Some(control);
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
+                } else if let Some(hit) = model_hit {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_model_hit = Some(hit);
+                    app.button_inside = false;
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
+                } else if let Some(hit) = subagent_hit {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_subagent_hit = Some(hit);
                     app.button_inside = false;
                     app.drag_origin = None;
                     app.drag_moved = false;
@@ -2560,7 +3524,7 @@ unsafe extern "system" fn window_proc(
                 if app.provider_modal.is_some() {
                     return;
                 }
-                let power_hot = point_in(&power_hit_rect(app.width), x, y);
+                let power_hot = !app.state.remote && point_in(&power_hit_rect(app.width), x, y);
                 let minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
                 let hot_account_control = app
                     .account_pause_hits
@@ -2569,6 +3533,11 @@ unsafe extern "system" fn window_proc(
                     .map(|(_, control)| control.clone());
                 let hot_account_switch = app
                     .account_switch_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
+                let hot_account_delete = app
+                    .account_delete_hits
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
@@ -2590,6 +3559,7 @@ unsafe extern "system" fn window_proc(
                     || app.minimize_hot != minimize_hot
                     || app.hot_account_control != hot_account_control
                     || app.hot_account_switch != hot_account_switch
+                    || app.hot_account_delete != hot_account_delete
                     || app.hot_reauth_control != hot_reauth_control
                     || app.hot_reset_credit_control != hot_reset_credit_control
                     || app.hot_tab != hot_tab
@@ -2600,6 +3570,7 @@ unsafe extern "system" fn window_proc(
                 app.minimize_hot = minimize_hot;
                 app.hot_account_control = hot_account_control;
                 app.hot_account_switch = hot_account_switch;
+                app.hot_account_delete = hot_account_delete;
                 app.hot_reauth_control = hot_reauth_control;
                 app.hot_reset_credit_control = hot_reset_credit_control;
                 app.hot_tab = hot_tab;
@@ -2614,8 +3585,11 @@ unsafe extern "system" fn window_proc(
                     app.button_inside = inside;
                 } else if app.pressed_account_control.is_some()
                     || app.pressed_account_switch.is_some()
+                    || app.pressed_account_delete.is_some()
                     || app.pressed_reauth_control.is_some()
                     || app.pressed_reset_credit_control.is_some()
+                    || app.pressed_model_hit.is_some()
+                    || app.pressed_subagent_hit.is_some()
                 {
                     // Account controls never initiate a window drag.
                 } else if let Some((origin, window, edge)) = app.resize_origin {
@@ -2665,16 +3639,22 @@ unsafe extern "system" fn window_proc(
             let mut power_action = None;
             let mut pause_action = None;
             let mut switch_action = None;
+            let mut delete_action = None;
             let mut reauth_action = None;
             let mut reset_credit_action = None;
+            let mut model_action = None;
+            let mut subagent_action = None;
             let mut modal_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
                 let pressed_button = app.pressed_button.take();
                 let pressed_account_control = app.pressed_account_control.take();
                 let pressed_account_switch = app.pressed_account_switch.take();
+                let pressed_account_delete = app.pressed_account_delete.take();
                 let pressed_reauth_control = app.pressed_reauth_control.take();
                 let pressed_reset_credit_control = app.pressed_reset_credit_control.take();
+                let pressed_model_hit = app.pressed_model_hit.take();
+                let pressed_subagent_hit = app.pressed_subagent_hit.take();
                 let pressed_modal_hit = app.pressed_modal_hit.take();
                 let button_inside = app.button_inside;
                 app.button_inside = false;
@@ -2694,6 +3674,28 @@ unsafe extern "system" fn window_proc(
                     handled_button = true;
                     return;
                 }
+                if let Some(hit) = pressed_model_hit {
+                    if app
+                        .model_hits
+                        .iter()
+                        .any(|(rect, candidate)| *candidate == hit && point_in(rect, x, y))
+                    {
+                        model_action = Some(hit);
+                    }
+                    handled_button = true;
+                    return;
+                }
+                if let Some(hit) = pressed_subagent_hit {
+                    if app
+                        .subagent_hits
+                        .iter()
+                        .any(|(rect, candidate)| *candidate == hit && point_in(rect, x, y))
+                    {
+                        subagent_action = Some(hit);
+                    }
+                    handled_button = true;
+                    return;
+                }
                 if let Some(control) = pressed_reauth_control {
                     if app
                         .account_reauth_hits
@@ -2701,6 +3703,17 @@ unsafe extern "system" fn window_proc(
                         .any(|(rect, hit)| *hit == control && point_in(rect, x, y))
                     {
                         reauth_action = Some(control);
+                    }
+                    handled_button = true;
+                    return;
+                }
+                if let Some(control) = pressed_account_delete {
+                    if app
+                        .account_delete_hits
+                        .iter()
+                        .any(|(rect, hit)| *hit == control && point_in(rect, x, y))
+                    {
+                        delete_action = Some(control);
                     }
                     handled_button = true;
                     return;
@@ -2719,16 +3732,14 @@ unsafe extern "system" fn window_proc(
                 if let Some(control) = pressed_account_switch {
                     handled_button = true;
                     changed = true;
-                    let released_inside = app.account_switch_hits.iter().any(|(rect, hit)| {
-                        *hit == control
-                            && point_in(rect, x, y)
-                            && !app
-                                .account_switch_mutations
-                                .contains(&account_switch_mutation_key(
-                                    &control.provider,
-                                    &control.id,
-                                ))
-                    });
+                    let released_inside =
+                        app.account_switch_hits.iter().any(|(rect, hit)| {
+                            *hit == control
+                                && point_in(rect, x, y)
+                                && !app.account_switch_mutations.contains(
+                                    &account_switch_mutation_key(&control.provider, &control.id),
+                                )
+                        });
                     if released_inside {
                         switch_action = Some(control);
                     }
@@ -2751,7 +3762,10 @@ unsafe extern "system" fn window_proc(
                     changed = true;
                     if button_inside {
                         match button {
-                            Button::Power if !app.power_pending => {
+                            // Remote mode has no power control; this arm cannot be
+                            // reached from a hidden button, and the guard keeps it
+                            // unreachable if the layout ever changes.
+                            Button::Power if !app.power_pending && !app.state.remote => {
                                 let action = if app.state.online { "stop" } else { "start" };
                                 app.power_pending = true;
                                 app.state.status = if action == "stop" {
@@ -2787,7 +3801,10 @@ unsafe extern "system" fn window_proc(
                         app.scroll_offset = 0;
                         app.want_logs
                             .store(tab == ContentTab::Logs, Ordering::Relaxed);
-                        if tab == ContentTab::Logs {
+                        if matches!(
+                            tab,
+                            ContentTab::Logs | ContentTab::Models | ContentTab::Subagents
+                        ) {
                             app.force_refresh.store(true, Ordering::Relaxed);
                         }
                         changed = true;
@@ -2817,11 +3834,20 @@ unsafe extern "system" fn window_proc(
             if let Some(control) = switch_action {
                 launch_switch_action(hwnd, control);
             }
+            if let Some(control) = delete_action {
+                launch_delete_action(hwnd, control);
+            }
             if let Some(control) = reauth_action {
                 launch_reauth(hwnd, control);
             }
             if let Some(control) = reset_credit_action {
                 open_reset_credit_modal(hwnd, control);
+            }
+            if let Some(action) = model_action {
+                handle_model_action(hwnd, action);
+            }
+            if let Some(action) = subagent_action {
+                handle_subagent_action(hwnd, action);
             }
             if let Some(action) = modal_action {
                 match action {
@@ -2852,6 +3878,29 @@ unsafe extern "system" fn window_proc(
                         }
                     }),
                     ModalHit::AddKey => unsafe { submit_api_key(hwnd) },
+                    ModalHit::KiroPersonal => {
+                        prepare_kiro_auth_picker();
+                        begin_oauth_preset(hwnd, "kiro".into(), None);
+                    }
+                    ModalHit::KiroOrganization => unsafe { show_kiro_organization(hwnd) },
+                    ModalHit::KiroOrganizationSubmit => unsafe { submit_kiro_organization(hwnd) },
+                    ModalHit::ConnectionModeLocal | ModalHit::ConnectionModeRemote => {
+                        let want_remote = action == ModalHit::ConnectionModeRemote;
+                        with_app(|app| {
+                            if let Some(ProviderModal::Connection {
+                                remote,
+                                submitting,
+                                error,
+                            }) = &mut app.provider_modal
+                            {
+                                if !*submitting {
+                                    *remote = want_remote;
+                                    *error = None;
+                                }
+                            }
+                        });
+                    }
+                    ModalHit::ConnectionSave => unsafe { submit_connection(hwnd) },
                     ModalHit::ResetCreditUse => with_app(|app| {
                         if let Some(ProviderModal::ResetCredits {
                             loading,
@@ -2894,22 +3943,24 @@ unsafe extern "system" fn window_proc(
                         let selection = APP.get().and_then(|app| {
                             let app = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                             match &app.provider_modal {
-                                Some(ProviderModal::Picker { presets, .. }) => presets
-                                    .get(index)
-                                    .cloned()
-                                    .map(|preset| {
+                                Some(ProviderModal::Picker { presets, .. }) => {
+                                    presets.get(index).cloned().map(|preset| {
                                         let add_key =
                                             api_key_preset_adds_key(&preset, &app.state.configs);
                                         (preset, add_key)
-                                    }),
+                                    })
+                                }
                                 _ => None,
                             }
                         });
                         if let Some((preset, add_key)) = selection {
                             match provider_preset_action(&preset) {
                                 ProviderPresetAction::CodexAccount => begin_codex_account(hwnd),
+                                ProviderPresetAction::OAuth(provider) if provider == "kiro" => unsafe {
+                                    show_kiro_account_choice(hwnd)
+                                },
                                 ProviderPresetAction::OAuth(provider) => {
-                                    begin_oauth_preset(hwnd, provider)
+                                    begin_oauth_preset(hwnd, provider, None)
                                 }
                                 ProviderPresetAction::ApiKey => unsafe {
                                     show_api_key_preset(hwnd, preset, add_key)
@@ -2946,8 +3997,10 @@ unsafe extern "system" fn window_proc(
                 app.pressed_button = None;
                 app.pressed_account_control = None;
                 app.pressed_account_switch = None;
+                app.pressed_account_delete = None;
                 app.pressed_reauth_control = None;
                 app.pressed_reset_credit_control = None;
+                app.pressed_subagent_hit = None;
                 app.pressed_modal_hit = None;
                 app.button_inside = false;
             });
@@ -2987,6 +4040,8 @@ unsafe extern "system" fn window_proc(
                 requested_threshold = Some((command - MENU_THRESHOLD_BASE) as u32);
             } else if command == MENU_PROVIDER_ADD {
                 open_provider_modal(hwnd);
+            } else if command == MENU_CONNECTION {
+                show_connection_modal(hwnd);
             } else if command == MENU_THRESHOLD_DOWN || command == MENU_THRESHOLD_UP {
                 with_app(|app| {
                     requested_threshold = Some(if command == MENU_THRESHOLD_DOWN {
@@ -3053,6 +4108,7 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            with_app(|app| destroy_api_key_edit(app));
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -3116,8 +4172,11 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.provider_hits.clear();
     app.account_pause_hits.clear();
     app.account_switch_hits.clear();
+    app.account_delete_hits.clear();
     app.account_reauth_hits.clear();
     app.account_reset_credit_hits.clear();
+    app.model_hits.clear();
+    app.subagent_hits.clear();
     app.modal_hits.clear();
     let body_font = make_font(14, 500);
     let small_font = make_font(12, 400);
@@ -3149,7 +4208,10 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
         },
         0x00423a35,
     );
-    draw_power_control(dc, width, app);
+    // Remote mode owns no local process: Start/Stop is not drawn and not hit-tested.
+    if !app.state.remote {
+        draw_power_control(dc, width, app);
+    }
     if app.expanded {
         draw_minimize_control(dc, width, app);
     }
@@ -3180,6 +4242,10 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     );
     let ws = if app.state.working_set > 0 {
         format!("WS {}", format_bytes(app.state.working_set))
+    } else if let Some(error) = &app.state.connection_error {
+        // A stored remote profile that cannot be used: say so instead of showing
+        // local numbers under a remote header.
+        format!("원격 연결 불가 · {error}")
     } else if let Some(error) = &app.state.action_error {
         format!("WS {error}")
     } else {
@@ -3307,6 +4373,22 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             let _ = DeleteObject(small_font);
             return;
         }
+        if app.content_tab == ContentTab::Models {
+            draw_models(dc, width, height, app, body_font, small_font);
+            let _ = SelectClipRgn(dc, None);
+            let _ = SelectObject(dc, old_font);
+            let _ = DeleteObject(body_font);
+            let _ = DeleteObject(small_font);
+            return;
+        }
+        if app.content_tab == ContentTab::Subagents {
+            draw_subagents(dc, width, height, app, body_font, small_font);
+            let _ = SelectClipRgn(dc, None);
+            let _ = SelectObject(dc, old_font);
+            let _ = DeleteObject(body_font);
+            let _ = DeleteObject(small_font);
+            return;
+        }
 
         let providers = ordered_provider_views(&app.state.providers);
         for provider in providers {
@@ -3392,14 +4474,38 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     let account_height = account_height(&account);
                     let reauth = reauth_eligible(&provider.name, &account);
                     let reauth_rect = reauth_action_rect(width, y);
+                    if !account.is_main && account.id != "__main__" {
+                        let rect = RECT {
+                            left: width - 62,
+                            top: y,
+                            right: width - 14,
+                            bottom: y + 30,
+                        };
+                        let control = AccountSwitchControl {
+                            provider: provider.name.clone(),
+                            id: account.id.clone(),
+                            kind: account.kind.clone(),
+                        };
+                        let busy = app.account_mutations.contains(&account.id);
+                        set_text_color(
+                            dc,
+                            if busy {
+                                0x008e949e
+                            } else if app.hot_account_delete.as_ref() == Some(&control) {
+                                0x008888ff
+                            } else {
+                                0x009ba3d9
+                            },
+                        );
+                        draw_text(dc, "삭제", rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+                        if !busy && rect.top >= CONTENT_TOP && rect.bottom <= height {
+                            app.account_delete_hits.push((rect, control));
+                        }
+                    }
                     let reset_credits = reset_credit_count(&account);
                     let identity_width = measure_text_width(dc, &account.identity);
-                    let action_rect = account_action_rect(
-                        width,
-                        y,
-                        identity_width,
-                        reset_credits.is_some(),
-                    );
+                    let action_rect =
+                        account_action_rect(width, y, identity_width, reset_credits.is_some());
                     let reset_credit_rect = reset_credit_action_rect(action_rect);
                     // One control per pool row: the ACTIVE account shows pause, every
                     // other account shows play ("make this account active"). OAuth pools
@@ -3441,17 +4547,10 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                                 id: account.id.clone(),
                                 paused: false,
                             };
-                            let hot = !pause_busy
-                                && app.hot_account_control.as_ref() == Some(&control);
-                            let pressed =
-                                app.pressed_account_control.as_ref() == Some(&control);
-                            draw_account_pause_control(
-                                dc,
-                                action_rect,
-                                hot,
-                                pressed,
-                                pause_busy,
-                            );
+                            let hot =
+                                !pause_busy && app.hot_account_control.as_ref() == Some(&control);
+                            let pressed = app.pressed_account_control.as_ref() == Some(&control);
+                            draw_account_pause_control(dc, action_rect, hot, pressed, pause_busy);
                             if (provider.name == "openai" || account.kind == "oauth")
                                 && !pause_busy
                                 && action_rect.bottom > 101
@@ -3466,20 +4565,11 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                                 id: account.id.clone(),
                                 kind: account.kind.clone(),
                             };
-                            let hot = !switch_busy
-                                && app.hot_account_switch.as_ref() == Some(&control);
-                            let pressed =
-                                app.pressed_account_switch.as_ref() == Some(&control);
-                            draw_account_play_control(
-                                dc,
-                                action_rect,
-                                hot,
-                                pressed,
-                                switch_busy,
-                            );
-                            if !switch_busy
-                                && action_rect.bottom > 101
-                                && action_rect.top < height
+                            let hot =
+                                !switch_busy && app.hot_account_switch.as_ref() == Some(&control);
+                            let pressed = app.pressed_account_switch.as_ref() == Some(&control);
+                            draw_account_play_control(dc, action_rect, hot, pressed, switch_busy);
+                            if !switch_busy && action_rect.bottom > 101 && action_rect.top < height
                             {
                                 app.account_switch_hits.push((action_rect, control));
                             }
@@ -3492,8 +4582,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                             available,
                         };
                         let busy = app.reset_credit_mutations.contains(&account.id);
-                        let hot = !busy
-                            && app.hot_reset_credit_control.as_ref() == Some(&control);
+                        let hot = !busy && app.hot_reset_credit_control.as_ref() == Some(&control);
                         let pressed = app.pressed_reset_credit_control.as_ref() == Some(&control);
                         draw_reset_credit_control(
                             dc,
@@ -3592,23 +4681,30 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
 fn content_tab_rect(tab: ContentTab) -> RECT {
     let left = match tab {
         ContentTab::Providers => 14,
-        ContentTab::Logs => 112,
+        ContentTab::Logs => 86,
+        ContentTab::Models => 158,
+        ContentTab::Subagents => 230,
     };
     RECT {
         left,
         top: 58,
-        right: left + 98,
+        right: left + 72,
         bottom: CONTENT_TOP,
     }
 }
 
 fn content_tab_at(width: i32, x: i32, y: i32) -> Option<ContentTab> {
-    if x >= width - 84 {
+    if x >= width - 14 {
         return None;
     }
-    [ContentTab::Providers, ContentTab::Logs]
-        .into_iter()
-        .find(|tab| point_in(&content_tab_rect(*tab), x, y))
+    [
+        ContentTab::Providers,
+        ContentTab::Logs,
+        ContentTab::Models,
+        ContentTab::Subagents,
+    ]
+    .into_iter()
+    .find(|tab| point_in(&content_tab_rect(*tab), x, y))
 }
 
 unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
@@ -3616,6 +4712,8 @@ unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
     for (tab, label) in [
         (ContentTab::Providers, "프로바이더"),
         (ContentTab::Logs, "로그"),
+        (ContentTab::Models, "Models"),
+        (ContentTab::Subagents, "Subagents"),
     ] {
         let rect = content_tab_rect(tab);
         let selected = app.content_tab == tab;
@@ -3669,7 +4767,12 @@ unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
     if width >= 520 {
         let details = app.state.details.as_ref();
         let summary = format!(
-            "PID {}{}  ·  Rotate {}",
+            "{}PID {}{}  ·  Rotate {}",
+            if app.state.remote {
+                format!("{}  ·  ", api::connection_base_url())
+            } else {
+                String::new()
+            },
             app.state.pid,
             details
                 .and_then(|value| value.heap_used)
@@ -3686,7 +4789,7 @@ unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
             dc,
             &summary,
             RECT {
-                left: 224,
+                left: 322,
                 top: 61,
                 right: width - 18,
                 bottom: CONTENT_TOP - 2,
@@ -3704,6 +4807,688 @@ unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
         },
         0x003a322d,
     );
+}
+
+fn handle_model_action(hwnd: HWND, action: ModelHit) {
+    let key = ModelsState::mutation_key(&action.provider, &action.id, action.native);
+    let mut row = None;
+    with_app(|app| {
+        if app.state.models.mutating.contains(&key) {
+            return;
+        }
+        let Some(found) = app
+            .state
+            .models
+            .rows
+            .iter()
+            .find(|row| {
+                row.provider == action.provider
+                    && row.id == action.id
+                    && row.native == action.native
+            })
+            .cloned()
+        else {
+            return;
+        };
+        app.state.models.mutating.insert(key.clone());
+        app.state.models.message = None;
+        row = Some(found);
+    });
+    let Some(row) = row else {
+        return;
+    };
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result: Result<(Vec<ModelRow>, SelectedModelsResponse), String> = (|| {
+            let _: serde_json::Value = api::put_json(
+                "/api/model-visibility",
+                &ModelsState::request(&row, action.enabled),
+            )?;
+            let rows = api::get_json("/api/models", 30_000)?;
+            let selected = api::get_json("/api/selected-models", 30_000)?;
+            Ok((rows, selected))
+        })();
+        with_app(|app| {
+            app.state.models.mutating.remove(&key);
+            match result {
+                Ok((rows, selected)) => {
+                    app.state.models.apply_rows(rows);
+                    app.state.models.apply_selected(selected);
+                    // The server derives the subagent catalog from model
+                    // visibility, so reload that existing API surface after a
+                    // toggle instead of maintaining a second local catalog.
+                    app.force_refresh.store(true, Ordering::Release);
+                    app.state.models.message = Some(format!(
+                        "{} {}/{}",
+                        if action.enabled { "Enabled" } else { "Hidden" },
+                        action.provider,
+                        action.id
+                    ));
+                }
+                Err(error) => {
+                    app.state.models.message = Some(format!("Update failed: {error}"));
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn models_content_height(state: &ModelsState) -> i32 {
+    if !state.loaded() {
+        return 100;
+    }
+    if state.rows.is_empty() {
+        return 120;
+    }
+    let provider_count = state
+        .rows
+        .iter()
+        .map(|row| row.provider.as_str())
+        .collect::<HashSet<_>>()
+        .len() as i32;
+    44 + provider_count * 34
+        + state.rows.len() as i32 * 38
+        + if state.message.is_some() { 34 } else { 0 }
+}
+
+unsafe fn draw_models(
+    dc: HDC,
+    width: i32,
+    height: i32,
+    app: &mut App,
+    body_font: HFONT,
+    small_font: HFONT,
+) {
+    let state = &app.state.models;
+    let mut y = CONTENT_TOP - app.scroll_offset;
+    let left = 18;
+    let right = width - 18;
+    let visible = |rect: &RECT| rect.bottom > CONTENT_TOP && rect.top < height;
+
+    if !state.loaded() {
+        let _ = SelectObject(dc, body_font);
+        set_text_color(dc, 0x008e949e);
+        draw_text(
+            dc,
+            state
+                .message
+                .as_deref()
+                .unwrap_or("Loading model catalog..."),
+            RECT {
+                left,
+                top: y + 20,
+                right,
+                bottom: y + 70,
+            },
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        return;
+    }
+
+    let _ = SelectObject(dc, small_font);
+    set_text_color(dc, 0x008e949e);
+    draw_text(
+        dc,
+        "Visible models appear in the OCX and Codex catalog",
+        RECT {
+            left,
+            top: y + 4,
+            right,
+            bottom: y + 36,
+        },
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+    y += 44;
+
+    if state.rows.is_empty() {
+        let _ = SelectObject(dc, body_font);
+        set_text_color(dc, 0x008e949e);
+        draw_text(
+            dc,
+            "No models are available from configured providers",
+            RECT {
+                left,
+                top: y + 10,
+                right,
+                bottom: y + 62,
+            },
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        return;
+    }
+
+    let mut provider = "";
+    for row in &state.rows {
+        if row.provider != provider {
+            provider = &row.provider;
+            let heading = RECT {
+                left,
+                top: y,
+                right,
+                bottom: y + 34,
+            };
+            if visible(&heading) {
+                let _ = SelectObject(dc, body_font);
+                set_text_color(dc, 0x00f0ece8);
+                draw_text(
+                    dc,
+                    provider,
+                    heading,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+            }
+            y += 34;
+        }
+
+        let row_rect = RECT {
+            left,
+            top: y + 2,
+            right,
+            bottom: y + 34,
+        };
+        if visible(&row_rect) {
+            fill_solid(dc, row_rect, 0x0027201d);
+            let enabled = state.visible(row);
+            let key = ModelsState::mutation_key(&row.provider, &row.id, row.native);
+            let busy = state.mutating.contains(&key);
+            let label = row
+                .display_name
+                .as_deref()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or(&row.id);
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x00c7cbd2);
+            draw_text(
+                dc,
+                label,
+                RECT {
+                    left: left + 8,
+                    top: row_rect.top,
+                    right: right - 76,
+                    bottom: row_rect.bottom,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            let toggle = RECT {
+                left: right - 68,
+                top: row_rect.top + 2,
+                right,
+                bottom: row_rect.bottom - 2,
+            };
+            draw_subagent_button(
+                dc,
+                toggle,
+                if busy {
+                    "Saving..."
+                } else if enabled {
+                    "On"
+                } else {
+                    "Off"
+                },
+                !busy,
+                enabled,
+                small_font,
+            );
+            if !busy {
+                app.model_hits.push((
+                    toggle,
+                    ModelHit {
+                        provider: row.provider.clone(),
+                        id: row.id.clone(),
+                        native: row.native,
+                        enabled: !enabled,
+                    },
+                ));
+            }
+        }
+        y += 38;
+    }
+
+    if let Some(message) = &state.message {
+        let message_rect = RECT {
+            left,
+            top: y,
+            right,
+            bottom: y + 34,
+        };
+        if visible(&message_rect) {
+            set_text_color(
+                dc,
+                if message.starts_with("Update failed") {
+                    0x008888ff
+                } else {
+                    0x008edbc0
+                },
+            );
+            draw_text(
+                dc,
+                message,
+                message_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+    }
+}
+
+fn handle_subagent_action(hwnd: HWND, action: SubagentHit) {
+    let mut save = None;
+    with_app(|app| {
+        if app.state.subagents.saving {
+            return;
+        }
+        match action {
+            SubagentHit::ToggleFeatured(model) => {
+                app.state.subagents.toggle_featured(&model);
+            }
+            SubagentHit::MoveFeatured(index, direction) => {
+                app.state.subagents.move_featured(index, direction);
+            }
+            SubagentHit::CycleModel => app.state.subagents.cycle_model(),
+            SubagentHit::CycleEffort => app.state.subagents.cycle_effort(),
+            SubagentHit::ToggleGuidance => app.state.subagents.toggle_guidance(),
+            SubagentHit::ToggleSyncDefaults => app.state.subagents.toggle_sync_defaults(),
+            SubagentHit::Save if app.state.subagents.dirty => {
+                app.state.subagents.saving = true;
+                app.state.subagents.message = None;
+                save = Some((
+                    app.state.subagents.chosen.clone(),
+                    app.state.subagents.injection_request(),
+                ));
+            }
+            SubagentHit::Save => {}
+        }
+    });
+    unsafe {
+        resize_for_state(hwnd);
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let Some((chosen, injection)) = save else {
+        return;
+    };
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result: Result<(SubagentModelsResponse, InjectionModelResponse), String> = (|| {
+            let _: serde_json::Value = api::put_json(
+                "/api/subagent-models",
+                &SubagentModelsRequest { models: &chosen },
+            )?;
+            let _: serde_json::Value = api::put_json("/api/injection-model", &injection)?;
+            let models = api::get_json("/api/subagent-models", 30_000)?;
+            let injection = api::get_json("/api/injection-model", 30_000)?;
+            Ok((models, injection))
+        })();
+        // Keep edited values on failure so a partial two-endpoint save can be
+        // retried and converge both server settings on the same selection.
+        with_app(|app| match result {
+            Ok((models, injection)) => {
+                app.state.subagents.apply_models(models);
+                app.state.subagents.apply_injection(injection);
+                app.state.subagents.mark_saved();
+            }
+            Err(error) => {
+                app.state.subagents.saving = false;
+                app.state.subagents.dirty = true;
+                app.state.subagents.message = Some(format!("Save failed: {error}"));
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn subagent_content_height(state: &SubagentState) -> i32 {
+    if !state.loaded() {
+        return 100;
+    }
+    let available = state
+        .available
+        .iter()
+        .filter(|model| !state.chosen.contains(model))
+        .count() as i32;
+    64 + state.chosen.len() as i32 * 38
+        + 34
+        + available * 34
+        + 234
+        + if state.message.is_some() { 34 } else { 0 }
+}
+
+fn subagent_setting_rect(width: i32, top: i32) -> RECT {
+    RECT {
+        left: (width / 2).max(174),
+        top: top + 5,
+        right: width - 18,
+        bottom: top + 35,
+    }
+}
+
+unsafe fn draw_subagent_button(
+    dc: HDC,
+    rect: RECT,
+    label: &str,
+    enabled: bool,
+    selected: bool,
+    font: HFONT,
+) {
+    fill_solid(dc, rect, if selected { 0x00443824 } else { 0x002d2723 });
+    let _ = SelectObject(dc, font);
+    set_text_color(dc, if enabled { 0x00e2ded9 } else { 0x006f7380 });
+    draw_text(
+        dc,
+        label,
+        RECT {
+            left: rect.left + 6,
+            top: rect.top,
+            right: rect.right - 6,
+            bottom: rect.bottom,
+        },
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+}
+
+unsafe fn draw_subagents(
+    dc: HDC,
+    width: i32,
+    height: i32,
+    app: &mut App,
+    body_font: HFONT,
+    small_font: HFONT,
+) {
+    let state = &app.state.subagents;
+    let mut y = CONTENT_TOP - app.scroll_offset;
+    let left = 18;
+    let right = width - 18;
+    let visible = |rect: &RECT| rect.bottom > CONTENT_TOP && rect.top < height;
+
+    if !state.loaded() {
+        let _ = SelectObject(dc, body_font);
+        set_text_color(dc, 0x008e949e);
+        draw_text(
+            dc,
+            state
+                .message
+                .as_deref()
+                .unwrap_or("Loading subagent settings..."),
+            RECT {
+                left,
+                top: y + 20,
+                right,
+                bottom: y + 70,
+            },
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+        return;
+    }
+
+    let _ = SelectObject(dc, body_font);
+    set_text_color(dc, 0x00f0ece8);
+    draw_text(
+        dc,
+        "Featured models",
+        RECT {
+            left,
+            top: y + 8,
+            right: right - 70,
+            bottom: y + 36,
+        },
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+    );
+    let _ = SelectObject(dc, small_font);
+    set_text_color(dc, 0x008edbc0);
+    draw_text(
+        dc,
+        &format!("{}/{}", state.chosen.len(), subagents::FEATURED_MAX),
+        RECT {
+            left: right - 70,
+            top: y + 8,
+            right,
+            bottom: y + 36,
+        },
+        DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+    );
+    y += 42;
+
+    if state.chosen.is_empty() {
+        set_text_color(dc, 0x008e949e);
+        draw_text(
+            dc,
+            "No featured models selected",
+            RECT {
+                left: left + 20,
+                top: y,
+                right,
+                bottom: y + 30,
+            },
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        y += 38;
+    } else {
+        for (index, model) in state.chosen.iter().enumerate() {
+            let row = RECT {
+                left,
+                top: y + 2,
+                right,
+                bottom: y + 34,
+            };
+            if visible(&row) {
+                fill_solid(dc, row, 0x0027201d);
+                let _ = SelectObject(dc, small_font);
+                set_text_color(dc, 0x00c7cbd2);
+                draw_text(
+                    dc,
+                    &format!("{}. {}", index + 1, model),
+                    RECT {
+                        left: left + 8,
+                        top: row.top,
+                        right: right - 92,
+                        bottom: row.bottom,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+                for (label, rect, action, enabled) in [
+                    (
+                        "Up",
+                        RECT {
+                            left: right - 90,
+                            top: row.top,
+                            right: right - 62,
+                            bottom: row.bottom,
+                        },
+                        SubagentHit::MoveFeatured(index, -1),
+                        index > 0,
+                    ),
+                    (
+                        "Dn",
+                        RECT {
+                            left: right - 60,
+                            top: row.top,
+                            right: right - 32,
+                            bottom: row.bottom,
+                        },
+                        SubagentHit::MoveFeatured(index, 1),
+                        index + 1 < state.chosen.len(),
+                    ),
+                    (
+                        "X",
+                        RECT {
+                            left: right - 30,
+                            top: row.top,
+                            right,
+                            bottom: row.bottom,
+                        },
+                        SubagentHit::ToggleFeatured(model.clone()),
+                        true,
+                    ),
+                ] {
+                    draw_subagent_button(dc, rect, label, enabled, false, small_font);
+                    if enabled {
+                        app.subagent_hits.push((rect, action));
+                    }
+                }
+            }
+            y += 38;
+        }
+    }
+
+    let _ = SelectObject(dc, small_font);
+    set_text_color(dc, 0x008e949e);
+    draw_text(
+        dc,
+        "Available models - click to feature",
+        RECT {
+            left,
+            top: y,
+            right,
+            bottom: y + 30,
+        },
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+    );
+    y += 34;
+    let full = state.chosen.len() >= subagents::FEATURED_MAX;
+    for model in state
+        .available
+        .iter()
+        .filter(|model| !state.chosen.contains(model))
+    {
+        let row = RECT {
+            left,
+            top: y + 2,
+            right,
+            bottom: y + 32,
+        };
+        if visible(&row) {
+            draw_subagent_button(dc, row, model, !full, false, small_font);
+            if !full {
+                app.subagent_hits
+                    .push((row, SubagentHit::ToggleFeatured(model.clone())));
+            }
+        }
+        y += 34;
+    }
+
+    y += 8;
+    let _ = SelectObject(dc, body_font);
+    set_text_color(dc, 0x00f0ece8);
+    draw_text(
+        dc,
+        "Delegation",
+        RECT {
+            left,
+            top: y,
+            right,
+            bottom: y + 32,
+        },
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+    );
+    y += 34;
+
+    for (label, value, action, enabled, selected) in [
+        (
+            "Preferred model",
+            state.model.as_deref().unwrap_or("Automatic"),
+            SubagentHit::CycleModel,
+            !state.delegation_available.is_empty(),
+            state.model.is_some(),
+        ),
+        (
+            "Reasoning effort",
+            state.effort.as_deref().unwrap_or("Automatic"),
+            SubagentHit::CycleEffort,
+            state.model.is_some() && !state.efforts.is_empty(),
+            state.effort.is_some(),
+        ),
+        (
+            "Multi-agent guidance",
+            if state.guidance_enabled { "On" } else { "Off" },
+            SubagentHit::ToggleGuidance,
+            true,
+            state.guidance_enabled,
+        ),
+        (
+            "Sync Codex defaults",
+            if state.sync_codex_defaults {
+                "On"
+            } else {
+                "Off"
+            },
+            SubagentHit::ToggleSyncDefaults,
+            state.model.is_some(),
+            state.sync_codex_defaults,
+        ),
+    ] {
+        let row = RECT {
+            left,
+            top: y,
+            right,
+            bottom: y + 42,
+        };
+        let control = subagent_setting_rect(width, y);
+        if visible(&row) {
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, if enabled { 0x00c7cbd2 } else { 0x006f7380 });
+            draw_text(
+                dc,
+                label,
+                RECT {
+                    left,
+                    top: y,
+                    right: control.left - 8,
+                    bottom: y + 42,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            draw_subagent_button(dc, control, value, enabled, selected, small_font);
+            if enabled {
+                app.subagent_hits.push((control, action));
+            }
+        }
+        y += 42;
+    }
+
+    let save = RECT {
+        left: (right - 120).max(left),
+        top: y + 6,
+        right,
+        bottom: y + 40,
+    };
+    let save_enabled = state.dirty && !state.saving;
+    if visible(&save) {
+        draw_subagent_button(
+            dc,
+            save,
+            if state.saving {
+                "Saving..."
+            } else {
+                "Save changes"
+            },
+            save_enabled,
+            state.dirty,
+            body_font,
+        );
+        if save_enabled {
+            app.subagent_hits.push((save, SubagentHit::Save));
+        }
+    }
+    if let Some(message) = &state.message {
+        set_text_color(dc, if state.dirty { 0x008888ff } else { 0x008edbc0 });
+        draw_text(
+            dc,
+            message,
+            RECT {
+                left,
+                top: y + 6,
+                right: save.left - 8,
+                bottom: y + 40,
+            },
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+    }
 }
 
 unsafe fn draw_log_list(
@@ -3882,13 +5667,7 @@ unsafe fn draw_minimize_control(dc: HDC, width: i32, app: &App) {
     draw_lucide_icon(dc, "\u{e11c}", minimize_control_rect(width), color);
 }
 
-unsafe fn draw_account_pause_control(
-    dc: HDC,
-    rect: RECT,
-    hot: bool,
-    pressed: bool,
-    busy: bool,
-) {
+unsafe fn draw_account_pause_control(dc: HDC, rect: RECT, hot: bool, pressed: bool, busy: bool) {
     let color = if busy {
         0x006f7380
     } else if hot || pressed {
@@ -3990,7 +5769,11 @@ unsafe fn draw_reset_credit_control(
         let _ = LineTo(dc, x, y);
     }
     let divider_x = left + 8;
-    for (from, to) in [(top + 1, top + 4), (cy - 1, cy + 2), (bottom - 4, bottom - 1)] {
+    for (from, to) in [
+        (top + 1, top + 4),
+        (cy - 1, cy + 2),
+        (bottom - 4, bottom - 1),
+    ] {
         let _ = MoveToEx(dc, divider_x, from, None);
         let _ = LineTo(dc, divider_x, to);
     }
@@ -4062,6 +5845,7 @@ unsafe fn draw_provider_modal(
     set_text_color(dc, 0x00f0ece8);
     let modal_title = match app.provider_modal.as_ref() {
         Some(ProviderModal::ResetCredits { .. }) => "초기화권",
+        Some(ProviderModal::Connection { .. }) => "연결 설정",
         _ => "프로바이더 추가",
     };
     draw_text(
@@ -4412,6 +6196,265 @@ unsafe fn draw_provider_modal(
                 );
             }
         }
+        Some(ProviderModal::KiroAccountChoice) => {
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x00e9e4df);
+            draw_text(
+                dc,
+                "Kiro 계정 유형을 선택하세요.",
+                RECT {
+                    left: 60,
+                    top: 142,
+                    right: width - 60,
+                    bottom: 184,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+            set_text_color(dc, 0x009da3ad);
+            // Personal Kiro login drives the Kiro CLI on the OCX host, so it only
+            // works when OCX runs on this PC. Organization login is device-code
+            // based and works remotely.
+            let remote = app.state.remote;
+            draw_text(
+                dc,
+                if remote {
+                    "원격 서버에서는 개인 계정 로그인을 사용할 수 없습니다(서버의 Kiro CLI가 필요). 조직 계정은 IAM Identity Center Start URL과 region으로 원격에서도 로그인할 수 있습니다."
+                } else {
+                    "개인 계정은 기존 Kiro 강제 계정 로그인을 시작합니다. 조직 계정은 IAM Identity Center Start URL과 region을 사용합니다."
+                },
+                RECT {
+                    left: 60,
+                    top: 184,
+                    right: width - 60,
+                    bottom: 254,
+                },
+                DT_LEFT | DT_WORDBREAK,
+            );
+            let personal = RECT {
+                left: 60,
+                top: 266,
+                right: width - 60,
+                bottom: 310,
+            };
+            let organization = RECT {
+                left: 60,
+                top: 324,
+                right: width - 60,
+                bottom: 368,
+            };
+            draw_native_button(dc, personal, "개인 계정", remote);
+            draw_native_button(dc, organization, "조직 계정", false);
+            if !remote {
+                app.modal_hits.push((personal, ModalHit::KiroPersonal));
+            }
+            app.modal_hits
+                .push((organization, ModalHit::KiroOrganization));
+        }
+        Some(ProviderModal::KiroOrganization { error }) => {
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x00e9e4df);
+            draw_text(
+                dc,
+                "Kiro 조직 계정",
+                RECT {
+                    left: 60,
+                    top: 132,
+                    right: width - 60,
+                    bottom: 174,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+            set_text_color(dc, 0x009da3ad);
+            draw_text(
+                dc,
+                "Start URL (https://example.awsapps.com/start)",
+                RECT {
+                    left: 60,
+                    top: 194,
+                    right: width - 60,
+                    bottom: 218,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+            draw_text(
+                dc,
+                "AWS region (예: us-east-1)",
+                RECT {
+                    left: 60,
+                    top: 274,
+                    right: width - 60,
+                    bottom: 298,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+            let submit = RECT {
+                left: width - 174,
+                top: 354,
+                right: width - 60,
+                bottom: 388,
+            };
+            draw_native_button(dc, submit, "로그인 시작", false);
+            app.modal_hits
+                .push((submit, ModalHit::KiroOrganizationSubmit));
+            if let Some(error) = error {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    error,
+                    RECT {
+                        left: 60,
+                        top: 402,
+                        right: width - 60,
+                        bottom: 454,
+                    },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            }
+        }
+        Some(ProviderModal::Connection {
+            remote,
+            submitting,
+            error,
+        }) => {
+            let remote = *remote;
+            let submitting = *submitting;
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x009da3ad);
+            draw_text(
+                dc,
+                &format!("현재 연결 · {}", api::connection_base_url()),
+                RECT {
+                    left: 24,
+                    top: 48,
+                    right: width - 24,
+                    bottom: 76,
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            // Mode selector: two buttons, the selected one highlighted.
+            let local_rect = RECT {
+                left: 60,
+                top: 92,
+                right: width / 2 - 6,
+                bottom: 130,
+            };
+            let remote_rect = RECT {
+                left: width / 2 + 6,
+                top: 92,
+                right: width - 60,
+                bottom: 130,
+            };
+            for (rect, label, selected, hit) in [
+                (
+                    local_rect,
+                    "로컬 PC",
+                    !remote,
+                    ModalHit::ConnectionModeLocal,
+                ),
+                (
+                    remote_rect,
+                    "원격 서버",
+                    remote,
+                    ModalHit::ConnectionModeRemote,
+                ),
+            ] {
+                fill_solid(dc, rect, if selected { 0x00483f39 } else { 0x00302b28 });
+                if selected {
+                    fill_solid(
+                        dc,
+                        RECT {
+                            top: rect.bottom - 3,
+                            ..rect
+                        },
+                        0x009dcb4e,
+                    );
+                }
+                set_text_color(dc, if selected { 0x00f0ece8 } else { 0x009da3ad });
+                draw_text(dc, label, rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+                if !submitting {
+                    app.modal_hits.push((rect, hit));
+                }
+            }
+            if remote {
+                set_text_color(dc, 0x009da3ad);
+                draw_text(
+                    dc,
+                    "중앙 OCX 주소와 관리 토큰을 입력하세요. 토큰은 Windows 자격 증명 관리자에 저장되고 화면에는 다시 표시되지 않습니다.",
+                    RECT { left: 60, top: 142, right: width - 60, bottom: 200 },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+                draw_text(
+                    dc,
+                    "서버 주소 (예: http://100.120.114.62:10100)",
+                    RECT {
+                        left: 60,
+                        top: 210,
+                        right: width - 60,
+                        bottom: 234,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                draw_text(
+                    dc,
+                    "관리 토큰",
+                    RECT {
+                        left: 60,
+                        top: 290,
+                        right: width - 60,
+                        bottom: 314,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                set_text_color(dc, 0x008e949e);
+                draw_text(
+                    dc,
+                    "원격 모드에서는 시작·중지·재시작을 사용할 수 없고, 메모리는 서버에서 가져옵니다.",
+                    RECT { left: 60, top: 356, right: width - 60, bottom: 404 },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            } else {
+                set_text_color(dc, 0x009da3ad);
+                draw_text(
+                    dc,
+                    "이 PC의 OCX(127.0.0.1:10100)에 연결합니다. 저장된 원격 토큰은 삭제되고 기존 로컬 동작이 그대로 유지됩니다.",
+                    RECT { left: 60, top: 142, right: width - 60, bottom: 210 },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            }
+            let save = RECT {
+                left: width - 174,
+                top: 412,
+                right: width - 60,
+                bottom: 448,
+            };
+            draw_native_button(
+                dc,
+                save,
+                if submitting {
+                    "확인 중…"
+                } else {
+                    "저장"
+                },
+                submitting,
+            );
+            if !submitting {
+                app.modal_hits.push((save, ModalHit::ConnectionSave));
+            }
+            if let Some(error) = error {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    error,
+                    RECT {
+                        left: 60,
+                        top: 456,
+                        right: width - 60,
+                        bottom: 524,
+                    },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            }
+        }
         Some(ProviderModal::ResetCredits {
             control,
             credits,
@@ -4469,7 +6512,9 @@ unsafe fn draw_provider_modal(
                 });
                 draw_text(
                     dc,
-                    next_credit.as_deref().unwrap_or("다음 사용권 정보를 불러오지 못했습니다"),
+                    next_credit
+                        .as_deref()
+                        .unwrap_or("다음 사용권 정보를 불러오지 못했습니다"),
                     RECT {
                         left: 40,
                         top: 210,
@@ -4505,7 +6550,11 @@ unsafe fn draw_provider_modal(
                 draw_native_button(
                     dc,
                     confirm_rect,
-                    if *submitting { "사용 중…" } else { "초기화권 사용" },
+                    if *submitting {
+                        "사용 중…"
+                    } else {
+                        "초기화권 사용"
+                    },
                     *submitting,
                 );
                 if !*submitting {
@@ -4580,7 +6629,11 @@ unsafe fn draw_provider_modal(
                         set_text_color(dc, if index == 0 { 0x0024bffb } else { 0x00e9e4df });
                         draw_text(
                             dc,
-                            if index == 0 { "다음 사용" } else { "대기" },
+                            if index == 0 {
+                                "다음 사용"
+                            } else {
+                                "대기"
+                            },
                             RECT {
                                 left: row.left + 52,
                                 top: row.top + 3,
@@ -5115,6 +7168,139 @@ mod account_control_tests {
     use super::*;
 
     #[test]
+    fn all_content_tabs_are_clickable_at_the_minimum_window_width() {
+        for tab in [
+            ContentTab::Providers,
+            ContentTab::Logs,
+            ContentTab::Models,
+            ContentTab::Subagents,
+        ] {
+            let rect = content_tab_rect(tab);
+            assert!(rect.right < MIN_WIDTH - 14);
+            assert_eq!(
+                content_tab_at(
+                    MIN_WIDTH,
+                    (rect.left + rect.right) / 2,
+                    (rect.top + rect.bottom) / 2
+                ),
+                Some(tab)
+            );
+        }
+    }
+
+    #[test]
+    fn a_connection_change_is_refused_while_any_login_or_mutation_is_outstanding() {
+        assert!(!connection_change_blocked(0, false));
+        assert!(connection_change_blocked(1, false));
+        assert!(connection_change_blocked(0, true));
+    }
+
+    #[test]
+    fn cli_accepts_only_bootstrap_modes_and_never_a_token_argument() {
+        assert_eq!(parse_cli(Vec::<String>::new()).unwrap(), Cli::Window);
+        assert_eq!(parse_cli(vec!["--local".into()]).unwrap(), Cli::Local);
+        assert_eq!(
+            parse_cli(vec!["--connect".into(), "http://10.0.0.5:10100".into()]).unwrap(),
+            Cli::Connect("http://10.0.0.5:10100".into())
+        );
+        // A token passed on the command line is refused rather than accepted:
+        // argv is readable by every process on the machine.
+        assert!(parse_cli(vec![
+            "--connect".into(),
+            "http://10.0.0.5:10100".into(),
+            "ocx_admin_secret".into()
+        ])
+        .is_err());
+        assert!(parse_cli(vec!["--connect".into()]).is_err());
+        assert!(parse_cli(vec!["--token".into()]).is_err());
+    }
+
+    #[test]
+    fn only_plain_web_authorization_urls_reach_the_shell() {
+        assert!(openable_authorization_url(
+            "https://auth.example.com/oauth/authorize?state=abc&code_challenge=xyz"
+        ));
+        for rejected in [
+            "file:///C:/Windows/System32/cmd.exe",
+            "javascript:alert(1)",
+            "https://example.com/a b",
+            "https://example.com/\"quoted\"",
+            "https://example.com/\nnewline",
+            "https://",
+        ] {
+            assert!(!openable_authorization_url(rejected), "accepted {rejected}");
+        }
+    }
+
+    #[test]
+    fn remote_mode_shows_server_memory_and_ignores_local_process_samples() {
+        let mut state = ViewState {
+            remote: true,
+            ..Default::default()
+        };
+        apply_local_process_memory(
+            &mut state,
+            4242,
+            999,
+            888,
+            Some(SystemMemory {
+                physical_total: 32 * GIB,
+                physical_available: 8 * GIB,
+                commit_total: 16 * GIB,
+                commit_limit: 48 * GIB,
+            }),
+        );
+        assert_eq!(
+            (state.pid, state.working_set, state.private_commit),
+            (0, 0, 0)
+        );
+        assert!(state.system_memory.is_none());
+
+        apply_memory_details(
+            &mut state,
+            MemoryDetails {
+                heap_used: Some(11),
+                rss: Some(700),
+                heap_total: Some(300),
+                observed_bytes: Some(500),
+            },
+        );
+        assert_eq!(state.working_set, 700);
+        assert_eq!(state.private_commit, 500);
+        assert!(state.system_memory.is_none());
+    }
+
+    #[test]
+    fn local_mode_keeps_process_samples_and_local_capacity() {
+        let mut state = ViewState::default();
+        let memory = SystemMemory {
+            physical_total: 32 * GIB,
+            physical_available: 8 * GIB,
+            commit_total: 16 * GIB,
+            commit_limit: 48 * GIB,
+        };
+        apply_local_process_memory(&mut state, 4242, 999, 888, Some(memory));
+        apply_memory_details(
+            &mut state,
+            MemoryDetails {
+                heap_used: Some(11),
+                rss: Some(700),
+                heap_total: Some(300),
+                observed_bytes: Some(500),
+            },
+        );
+        assert_eq!(
+            (state.pid, state.working_set, state.private_commit),
+            (4242, 999, 888)
+        );
+        assert!(state.system_memory.is_some());
+        assert_eq!(
+            state.details.and_then(|details| details.heap_used),
+            Some(11)
+        );
+    }
+
+    #[test]
     fn oversized_refresh_age_cannot_underflow_the_monotonic_clock() {
         let now = Instant::now();
         assert_eq!(refresh_seed(now, Duration::MAX), now);
@@ -5189,7 +7375,10 @@ mod account_control_tests {
         assert_eq!(reset_credit_count(&without_credit), None);
         assert_eq!(reset_credit_count(&zero_credit), None);
         assert_eq!(reset_credit_count(&with_credit), Some(1));
-        assert_eq!(account_height(&with_credit), account_height(&without_credit));
+        assert_eq!(
+            account_height(&with_credit),
+            account_height(&without_credit)
+        );
     }
 
     #[test]
@@ -5258,7 +7447,10 @@ mod account_control_tests {
             provider_catalog_tab(&cloudflare_free),
             ProviderCatalogTab::Free
         );
-        assert_eq!(provider_catalog_tab(&ollama_local), ProviderCatalogTab::Free);
+        assert_eq!(
+            provider_catalog_tab(&ollama_local),
+            ProviderCatalogTab::Free
+        );
         assert_eq!(provider_catalog_tab(&paid), ProviderCatalogTab::Paid);
     }
 
@@ -5328,10 +7520,6 @@ mod account_control_tests {
         assert_eq!(
             codex_login_status_path("flow/a", Some("pool b"), true),
             "/api/codex-auth/login-status?flowId=flow%2Fa&accountId=pool%20b&reauth=1"
-        );
-        assert_eq!(
-            codex_cancel_body("flow/a"),
-            serde_json::json!({"flowId": "flow/a"})
         );
     }
 
@@ -5406,6 +7594,72 @@ mod account_control_tests {
         assert!(!api_key_edit_needs_cleanup(true, true));
         assert!(api_key_edit_needs_cleanup(false, true));
         assert!(!api_key_edit_needs_cleanup(false, false));
+    }
+
+    #[test]
+    fn kiro_organization_request_canonicalizes_transient_input() {
+        assert_eq!(
+            kiro_organization_request(" HTTPS://D-Example.awsapps.com/start/ ", " us-east-1 "),
+            Ok((
+                "https://d-example.awsapps.com/start".into(),
+                "us-east-1".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn kiro_organization_request_rejects_noncanonical_start_urls() {
+        for start_url in [
+            "http://d-example.awsapps.com/start",
+            "https://awsapps.com/start",
+            "https://.awsapps.com/start",
+            "https://d-example.awsapps.com/other",
+            "https://d-example.awsapps.com/start?organization=secret",
+            "https://d.example.awsapps.com/start",
+            "https://user@d-example.awsapps.com/start",
+            "https://d-example.awsapps.com:443/start",
+            "https://d-example.awsapps.com/start#fragment",
+            "https://-example.awsapps.com/start",
+            "https://example-.awsapps.com/start",
+            "https://example.com/start",
+        ] {
+            assert!(
+                kiro_organization_request(start_url, "us-east-1").is_err(),
+                "accepted {start_url}"
+            );
+        }
+        assert!(kiro_organization_request(
+            &format!("https://{}.awsapps.com/start", "a".repeat(64)),
+            "us-east-1"
+        )
+        .is_err());
+        assert!(kiro_organization_request(
+            &format!("https://d-example.awsapps.com/start{}", " ".repeat(2049)),
+            "us-east-1"
+        )
+        .is_err());
+        assert!(
+            kiro_organization_request("https://d-example.awsapps.com/start\n", "us-east-1")
+                .is_err()
+        );
+        for region in [
+            "",
+            "US-EAST-1",
+            "us-east",
+            "us-1",
+            "us--east-1",
+            "us-east-12",
+            "us-east-1/path",
+        ] {
+            assert!(
+                kiro_organization_request("https://d-example.awsapps.com/start", region).is_err(),
+                "accepted {region}"
+            );
+        }
+        assert!(
+            kiro_organization_request("https://d-example.awsapps.com/start", "us-east-1\n")
+                .is_err()
+        );
     }
 
     #[test]
@@ -5591,9 +7845,21 @@ mod account_control_tests {
                 reset_at: None,
                 value_label: None,
                 segments: vec![
-                    QuotaSegment { label: "5h".into(), percent: Some(8.4), reset_at: Some(1_785_945_600_000.0) },
-                    QuotaSegment { label: "Weekly".into(), percent: Some(3.36), reset_at: Some(1_785_945_600_000.0) },
-                    QuotaSegment { label: "Monthly".into(), percent: Some(33.9), reset_at: None },
+                    QuotaSegment {
+                        label: "5h".into(),
+                        percent: Some(8.4),
+                        reset_at: Some(1_785_945_600_000.0),
+                    },
+                    QuotaSegment {
+                        label: "Weekly".into(),
+                        percent: Some(3.36),
+                        reset_at: Some(1_785_945_600_000.0),
+                    },
+                    QuotaSegment {
+                        label: "Monthly".into(),
+                        percent: Some(33.9),
+                        reset_at: None,
+                    },
                 ],
             }],
             ..Default::default()
@@ -5635,13 +7901,27 @@ mod account_control_tests {
 
         let columns = quota_columns(Some(&quota));
         assert_eq!(
-            columns.iter().map(|column| column.label.as_str()).collect::<Vec<_>>(),
+            columns
+                .iter()
+                .map(|column| column.label.as_str())
+                .collect::<Vec<_>>(),
             vec!["5h", "Weekly", "Monthly", "API window"]
         );
-        assert_eq!(columns.iter().map(|column| column.percent).collect::<Vec<_>>(),
-            vec![Some(12.0), Some(34.0), Some(56.0), Some(78.0)]);
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.percent)
+                .collect::<Vec<_>>(),
+            vec![Some(12.0), Some(34.0), Some(56.0), Some(78.0)]
+        );
         assert_eq!(account_height(&AccountView::default()), 38);
-        assert_eq!(account_height(&AccountView { quota: Some(quota), ..Default::default() }), 60);
+        assert_eq!(
+            account_height(&AccountView {
+                quota: Some(quota),
+                ..Default::default()
+            }),
+            60
+        );
     }
 
     #[test]
@@ -5853,6 +8133,8 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_UP, w!("기준값 +1%"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, MENU_PROVIDER_ADD, w!("프로바이더 추가..."));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    let _ = AppendMenuW(menu, MF_STRING, MENU_CONNECTION, w!("연결 설정..."));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, MENU_REFRESH, w!("새로고침"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);

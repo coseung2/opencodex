@@ -8,6 +8,7 @@ import { enrichProviderFromRegistry } from "../src/providers/derive";
 import { handleResponses } from "../src/server/responses";
 import { clearResponseStateMemoryForTests, expandPreviousResponseInput, flushResponseState } from "../src/responses/state";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
+import { createMuseToolSearchRestoreRewrite, repairMuseToolSearchSchemas } from "../src/adapters/muse-tool-search";
 
 const oldFetch = globalThis.fetch;
 const oldHome = process.env.OPENCODEX_HOME;
@@ -74,6 +75,104 @@ describe("declared namespace alias ownership", () => {
 });
 
 describe("OpenCode Muse wire boundary", () => {
+  test("native search restoration preserves explicit values, unconstrained nulls, and unrelated payloads", () => {
+    const schema = { type: "object", properties: { query: { type: "string" }, limit: { type: "integer", default: 5 }, free: {} }, required: ["query"] };
+    const body = { tools: [{ type: "tool_search", execution: "client", parameters: schema }] };
+    const fixed = repairMuseToolSearchSchemas(body) as any;
+    expect(fixed.tools[0].parameters.properties.limit.anyOf[0].default).toBe(5);
+    expect(fixed.tools[0].parameters.properties.free).toEqual({});
+    const rewrite = createMuseToolSearchRestoreRewrite(body)!;
+    const payload = { output: [
+      { type: "tool_search_call", arguments: { query: "fixture", limit: 7, free: null } },
+      { type: "function_call", name: "untouched", arguments: { limit: null } },
+      { type: "message", content: [{ type: "tool_search_call", arguments: { limit: null } }] },
+    ] };
+    expect(JSON.parse(rewrite(JSON.stringify(payload)))).toEqual(payload);
+    expect(rewrite("not json")).toBe("not json");
+    expect(schema.required).toEqual(["query"]);
+  });
+  for (const stream of [false, true]) test(`native tool_search optional limit survives strict validation and restoration (stream=${stream})`, async () => {
+    const requests: any[] = [];
+    const search = { type: "tool_search", execution: "client", parameters: {
+      type: "object", properties: { query: { type: "string" }, limit: { type: "integer" },
+        nullable: { type: ["string", "null"] } }, required: ["query"], additionalProperties: false,
+    } };
+    const original = structuredClone(search);
+    const item = { type: "tool_search_call", call_id: "call_search", execution: "client", arguments: { query: "fixture", limit: null, nullable: null } };
+    globalThis.fetch = (async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      const payload = { id: "resp_search_schema", status: "completed", output: [item] };
+      return stream ? new Response([
+        { type: "response.output_item.added", item },
+        { type: "response.output_item.done", item },
+        { type: "response.completed", response: payload },
+      ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } }) : Response.json(payload);
+    }) as typeof fetch;
+    const result = await (await call({ tools: [search], stream })).text();
+    const schema = requests[0].tools[0].parameters;
+    expect(schema.required).toEqual(["query", "limit", "nullable"]);
+    expect(schema.properties.limit).toEqual({ anyOf: [{ type: "integer" }, { type: "null" }] });
+    expect(schema.properties.nullable).toEqual(search.parameters.properties.nullable);
+    expect(result).not.toContain('"limit":null');
+    expect(result).toContain('"nullable":null');
+    expect(result).toContain('"query":"fixture"');
+    expect(search).toEqual(original);
+    await (await call({ tools: [search], stream }, "https://custom.test/v1")).text();
+    expect(requests[1].tools[0]).toEqual(original);
+  });
+
+  test("optional strict tool schemas become non-strict only for Muse, preserving the schema", async () => {
+    const requests: any[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return Response.json({ id: "resp_schema", status: "completed", output: [] });
+    }) as typeof fetch;
+    const optional = { type: "function", name: "list_items", strict: true, parameters: {
+      type: "object", properties: { limit: { type: "integer" } }, additionalProperties: false,
+    } };
+    const valid = { ...optional, name: "required_items", parameters: { ...optional.parameters, required: ["limit"] } };
+    const nested = { ...optional, name: "nested", parameters: { type: "object", required: ["options"],
+      properties: { options: optional.parameters }, additionalProperties: false } };
+    const tools = [optional, valid, { type: "namespace", name: "nested_tools", tools: [nested] }];
+    await (await call({ tools, stream: false })).text();
+    await (await call({ tools, stream: false }, "https://custom.test/v1")).text();
+    expect(requests[0].tools[0]).toEqual({ ...optional, strict: false });
+    expect(requests[0].tools[1]).toEqual(valid);
+    expect(requests[0].tools[2].tools[0]).toEqual({ ...nested, strict: false });
+    expect(requests[1].tools).toEqual(tools);
+    expect(optional.strict).toBe(true);
+  });
+
+  test("dynamic tool definitions preserve optional parameters without traversing defaults", async () => {
+    const requests: any[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return Response.json({ id: "resp_dynamic", status: "completed", output: [] });
+    }) as typeof fetch;
+    const definition = { type: "function", name: "dynamic_items", strict: true, parameters: {
+      type: "object", properties: { limit: { type: "integer" } }, additionalProperties: false,
+    } };
+    await (await call({ stream: false, input: [
+      { type: "additional_tools", tools: [definition] }, { role: "user", content: "OK" },
+    ] })).text();
+    expect(requests[0].input[0].tools[0]).toEqual({ ...definition, strict: false });
+  });
+  test("dynamic native tool_search schemas are repaired and restored", async () => {
+    const search = { type: "tool_search", execution: "client", parameters: {
+      type: "object", properties: { query: { type: "string" }, limit: { type: "integer" } }, required: ["query"], additionalProperties: false,
+    } };
+    const body = { input: [{ type: "additional_tools", tools: [search] }] };
+    const fixed = repairMuseToolSearchSchemas(body) as any;
+    expect(fixed.input[0].tools[0].parameters.required).toEqual(["query", "limit"]);
+    expect(fixed.input[0].tools[0].parameters.properties.limit).toEqual({ anyOf: [{ type: "integer" }, { type: "null" }] });
+    expect(search.parameters.required).toEqual(["query"]);
+
+    const rewrite = createMuseToolSearchRestoreRewrite(body)!;
+    const payload = { output: [{ type: "tool_search_call", arguments: { query: "fixture", limit: null } }] };
+    expect(JSON.parse(rewrite(JSON.stringify(payload)))).toEqual({
+      output: [{ type: "tool_search_call", arguments: { query: "fixture" } }],
+    });
+  });
   test("compatibility recognizes exact Go/Zen URLs, not reseller names or URL lookalikes", () => {
     for (const base of [go, "https://opencode.ai/zen/v1"]) {
       expect(isOpenCodeMuseResponses(model, `${base}/responses`)).toBe(true);

@@ -107,6 +107,7 @@ import { isOpenCodeGoKeyDestination, selectOpenCodeGoPoolKey } from "../../provi
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
 import { isOpenCodeMuseResponses, resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
+import { createMuseToolSearchRestoreRewrite } from "../../adapters/muse-tool-search";
 import { declaredNamespaceAliases } from "../../responses/namespace-aliases";
 import type { WsData } from "../ws-bridge";
 import { trackActiveTurnLease, trackStreamLifetime } from "../lifecycle";
@@ -1714,6 +1715,8 @@ async function handleResponsesInner(
       : isOpenCodeMuseResponses(parsed.modelId, request.url)
         ? declaredNamespaceAliases(parsed.context.tools ?? [], translatorBudget)
         : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
+    const museToolSearchRewrite = isOpenCodeMuseResponses(parsed.modelId, request.url)
+      ? createMuseToolSearchRestoreRewrite(parsed._rawBody) : undefined;
     recordAdapterReasoning(logCtx, request);
     const passthroughEstimate = typeof request.usageLog?.inputTokens === "number"
       ? request.usageLog.inputTokens
@@ -2059,12 +2062,14 @@ async function handleResponsesInner(
         ? createGrokResponsesSparseTerminalPayloadRewrite(translatorBudget)
         : undefined;
       const needsClientRewrite = imageGenCallAliases.size > 0
+        || museToolSearchRewrite !== undefined
         || hasResponsesItemIdRepair(repairConfig)
         || xaiCustomToolRewrite !== undefined
         || grokSparseTerminalRewrite !== undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass. Provider-shape restoration
       // runs before generic item-id repair so the client sees the correct custom-tool identity.
       const payloadRewrites = [
+        museToolSearchRewrite,
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         xaiCustomToolRewrite,
         grokSparseTerminalRewrite,
@@ -2231,7 +2236,8 @@ async function handleResponsesInner(
         } catch { /* non-JSON despite content-type; recording is best-effort */ }
       }
       const restoredCustomTools = restoreXaiCustomCallsInJson(text, xaiCustomToolNames);
-      return new Response(restoreImageGenCallsInJson(restoredCustomTools, imageGenCallAliases), {
+      const restoredMuseTools = museToolSearchRewrite?.(restoredCustomTools) ?? restoredCustomTools;
+      return new Response(restoreImageGenCallsInJson(restoredMuseTools, imageGenCallAliases), {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers,

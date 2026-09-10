@@ -20,10 +20,12 @@ import { getCredential } from "../src/oauth/store";
 import * as oauthStore from "../src/oauth/store";
 import { armClaudeCodeBaseline, loadConfig, saveConfig, saveConfigPreservingClaudeCode } from "../src/config";
 import { isApiAuthRequired, requireApiAuth } from "../src/server/auth-cors";
+import * as openUrlModule from "../src/lib/open-url";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-oauth-public-surface");
 const PUBLIC_OAUTH_ERROR = "OAuth authentication failed. Check the OpenCodex account status and retry.";
 const previousHome = process.env.OPENCODEX_HOME;
+let openUrlSpy: ReturnType<typeof spyOn>;
 const canonical = {
   adapter: "openai-responses",
   baseUrl: "https://chatgpt.com/backend-api/codex",
@@ -40,14 +42,18 @@ function config(): OcxConfig {
 }
 
 beforeEach(() => {
+  openUrlSpy = spyOn(openUrlModule, "openUrl").mockImplementation(() => {});
   clearLoginState("xai");
+  clearLoginState("kiro");
   rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
 });
 
 afterEach(() => {
+  openUrlSpy.mockRestore();
   clearLoginState("xai");
+  clearLoginState("kiro");
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   rmSync(TEST_DIR, { recursive: true, force: true });
@@ -63,6 +69,101 @@ async function waitForOAuthDone(provider: string): Promise<ReturnType<typeof get
 }
 
 describe("legacy ChatGPT OAuth public-surface exclusion", () => {
+  test("management Kiro organization login validates and forwards a fresh add-account request", async () => {
+    const cfg = config();
+    const originalLogin = OAUTH_PROVIDERS.kiro.login;
+    let received: unknown;
+    OAUTH_PROVIDERS.kiro.login = async (ctrl, opts) => {
+      received = opts;
+      ctrl.onAuth({
+        url: "https://device.sso.us-east-1.amazonaws.com/",
+        deviceCode: "ABCD-EFGH",
+      });
+      return {
+        access: "kiro-org-access",
+        refresh: "kiro-org-refresh",
+        accountId: "arn:aws:codewhisperer:us-east-1:123456789012:profile/org",
+        expires: Date.now() + 60_000,
+      };
+    };
+    try {
+      const request = new Request("http://localhost/api/oauth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "kiro",
+          addAccount: true,
+          kiroOrganization: {
+            startUrl: "https://Your-Company.awsapps.com/start/",
+            region: "us-east-1",
+          },
+        }),
+      });
+      const response = await handleManagementAPI(request, new URL(request.url), cfg);
+      expect(response?.status).toBe(200);
+      expect(await response?.json()).toEqual({
+        url: "https://device.sso.us-east-1.amazonaws.com/",
+        deviceCode: "ABCD-EFGH",
+      });
+      expect(received).toEqual({
+        forceLogin: true,
+        kiroOrganization: {
+          startUrl: "https://your-company.awsapps.com/start",
+          region: "us-east-1",
+        },
+      });
+      expect(openUrlSpy).toHaveBeenCalledWith("https://device.sso.us-east-1.amazonaws.com/");
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = originalLogin;
+      clearLoginState("kiro");
+    }
+  });
+
+  test("management rejects malformed Kiro organization requests before starting login", async () => {
+    const cfg = config();
+    const originalLogin = OAUTH_PROVIDERS.kiro.login;
+    let loginCalls = 0;
+    OAUTH_PROVIDERS.kiro.login = async () => {
+      loginCalls += 1;
+      throw new Error("must not start");
+    };
+    const bodies: unknown[] = [
+      null,
+      [],
+      1,
+      { provider: "xai", addAccount: true, kiroOrganization: { startUrl: "https://d-example.awsapps.com/start", region: "us-east-1" } },
+      { provider: "kiro", kiroOrganization: { startUrl: "https://d-example.awsapps.com/start", region: "us-east-1" } },
+      { provider: "kiro", addAccount: true, accountId: "existing", kiroOrganization: { startUrl: "https://d-example.awsapps.com/start", region: "us-east-1" } },
+      { provider: "kiro", addAccount: true, reauth: false, kiroOrganization: { startUrl: "https://d-example.awsapps.com/start", region: "us-east-1" } },
+      { provider: "kiro", addAccount: true, kiroOrganization: null },
+      { provider: "kiro", addAccount: true, kiroOrganization: [] },
+      { provider: "kiro", addAccount: true, kiroOrganization: 1 },
+      { provider: "kiro", addAccount: true, kiroOrganization: { startUrl: "https://d-example.awsapps.com/start" } },
+      { provider: "kiro", addAccount: true, kiroOrganization: { startUrl: "https://evil.test/start", region: "us-east-1" } },
+      { provider: "kiro", addAccount: true, kiroOrganization: { startUrl: "https://d-example.awsapps.com/start", region: "invalid" } },
+      { provider: "kiro", addAccount: true, kiroOrganization: { startUrl: "https://d-example.awsapps.com/start", region: "us-east-1", extra: true } },
+    ];
+    try {
+      for (const body of bodies) {
+        const request = new Request("http://localhost/api/oauth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const response = await handleManagementAPI(request, new URL(request.url), cfg);
+        expect(response?.status).toBe(400);
+        const rendered = JSON.stringify(await response?.json());
+        expect(rendered).not.toContain("d-example");
+        expect(rendered).not.toContain("us-east-1");
+        clearLoginState("kiro");
+      }
+      expect(loginCalls).toBe(0);
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = originalLogin;
+      clearLoginState("kiro");
+    }
+  });
+
   test("keeps low-level compatibility but excludes public discovery", () => {
     expect(isOAuthProvider("chatgpt")).toBe(true);
     expect(isPublicOAuthProvider("chatgpt")).toBe(false);
@@ -97,6 +198,83 @@ describe("legacy ChatGPT OAuth public-surface exclusion", () => {
     const discoveryReq = new Request("http://localhost/api/oauth/providers");
     const discovery = await handleManagementAPI(discoveryReq, new URL(discoveryReq.url), cfg);
     expect((await discovery?.json() as { providers: string[] }).providers).not.toContain("chatgpt");
+  });
+
+  test("OAuth login cancellation rejects malformed bodies with a controlled 400", async () => {
+    for (const body of [[], { provider: {} }]) {
+      const request = new Request("http://localhost/api/oauth/login/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const response = await handleManagementAPI(request, new URL(request.url), config());
+      expect(response?.status).toBe(400);
+    }
+  });
+
+  test("remote generic OAuth returns a flow-scoped callback contract and does not open a VM browser", async () => {
+    const cfg = config();
+    const originalLogin = OAUTH_PROVIDERS.xai.login;
+    OAUTH_PROVIDERS.xai.login = async ctrl => {
+      ctrl.onAuth?.({
+        url: "https://auth.example.test/authorize",
+        callbackUri: "http://127.0.0.1:8900/callback",
+      });
+      return await new Promise((_, reject) => ctrl.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+    };
+    try {
+      const start = new Request("http://localhost/api/oauth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "xai", clientBrowser: true }),
+      });
+      const response = await handleManagementAPI(start, new URL(start.url), cfg);
+      const body = await response?.json() as { flowId: string; callbackUri: string };
+      expect(body.flowId).toBeTruthy();
+      expect(body.callbackUri).toBe("http://127.0.0.1:8900/callback");
+      expect(openUrlSpy).not.toHaveBeenCalled();
+
+      const missingOwnerCancel = new Request("http://localhost/api/oauth/login/cancel", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "xai" }),
+      });
+      expect(await (await handleManagementAPI(missingOwnerCancel, new URL(missingOwnerCancel.url), cfg))?.json()).toEqual({ ok: true, cancelled: false });
+
+      const wrongCancel = new Request("http://localhost/api/oauth/login/cancel", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "xai", flowId: `${body.flowId}-wrong` }),
+      });
+      expect(await (await handleManagementAPI(wrongCancel, new URL(wrongCancel.url), cfg))?.json()).toEqual({ ok: true, cancelled: false });
+      expect(getLoginStatus("xai", body.flowId).done).toBe(false);
+
+      const cancel = new Request("http://localhost/api/oauth/login/cancel", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "xai", flowId: body.flowId }),
+      });
+      expect(await (await handleManagementAPI(cancel, new URL(cancel.url), cfg))?.json()).toEqual({ ok: true, cancelled: true });
+    } finally {
+      OAUTH_PROVIDERS.xai.login = originalLogin;
+      clearLoginState("xai");
+    }
+  });
+
+  test("remote Kiro personal login is rejected before touching the CLI flow", async () => {
+    const originalLogin = OAUTH_PROVIDERS.kiro.login;
+    let calls = 0;
+    OAUTH_PROVIDERS.kiro.login = async () => { calls += 1; throw new Error("must not run"); };
+    try {
+      const request = new Request("http://localhost/api/oauth/login", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "kiro", clientBrowser: true }),
+      });
+      const response = await handleManagementAPI(request, new URL(request.url), config());
+      expect(response?.status).toBe(400);
+      expect(await response?.json()).toEqual({ error: "Kiro personal CLI login is unavailable remotely; use organization login" });
+      expect(calls).toBe(0);
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = originalLogin;
+      clearLoginState("kiro");
+    }
   });
 
   test("internal chatgpt login persists credentials without creating a fourth provider", async () => {

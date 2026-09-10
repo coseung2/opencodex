@@ -11,6 +11,11 @@ pub struct Health {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryDetails {
     pub heap_used: Option<u64>,
+    /// Resident set of the OCX process. In remote mode this is the only memory
+    /// figure available: the VM's process cannot be sampled from this PC.
+    pub rss: Option<u64>,
+    pub heap_total: Option<u64>,
+    pub observed_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -424,6 +429,9 @@ pub struct ProviderPresetsResponse {
 pub struct AuthFlowResponse {
     pub flow_id: Option<String>,
     pub url: Option<String>,
+    /// Loopback redirect URI the server expects this client to listen on.
+    /// Present for remote browser flows; absent for device-code flows.
+    pub callback_uri: Option<String>,
     pub instructions: Option<String>,
     pub device_code: Option<String>,
 }
@@ -571,14 +579,12 @@ pub fn merge_providers(
                     .and_then(|account| account.quota.clone())
                     .or_else(|| report.map(|r| r.quota.clone()))
             } else {
-                report
-                    .map(|r| r.quota.clone())
-                    .or_else(|| {
-                        accounts
-                            .iter()
-                            .find(|account| account.active)
-                            .and_then(|account| account.quota.clone())
-                    })
+                report.map(|r| r.quota.clone()).or_else(|| {
+                    accounts
+                        .iter()
+                        .find(|account| account.active)
+                        .and_then(|account| account.quota.clone())
+                })
             };
             ProviderView {
                 name: config.name.clone(),
@@ -731,11 +737,7 @@ pub fn mark_codex_active_account(pools: &mut [AccountPool], active_id: Option<&s
 
 /// Optimistically mark `id` active in `provider`'s pool; returns the previously
 /// active account id (if any) so a failed switch can be reverted.
-pub fn mark_active_account(
-    pools: &mut [AccountPool],
-    provider: &str,
-    id: &str,
-) -> Option<String> {
+pub fn mark_active_account(pools: &mut [AccountPool], provider: &str, id: &str) -> Option<String> {
     let pool = pools.iter_mut().find(|pool| pool.provider == provider)?;
     let previous = pool
         .accounts
@@ -1049,8 +1051,20 @@ mod tests {
 
         let providers = merge_providers(&configs, &reports, &[], &pools);
 
-        assert_eq!(providers[0].quota.as_ref().and_then(|quota| quota.weekly_percent), Some(18.0));
-        assert_eq!(providers[0].accounts[1].quota.as_ref().and_then(|quota| quota.weekly_percent), Some(18.0));
+        assert_eq!(
+            providers[0]
+                .quota
+                .as_ref()
+                .and_then(|quota| quota.weekly_percent),
+            Some(18.0)
+        );
+        assert_eq!(
+            providers[0].accounts[1]
+                .quota
+                .as_ref()
+                .and_then(|quota| quota.weekly_percent),
+            Some(18.0)
+        );
     }
 
     #[test]
@@ -1068,9 +1082,21 @@ mod tests {
                     reset_at: None,
                     value_label: None,
                     segments: vec![
-                        QuotaSegment { label: "5h".into(), percent: Some(100.0), reset_at: None },
-                        QuotaSegment { label: "Weekly".into(), percent: Some(40.0), reset_at: None },
-                        QuotaSegment { label: "Monthly".into(), percent: Some(85.0), reset_at: None },
+                        QuotaSegment {
+                            label: "5h".into(),
+                            percent: Some(100.0),
+                            reset_at: None,
+                        },
+                        QuotaSegment {
+                            label: "Weekly".into(),
+                            percent: Some(40.0),
+                            reset_at: None,
+                        },
+                        QuotaSegment {
+                            label: "Monthly".into(),
+                            percent: Some(85.0),
+                            reset_at: None,
+                        },
                     ],
                 }],
                 ..Default::default()
@@ -1090,9 +1116,21 @@ mod tests {
                         reset_at: None,
                         value_label: None,
                         segments: vec![
-                            QuotaSegment { label: "5h".into(), percent: Some(12.0), reset_at: None },
-                            QuotaSegment { label: "Weekly".into(), percent: Some(8.0), reset_at: None },
-                            QuotaSegment { label: "Monthly".into(), percent: Some(85.0), reset_at: None },
+                            QuotaSegment {
+                                label: "5h".into(),
+                                percent: Some(12.0),
+                                reset_at: None,
+                            },
+                            QuotaSegment {
+                                label: "Weekly".into(),
+                                percent: Some(8.0),
+                                reset_at: None,
+                            },
+                            QuotaSegment {
+                                label: "Monthly".into(),
+                                percent: Some(85.0),
+                                reset_at: None,
+                            },
                         ],
                     }],
                     ..Default::default()
@@ -1102,14 +1140,21 @@ mod tests {
         }];
 
         let providers = merge_providers(&configs, &reports, &[], &pools);
-        let windows = &providers[0].quota.as_ref().expect("provider quota").custom_windows;
+        let windows = &providers[0]
+            .quota
+            .as_ref()
+            .expect("provider quota")
+            .custom_windows;
         assert_eq!(windows[0].segments.len(), 3);
         assert_eq!(windows[0].segments[0].label, "5h");
         assert_eq!(windows[0].segments[1].label, "Weekly");
         assert_eq!(windows[0].segments[2].label, "Monthly");
         assert_eq!(windows[0].segments[0].percent, Some(100.0));
         assert_eq!(
-            providers[0].accounts[0].quota.as_ref().and_then(|quota| quota.custom_windows.first()?.segments.first()?.percent),
+            providers[0].accounts[0]
+                .quota
+                .as_ref()
+                .and_then(|quota| quota.custom_windows.first()?.segments.first()?.percent),
             Some(12.0)
         );
     }
@@ -1206,14 +1251,19 @@ mod tests {
 
     #[test]
     fn codex_account_views_preserve_reset_credits() {
-        let response: CodexAccountsResponse = serde_json::from_str(
-            r#"{"accounts":[{"id":"__main__","quota":{"resetCredits":2}}]}"#,
-        )
-        .expect("account response parses");
+        let response: CodexAccountsResponse =
+            serde_json::from_str(r#"{"accounts":[{"id":"__main__","quota":{"resetCredits":2}}]}"#)
+                .expect("account response parses");
 
         let accounts = codex_account_views(response);
 
-        assert_eq!(accounts[0].quota.as_ref().and_then(|quota| quota.reset_credits), Some(2));
+        assert_eq!(
+            accounts[0]
+                .quota
+                .as_ref()
+                .and_then(|quota| quota.reset_credits),
+            Some(2)
+        );
     }
 
     #[test]
@@ -1442,11 +1492,13 @@ mod tests {
             base_url: "http://localhost:11434/v1".into(),
             ..Default::default()
         };
-        assert_eq!(provider_preset_action(&preset), ProviderPresetAction::ApiKey);
-        let payload = serde_json::to_value(
-            provider_create_body_with_api_key(&preset, None).unwrap(),
-        )
-        .unwrap();
+        assert_eq!(
+            provider_preset_action(&preset),
+            ProviderPresetAction::ApiKey
+        );
+        let payload =
+            serde_json::to_value(provider_create_body_with_api_key(&preset, None).unwrap())
+                .unwrap();
         assert_eq!(payload["provider"]["authMode"], "local");
         assert!(payload["provider"].get("apiKey").is_none());
     }

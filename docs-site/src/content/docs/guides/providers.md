@@ -85,7 +85,7 @@ ocx logout <provider>
 | `xai` | `openai-chat` | `https://api.x.ai/v1` | Live-first Grok catalog; `grok-4.5` is the fallback default. |
 | `anthropic` | `anthropic` | `https://api.anthropic.com` | Claude models; live model list fetched from `/v1/models`. |
 | `kimi` | `openai-chat` | `https://api.kimi.com/coding/v1` | Kimi K2.7/K2.6/K2.5 coding models. |
-| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed, signed-in `kiro-cli` session (on Unix, install with `curl -fsSL https://cli.kiro.dev/install | bash`; on Windows PowerShell, use `irm 'https://cli.kiro.dev/install.ps1' | iex`; then run `kiro-cli login`). **Add account** logs `kiro-cli` out, starts a fresh browser login that switches the account used by `kiro-cli`, and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved, and cancellation or failure restores the previous `kiro-cli` session. |
+| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed, signed-in `kiro-cli` session (on Unix, install with `curl -fsSL https://cli.kiro.dev/install | bash`; on Windows PowerShell, use `irm 'https://cli.kiro.dev/install.ps1' | iex`; then run `kiro-cli login`). **Add account** offers a personal or an organization identity. Personal logs `kiro-cli` out, starts a fresh browser login that switches the account used by `kiro-cli`, and restores the previous session if it is cancelled or fails. Organization runs AWS SSO OIDC device authorization directly in OpenCodex against an IAM Identity Center Start URL, with no `kiro-cli` involvement. Both store account-scoped profile metadata and preserve existing OpenCodex accounts. |
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. Uses the maintained six-model static catalog because CCA does not expose the generic `/models` endpoint. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
@@ -104,7 +104,8 @@ You can also start OAuth from the [web dashboard](/guides/web-dashboard/).
 OAuth providers whose credentials include a stable account id or email can keep more than one
 login. The Providers page shows those accounts in a dropdown, lets you add another, and switches the
 active account without logging the others out. Only identity-less Kimi credentials replace the
-active slot; Kiro accounts are keyed by profile ARN. `chatgpt` is always single-slot because Codex
+active slot; Kiro accounts are keyed by their resolved account identity, which for an organization
+login is the user combined with the organization. `chatgpt` is always single-slot because Codex
 pool accounts have a separate ledger.
 Tokens stay in `~/.opencodex/auth.json`; `/api/oauth/accounts` returns masked metadata only.
 
@@ -176,12 +177,35 @@ After a successful import, opencodex persists the imported credential to
 Keep these variables and the selected database private. Do not attach database files or raw login
 diagnostics to bug reports.
 
-**Add account** is a separate write workflow: it snapshots the current session, logs `kiro-cli` out,
-and imports the fresh browser login. If the login is cancelled or fails, including while OpenCodex
-persists the credential, rollback replaces the Kiro CLI database and removes its current WAL, SHM,
-and journal sidecars before publishing the previous session snapshot.
+**Add account** asks which kind of Kiro identity you are adding. **Personal account** keeps the
+existing Kiro Builder ID flow, which is driven through the local `kiro-cli`. **Organization account**
+is the IAM Identity Center path and does not use the local CLI at all.
 
-Because that rollback is only possible from a snapshot, **Add account** refuses to sign `kiro-cli`
+For an organization account, enter the IAM Identity Center Start URL
+(`https://<portal>.awsapps.com/start`, including AWS-generated `d-...` and custom portal names) and
+its AWS region. OpenCodex runs the AWS SSO OIDC device authorization itself: it registers a client,
+starts device authorization against that portal, opens the verification URL AWS returns in your
+browser, and shows the one-time user code in the dashboard and in Notch so you can confirm it on that
+page. The returned URL is whatever AWS hands back for your portal, commonly the access portal itself
+(`https://<portal>.awsapps.com/start/#/device?user_code=...`) rather than a `device.sso` host, so open
+the link as given instead of expecting a fixed address. Approve the request there; OpenCodex polls
+until AWS issues the token, resolves the account identity, and adds the result to the Kiro account
+pool, keyed by the user together with the organization rather than by any single identifier alone.
+The region is kept with that account as its `ssoRegion` so later token refreshes reach the same AWS
+endpoint; the Start URL and the other values you typed are used only to start the authorization
+request and are not stored. Existing accounts keep working
+throughout, and cancelling or failing the flow leaves the pool unchanged.
+
+Because the organization path never touches the Kiro CLI, it works on a machine that has no
+`kiro-cli` installed and does not disturb a signed-in `kiro-cli` session.
+
+The remaining Kiro CLI session handling applies to the forced **Personal account** login only. That
+path snapshots the current session, logs `kiro-cli` out, and imports the fresh login as another Kiro
+pool account under its resolved account identity. If the login is cancelled or fails, including
+while OpenCodex persists the credential, rollback replaces the Kiro CLI database and removes its current WAL, SHM, and journal sidecars before
+publishing the previous session snapshot.
+
+Because that rollback is only possible from a snapshot, the personal path refuses to sign `kiro-cli`
 out when a session store is present but cannot be captured (unreadable file, mismatched schema, or
 an ambiguous token selection), when `KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` redirect import reads away
 from the live CLI store, or when an existing primary CLI database has no recognized token row.

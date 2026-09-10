@@ -4,6 +4,8 @@ import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxP
 import { catalogModelSupportsReasoningSummaries } from "../codex/catalog";
 import { COMPACT_PROMPT, decodeCompactionSummary, SUMMARY_PREFIX } from "../responses/compaction";
 import { isOpenCodeMuseResponses } from "../providers/opencode-go-transport";
+import { relaxMuseOptionalToolSchemas, repairXaiCustomToolIds } from "./responses-tool-compat";
+import { repairMuseToolSearchSchemas } from "./muse-tool-search";
 import { isXaiResponsesDestination } from "../providers/xai-transport";
 import { debugProviderDiagnostic } from "../lib/debug";
 import { isXaiSchemaTarget, normalizeXaiToolParameters, XaiToolSchemaCompatibilityError } from "./xai-tool-schema";
@@ -1132,7 +1134,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (isXaiResponsesDestination(provider)) {
         outBody = lowerXaiResponsesCustomTools(outBody).body;
       }
-      const sanitizedBody = stripXaiOAuthOnlyParams(
+      let sanitizedBody = stripXaiOAuthOnlyParams(
         normalizeXaiResponsesWebSearch(
           normalizeToolSchemas(
             stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId, url),
@@ -1142,6 +1144,9 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         ),
         provider,
       );
+      // Run after generic item-id stripping: xAI custom calls require an id on replay.
+      if (isXaiResponsesDestination(provider)) sanitizedBody = repairXaiCustomToolIds(sanitizedBody);
+      if (isOpenCodeMuseResponses(parsed.modelId, url)) sanitizedBody = repairMuseToolSearchSchemas(relaxMuseOptionalToolSchemas(sanitizedBody));
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
         provider,

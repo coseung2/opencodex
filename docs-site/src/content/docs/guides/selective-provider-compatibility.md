@@ -9,9 +9,27 @@ The `opencode-go` preset routes `muse-spark-1.2-contributor` and `muse-spark-1.3
 
 OpenCode's Muse Responses gateway does not accept `search_content_types` and `indexed_web_access` on plain `web_search` tools. The proxy removes only those fields on the canonical Go/Zen Responses destinations. `web_search_preview`, sibling models and custom destinations retain their own contracts.
 
+Muse also rejects strict function definitions that contain optional properties. For those definitions,
+the proxy turns off strict mode while preserving the original schema and optional arguments.
+Valid strict definitions stay strict. This applies to nested schemas, namespaces, and dynamically
+supplied tools at the canonical Muse destinations.
+
+Native `tool_search` definitions have a separate strict-schema requirement. The proxy
+represents optional search arguments as required, nullable fields for Muse, then removes
+the added null placeholders from returned search calls. For example, an omitted `limit`
+stays optional for the client. Fields that already allow null retain their null values.
+This restoration applies to both JSON responses and streaming item/terminal events.
+
 Some Muse tool calls echo a namespaced tool as `default.apply_patch` instead of `default__apply_patch`. The client-facing response restores the declared namespace and name only when the spelling has a single unambiguous owner. Collisions with another dotted alias or a flat tool name do not select a tool by declaration order. Unknown names are not guessed. Streaming item events and terminal snapshots use the same restoration; local continuation history keeps the original upstream names.
 
 The existing `x-opencode-session` affinity remains runtime-only and stable for a conversation. Explicit session headers are preserved. These changes do not add the Meta direct API, Muse Code OAuth or a Command Code-specific reasoning ladder.
+
+## Grok custom-tool history
+
+xAI requires an item ID on custom-tool calls in conversation history, including requests with
+`store: false`. The proxy supplies a stable ID when generic stateless normalization leaves it
+missing, preserving the call ID that pairs the tool result with its call. Other destinations
+keep their existing item-ID behavior.
 
 ## Scope
 

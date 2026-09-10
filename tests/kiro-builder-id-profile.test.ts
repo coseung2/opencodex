@@ -17,6 +17,8 @@ const origRegion = process.env.KIRO_REGION;
 const origApiRegion = process.env.KIRO_API_REGION;
 const origArn = process.env.KIRO_PROFILE_ARN;
 const origOcxHome = process.env.OPENCODEX_HOME;
+const importOverrides = ['KIROCLI_DB_PATH', 'KIRO_CLI_DB_FILE', 'KIRO_CREDS_FILE', 'KIRO_CREDENTIALS_FILE', 'KIROCLI_TOKEN_KEY'] as const;
+const originalImportOverrides = Object.fromEntries(importOverrides.map(key => [key, process.env[key]]));
 let tmp: string;
 
 function seedKiroCliBuilderIdSession(): void {
@@ -42,6 +44,7 @@ function seedKiroCliBuilderIdSession(): void {
 }
 
 beforeEach(() => {
+  for (const key of importOverrides) delete process.env[key];
   tmp = mkdtempSync(join(tmpdir(), "kiro-builder-id-"));
   process.env.HOME = tmp;
   process.env.LOCALAPPDATA = join(tmp, "AppData", "Local");
@@ -53,6 +56,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const key of importOverrides) {
+    if (originalImportOverrides[key] === undefined) delete process.env[key];
+    else process.env[key] = originalImportOverrides[key];
+  }
   if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
   if (origLocalAppData === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = origLocalAppData;
   if (origUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = origUserProfile;

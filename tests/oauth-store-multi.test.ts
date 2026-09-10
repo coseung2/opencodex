@@ -38,6 +38,23 @@ const cred = (over: Partial<OAuthCredentials> = {}): OAuthCredentials => ({
 });
 
 describe("multi-account auth store", () => {
+  test('direct Kiro users with the same email keep separate accounts', async () => {
+    const first = cred({accountId:'sso-user-a',email:'same@example.test',source:'oauth',kiro:{authType:'aws_sso_oidc',ssoRegion:'us-east-1'}});
+    await saveCredential('kiro', first);
+    await saveCredential('kiro', {...first,accountId:'sso-user-b',access:'access-b'});
+    expect(getAccountSet('kiro')?.accounts.length).toBe(2);
+    await saveCredential('kiro', {...first,access:'renewed-a'});
+    expect(getAccountSet('kiro')?.accounts.length).toBe(2);
+    expect(getCredential('kiro')?.access).toBe('renewed-a');
+  });
+
+  test('Kiro imported users sharing an organization profile remain distinct', async () => {
+    const profile='arn:aws:codewhisperer:us-east-1:123456789012:profile/shared';
+    const first=cred({accountId:profile,email:'a@example.test',kiro:{authType:'aws_sso_oidc',profileArn:profile}});
+    await saveCredential('kiro',first);
+    await saveCredential('kiro',{...first,email:'b@example.test'});
+    expect(getAccountSet('kiro')?.accounts.length).toBe(2);
+  });
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -129,6 +146,30 @@ describe("multi-account auth store", () => {
       clientSecret: "secret-b",
     });
     expect(getCredential("kiro")).toMatchObject({ accountId: "profile-b", access: "kiro-b" });
+  });
+
+  test("Kiro organization accounts with the same email stay isolated by profile ARN", async () => {
+    const email = "member@example.test";
+    await saveCredential("kiro", cred({
+      accountId: "profile-org-a",
+      email,
+      access: "kiro-org-a",
+      kiro: { authType: "aws_sso_oidc", profileArn: "profile-org-a", ssoRegion: "us-east-1" },
+    }));
+    await saveCredential("kiro", cred({
+      accountId: "profile-org-b",
+      email,
+      access: "kiro-org-b",
+      kiro: { authType: "aws_sso_oidc", profileArn: "profile-org-b", ssoRegion: "eu-west-1" },
+    }));
+
+    const set = getAccountSet("kiro")!;
+    expect(set.accounts).toHaveLength(2);
+    expect(set.accounts.map(account => account.credential.kiro?.profileArn).sort()).toEqual([
+      "profile-org-a",
+      "profile-org-b",
+    ]);
+    expect(getCredential("kiro")?.access).toBe("kiro-org-b");
   });
 
   test("same identity replaces credential without duplicating", async () => {

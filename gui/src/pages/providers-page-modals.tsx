@@ -1,9 +1,11 @@
 import AddProviderModal from "../components/AddProviderModal";
 import AddCodexAccountModal from "../components/AddCodexAccountModal";
 import OAuthTosWarningModal from "../components/OAuthTosWarningModal";
+import KiroLoginModal, { type KiroOrganizationLogin } from "../components/KiroLoginModal";
 import { RemoveConfirmDialog, UnsavedLeaveDialog } from "../components/provider-workspace/ProviderDialogs";
 import type { AddProviderIntent } from "../components/provider-workspace/ProviderWorkspaceShell";
 import type { AccountLoginRow, AccountLoginStatus } from "../components/provider-catalog/ProviderCatalog";
+import type { LoginHint } from "../components/provider-workspace/types";
 import type { ProvidersConfig } from "./providers-shared";
 import { oauthLabel } from "./providers-shared";
 
@@ -15,12 +17,14 @@ export function ProvidersPageModals({
   busy,
   addModalAccountRows,
   accountLoginStatus,
+  loginInfo,
   removeConfirmName,
   removeDefaultProvider,
   codexLoginOpen,
   jsonLeaveOpen,
   jsonSaving,
   oauthTosPending,
+  kiroLoginOpen,
   onCloseAdd,
   onAdded,
   onAccountLogin,
@@ -36,6 +40,8 @@ export function ProvidersPageModals({
   onSaveJson,
   onCancelOauthTos,
   onContinueOauthTos,
+  onCancelKiroLogin,
+  onSubmitKiroLogin,
 }: {
   apiBase: string;
   config: ProvidersConfig;
@@ -44,15 +50,17 @@ export function ProvidersPageModals({
   busy: string | null;
   addModalAccountRows: AccountLoginRow[];
   accountLoginStatus: Record<string, AccountLoginStatus>;
+  loginInfo: LoginHint | null;
   removeConfirmName: string | null;
   removeDefaultProvider: string | null;
   codexLoginOpen: boolean;
   jsonLeaveOpen?: boolean;
   jsonSaving?: boolean;
   oauthTosPending: { provider: string; addAccount: boolean } | null;
+  kiroLoginOpen: boolean;
   onCloseAdd: () => void;
   onAdded: (name: string) => void;
-  onAccountLogin: (provider: string) => void;
+  onAccountLogin: (provider: string, addAccount?: boolean) => void;
   onAccountCancelLogin: (provider: string) => void;
   onAccountLogout: (provider: string) => void;
   onOpenAdd: () => void;
@@ -65,6 +73,8 @@ export function ProvidersPageModals({
   onSaveJson?: () => void;
   onCancelOauthTos: () => void;
   onContinueOauthTos: () => void;
+  onCancelKiroLogin: () => void;
+  onSubmitKiroLogin: (organization?: KiroOrganizationLogin) => void;
 }) {
   return (
     <>
@@ -79,6 +89,7 @@ export function ProvidersPageModals({
           accountRows={addModalAccountRows}
           accountStatus={accountLoginStatus}
           accountBusy={busy}
+          accountLoginHint={loginInfo}
           onAccountLogin={onAccountLogin}
           onAccountCancelLogin={onAccountCancelLogin}
           onAccountLogout={onAccountLogout}
@@ -116,6 +127,9 @@ export function ProvidersPageModals({
           onCancel={onCancelOauthTos}
           onContinue={onContinueOauthTos}
         />
+      )}
+      {kiroLoginOpen && (
+        <KiroLoginModal onCancel={onCancelKiroLogin} onSubmit={onSubmitKiroLogin} />
       )}
     </>
   );

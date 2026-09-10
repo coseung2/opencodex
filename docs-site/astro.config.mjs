@@ -96,6 +96,7 @@ export default defineConfig({
             { label: "Image Bridge", translations: { ko: "이미지 브릿지", "zh-CN": "图像桥接", ru: "Image Bridge", ja: "画像ブリッジ" }, slug: "guides/image-bridge" },
             { label: "Video Bridge", translations: { ko: "비디오 브릿지", "zh-CN": "视频桥接", ru: "Video Bridge", ja: "動画ブリッジ" }, slug: "guides/video-bridge" },
             { label: "Web Dashboard", translations: { ko: "웹 대시보드", "zh-CN": "网页控制台", ru: "Веб-дашборд", ja: "ウェブダッシュボード" }, slug: "guides/web-dashboard" },
+            { label: "Remote Notch", translations: { ko: "원격 Notch", "zh-CN": "远程 Notch", ru: "Удаленный Notch", ja: "リモート Notch" }, slug: "guides/remote-notch" },
             { label: "Sub-agent Surface", translations: { ko: "서브에이전트 서피스", "zh-CN": "子代理界面", ru: "Интерфейс подагентов", ja: "サブエージェントサーフェス" }, slug: "guides/sub-agent-surface" },
           ],
         },

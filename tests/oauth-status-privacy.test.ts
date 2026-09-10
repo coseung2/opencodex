@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -17,14 +17,17 @@ import { OAuthMutationBusyError, saveCredential } from "../src/oauth/store";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest } from "./helpers/management-auth";
+import * as openUrlModule from "../src/lib/open-url";
 
 const TEST_DIR = join(import.meta.dir, `.tmp-oauth-status-privacy-test-${process.pid}`);
 const PUBLIC_OAUTH_ERROR = "OAuth authentication failed. Check the OpenCodex account status and retry.";
 const PUBLIC_ERROR_CANARY = "C:\\Users\\Alice\\.opencodex\\auth.json.ocx-tmp \\\\server\\share\\auth.json /home/alice/.opencodex/auth.json";
 let previousOpencodexHome: string | undefined;
+let openUrlSpy: ReturnType<typeof spyOn>;
 
 describe("OAuth status privacy", () => {
   beforeEach(() => {
+    openUrlSpy = spyOn(openUrlModule, "openUrl").mockImplementation(() => {});
     clearLoginState("xai");
     previousOpencodexHome = process.env.OPENCODEX_HOME;
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -33,6 +36,7 @@ describe("OAuth status privacy", () => {
   });
 
   afterEach(() => {
+    openUrlSpy.mockRestore();
     clearLoginState("xai");
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;

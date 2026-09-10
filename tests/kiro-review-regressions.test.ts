@@ -377,6 +377,58 @@ describe("Kiro review regressions", () => {
     });
   });
 
+  test("Kiro organization reauth rejects the same email from another profile ARN", async () => {
+    const firstProfile = "arn:aws:codewhisperer:us-east-1:123456789012:profile/org-a";
+    const otherProfile = "arn:aws:codewhisperer:us-east-1:123456789012:profile/org-b";
+    await saveCredential("kiro", {
+      access: "org-a-access",
+      refresh: "org-a-refresh",
+      expires: Date.now() + 60_000,
+      email: "member@example.test",
+      accountId: firstProfile,
+      source: "local-cli",
+      kiro: { authType: "aws_sso_oidc", profileArn: firstProfile, ssoRegion: "us-east-1" },
+    });
+    const slotId = getAccountSet("kiro")!.activeAccountId;
+    const originalLogin = OAUTH_PROVIDERS.kiro.login;
+    OAUTH_PROVIDERS.kiro.login = async () => ({
+      access: "org-b-access",
+      refresh: "org-b-refresh",
+      expires: Date.now() + 60_000,
+      email: "member@example.test",
+      accountId: otherProfile,
+      source: "local-cli",
+      kiro: { authType: "aws_sso_oidc", profileArn: otherProfile, ssoRegion: "us-east-1" },
+    });
+    try {
+      await expect(runLogin("kiro", {} as OAuthController, { reauthAccountId: slotId }, {
+        loadConfig: config,
+        saveConfig: () => {},
+      })).rejects.toThrow(/does not match the selected account/i);
+    } finally {
+      OAUTH_PROVIDERS.kiro.login = originalLogin;
+    }
+    expect(getAccountCredential("kiro", slotId)).toMatchObject({
+      access: "org-a-access",
+      accountId: firstProfile,
+      kiro: { profileArn: firstProfile },
+    });
+  });
+
+  test("direct Kiro reauth rejects another user with the same email", async () => {
+    const credential = {access:'user-a-access',refresh:'user-a-refresh',expires:Date.now()+60000,
+      accountId:'user-a',email:'member@example.test',source:'oauth' as const,
+      kiro:{authType:'aws_sso_oidc' as const,ssoRegion:'us-east-1'}};
+    await saveCredential('kiro',credential);
+    const slotId=getAccountSet('kiro')!.activeAccountId;
+    const originalLogin=OAUTH_PROVIDERS.kiro.login;
+    OAUTH_PROVIDERS.kiro.login=async()=>({...credential,accountId:'user-b',access:'user-b-access'});
+    try {
+      await expect(runLogin('kiro',{} as OAuthController,{reauthAccountId:slotId},{loadConfig:config,saveConfig:()=>{}})).rejects.toThrow(/does not match the selected account/i);
+      expect(getAccountCredential('kiro',slotId)?.access).toBe('user-a-access');
+    } finally { OAUTH_PROVIDERS.kiro.login=originalLogin; }
+  });
+
   test("Kiro social accounts behind one device profile ARN pool by email", async () => {
     const deviceArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/device";
     const kiroMeta = { kiro: { profileArn: deviceArn, apiRegion: "us-east-1" } };

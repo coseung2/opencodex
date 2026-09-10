@@ -12,6 +12,7 @@ import { oauthTosRisk } from "../oauth-tos-risk";
 import OAuthTosWarningModal from "./OAuthTosWarningModal";
 import ProviderCatalog from "./provider-catalog/ProviderCatalog";
 import type { AccountLoginRow, AccountLoginStatus } from "./provider-catalog/ProviderCatalog";
+import type { LoginHint } from "./provider-workspace/types";
 import type { CatalogPreset } from "./provider-catalog/provider-presets";
 import { baseUrlForChoice, matchChoiceId, resolvedBaseUrlForChoice } from "../base-url-choice";
 import { AddProviderOAuthPane } from "./add-provider-oauth-pane";
@@ -28,7 +29,7 @@ type Preset = CatalogPreset;
 
 export default function AddProviderModal({
   apiBase, existingNames, onClose, onAdded, initialTier, initialCustom = false,
-  accountRows, accountStatus, accountBusy, onAccountLogin, onAccountCancelLogin, onAccountLogout, onOpen,
+  accountRows, accountStatus, accountBusy, accountLoginHint, onAccountLogin, onAccountCancelLogin, onAccountLogout, onOpen,
 }: {
   apiBase: string;
   existingNames: string[];
@@ -39,7 +40,8 @@ export default function AddProviderModal({
   accountRows?: AccountLoginRow[];
   accountStatus?: Record<string, AccountLoginStatus>;
   accountBusy?: string | null;
-  onAccountLogin?: (provider: string) => void;
+  accountLoginHint?: LoginHint | null;
+  onAccountLogin?: (provider: string, addAccount?: boolean) => void;
   onAccountCancelLogin?: (provider: string) => void;
   onAccountLogout?: (provider: string) => void;
   onOpen?: () => void;
@@ -247,6 +249,7 @@ export default function AddProviderModal({
             accountRows={accountRows}
             accountStatus={accountStatus}
             busyProvider={accountBusy}
+            loginHint={accountLoginHint}
             onLogin={onAccountLogin}
             onCancelLogin={onAccountCancelLogin}
             onLogout={onAccountLogout}

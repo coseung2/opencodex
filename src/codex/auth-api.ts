@@ -91,6 +91,7 @@ import type { CodexAccount, OcxConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
 import { readBoundedResponseBody } from "../lib/bounded-body";
+import { isPlainRecord } from "../server/management/shared";
 import {
   oauthAccountHealthFields,
   projectCodexAccountHealth,
@@ -118,7 +119,7 @@ const MANUAL_IMPORT_ENV = "OPENCODEX_ENABLE_UNVERIFIED_CODEX_IMPORT";
 
 const MAX_CODEX_LOGIN_STATE_ROWS = 32;
 const CODEX_LOGIN_TERMINAL_TTL_MS = 300_000;
-interface CodexLoginStateRow { status: string; startedAt: number; accountId?: string; email?: string; error?: string; doneAt?: number }
+interface CodexLoginStateRow { status: string; startedAt: number; oauthFlowId?: string; clientBrowser?: boolean; accountId?: string; email?: string; error?: string; doneAt?: number }
 const codexAuthLoginState = new Map<string, CodexLoginStateRow>();
 export class CodexLoginStateBusyError extends ResourceAdmissionError {
   constructor() { super("codex_login_state_rows", MAX_CODEX_LOGIN_STATE_ROWS); this.name = "CodexLoginStateBusyError"; }
@@ -356,7 +357,9 @@ function mayDeferQuotaWarmup(
 function expireCodexAuthFlow(flowId: string | null, error = "Login cancelled"): void {
   const ids = flowId
     ? [flowId]
-    : [...codexAuthLoginState].filter(([, state]) => state.status === "pending").map(([id]) => id);
+    : [...codexAuthLoginState]
+      .filter(([, state]) => state.status === "pending" && state.clientBrowser !== true)
+      .map(([id]) => id);
   for (const id of ids) {
     let owner = codexAuthLoginState.get(id);
     if (!owner) {
@@ -1522,8 +1525,19 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/login" && req.method === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { id?: string; reauth?: boolean };
-    const requestedAccountId = body.id?.trim();
+    const parsedBody: unknown = await req.json().catch(() => ({}));
+    if (!isPlainRecord(parsedBody)) {
+      return jsonResponse({ error: "body must be a JSON object" }, 400);
+    }
+    const body = parsedBody;
+    if (body.id !== undefined && typeof body.id !== "string") {
+      return jsonResponse({ error: "id must be a string" }, 400);
+    }
+    if (body.clientBrowser !== undefined && typeof body.clientBrowser !== "boolean") {
+      return jsonResponse({ error: "clientBrowser must be a boolean" }, 400);
+    }
+    const clientBrowser = body.clientBrowser === true;
+    const requestedAccountId = typeof body.id === "string" ? body.id.trim() : undefined;
     const reauth = body.reauth === true;
     if (requestedAccountId && !isValidCodexAccountId(requestedAccountId)) {
       return jsonResponse({ error: "Invalid account id format" }, 400);
@@ -1548,15 +1562,16 @@ export async function handleCodexAuthAPI(
       return response;
     }
     const flowId = `flow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const loginOwner: CodexLoginStateRow = { status: "starting", startedAt: Date.now() };
+    const loginOwner: CodexLoginStateRow = { status: "starting", startedAt: Date.now(), clientBrowser };
     codexAuthLoginState.set(flowId, loginOwner);
     try {
       const { startLoginFlow, getLoginStatus } = await import("../oauth");
-      const result = await startLoginFlow("chatgpt", { forceLogin: true });
+      const result = await startLoginFlow("chatgpt", { forceLogin: true, clientBrowser });
+      setCodexLoginState(flowId, { oauthFlowId: result.flowId });
 
       // Open the browser server-side (same pattern as /api/oauth/login in management-api.ts).
       // The GUI's window.open is popup-blocked because it runs after an await, not a direct click.
-      if (result.url) {
+      if (result.url && !clientBrowser) {
         const { openUrl } = await import("../lib/open-url");
         openUrl(result.url);
       }
@@ -1770,7 +1785,7 @@ export async function handleCodexAuthAPI(
       })();
 
       setCodexLoginState(flowId, { status: "pending" });
-      return jsonResponse({ ok: true, flowId, url: result.url, instructions: result.instructions });
+      return jsonResponse({ ok: true, flowId, url: result.url, instructions: result.instructions, callbackUri: result.callbackUri });
     } catch (e) {
       if (codexAuthLoginState.get(flowId) === loginOwner) codexAuthLoginState.delete(flowId);
       const msg = e instanceof Error ? e.message : String(e);
@@ -1787,9 +1802,15 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/login/code" && req.method === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { flowId?: unknown; input?: unknown };
+    const parsedBody: unknown = await req.json().catch(() => ({}));
+    if (!isPlainRecord(parsedBody)) {
+      return jsonResponse({ error: "body must be a JSON object" }, 400);
+    }
+    const body = parsedBody;
     const flowId = typeof body.flowId === "string" ? body.flowId.trim() : "";
-    const input = typeof body.input === "string" ? body.input : "";
+    const input = typeof body.callbackUrl === "string"
+      ? body.callbackUrl
+      : typeof body.input === "string" ? body.input : "";
     if (!flowId) return jsonResponse({ error: "flowId required" }, 400);
     if (input.length > 4096) return jsonResponse({ error: "input too long" }, 400);
 
@@ -1799,16 +1820,38 @@ export async function handleCodexAuthAPI(
     if (!flow) return jsonResponse({ error: "login flow expired or unknown" }, 400);
     if (flow.status !== "pending") return jsonResponse({ error: "login flow is not pending" }, 400);
 
-    const result = submitManualLoginCode("chatgpt", input);
+    const result = flow.oauthFlowId
+      ? submitManualLoginCode("chatgpt", input, flow.oauthFlowId)
+      : submitManualLoginCode("chatgpt", input);
     if (!result.ok) return jsonResponse({ error: result.error }, 400);
     return jsonResponse({ ok: true }, 202);
   }
 
   if (url.pathname === "/api/codex-auth/login/cancel" && req.method === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { flowId?: string };
+    const parsedBody: unknown = await req.json().catch(() => ({}));
+    if (!isPlainRecord(parsedBody)) {
+      return jsonResponse({ error: "body must be a JSON object" }, 400);
+    }
+    const body = parsedBody;
+    const flowId = typeof body.flowId === "string" ? body.flowId.trim() : "";
+    if (flowId) {
+      const flow = codexAuthLoginState.get(flowId);
+      if (!flow) {
+        expireCodexAuthFlow(flowId);
+        return jsonResponse({ ok: true, cancelled: false });
+      }
+      const { cancelLoginFlow } = await import("../oauth");
+      const cancelled = flow.oauthFlowId
+        ? cancelLoginFlow("chatgpt", flow.oauthFlowId)
+        : cancelLoginFlow("chatgpt");
+      expireCodexAuthFlow(flowId);
+      return jsonResponse({ ok: true, cancelled });
+    }
     const { cancelLoginFlow } = await import("../oauth");
-    const cancelled = cancelLoginFlow("chatgpt");
-    expireCodexAuthFlow(body.flowId ?? null);
+    const hasRemotePending = [...codexAuthLoginState.values()]
+      .some(flow => flow.status === "pending" && flow.clientBrowser === true);
+    const cancelled = hasRemotePending ? false : cancelLoginFlow("chatgpt");
+    expireCodexAuthFlow(null);
     return jsonResponse({ ok: true, cancelled });
   }
 
@@ -1827,6 +1870,7 @@ export async function handleCodexAuthAPI(
     }
     // Legacy fallback: return latest pending flow
     for (const [, st] of codexAuthLoginState) {
+      if (st.clientBrowser) continue;
       if (st.status === "pending") return jsonResponse({ ...st, email: maskEmail(st.email) ?? undefined });
     }
     return jsonResponse({ status: "idle" });

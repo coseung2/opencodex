@@ -1,5 +1,6 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { parseCallbackInput } from "./callback-server";
+import { kiroAccountIdentity } from "./kiro-identity";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
 import { loadConfig, resolveEnvValue, saveConfig } from "../config";
 import { maskEmail } from "../lib/privacy";
@@ -108,7 +109,15 @@ function verdictKey(p:string,a:string,c:OAuthCredentials){return `${p}\0${a}\0${
 function cached(p:string,a:string,c:OAuthCredentials,now:()=>number){const k=verdictKey(p,a,c),u=permanentRefreshFailures.get(k);if(u===undefined)return false;if(u<=now()){permanentRefreshFailures.delete(k);return false;}return true;}
 export function sweepExpiredXaiPermanentFailureVerdicts(now=Date.now()):number{let removed=0;for(const[key,until]of permanentRefreshFailures){if(until>now)continue;permanentRefreshFailures.delete(key);removed+=1;}return removed;}
 
-export interface LoginOpts { forceLogin?: boolean; /** When set, persist into this account slot and require matching identity. */ reauthAccountId?: string }
+export interface LoginOpts {
+  forceLogin?: boolean;
+  /** When set, persist into this account slot and require matching identity. */
+  reauthAccountId?: string;
+  /** Browser callback is captured on a separate client and relayed by flow id. */
+  clientBrowser?: boolean;
+  /** Kiro IAM Identity Center device-flow login. Ignored by other providers. */
+  kiroOrganization?: { startUrl: string; region: string };
+}
 
 export interface LoginFlowLifecycle {
   /** Runs after background credential/config persistence settles, before status becomes done. */
@@ -169,7 +178,10 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     defaultModel: oauthDefaultModel("kimi"),
   },
   kiro: {
-    login: (ctrl, opts) => loginKiro(ctrl, { forceLogin: opts?.forceLogin }),
+    login: (ctrl, opts) => loginKiro(ctrl, {
+      forceLogin: opts?.forceLogin,
+      organization: opts?.kiroOrganization,
+    }),
     refresh: (rt, signal, credential) => refreshKiroToken(rt, signal, credential),
     providerConfig: oauthConfig("kiro"),
     defaultModel: oauthDefaultModel("kiro"),
@@ -935,11 +947,10 @@ export async function runLogin(
       if (!existing.accountId && !existing.email) {
         throw new OAuthReauthIdentityUnverifiedError();
       }
-      // Kiro social accounts share one device-scoped profile ARN, so reauth identity
-      // must compare the signed-in email first; otherwise reauthenticating a different
-      // Google account would silently overwrite the selected slot. Other providers keep
-      // accountId-first matching.
-      const identityMatches = provider === "kiro" && existing.email && cred.email
+      // SSO identities require the authenticated user; a shared profile alone is insufficient.
+      const identityMatches = provider === "kiro" && (existing.kiro?.authType === 'aws_sso_oidc' || cred.kiro?.authType === 'aws_sso_oidc')
+        ? Boolean(kiroAccountIdentity(existing) && kiroAccountIdentity(existing) === kiroAccountIdentity(cred))
+        : provider === "kiro" && existing.email && cred.email
         ? existing.email.toLowerCase() === cred.email.toLowerCase()
         : existing.accountId && cred.accountId
           ? existing.accountId === cred.accountId
@@ -1016,7 +1027,14 @@ export async function runLogin(
  * localhost), the GUI can POST the final redirect URL or authorization code via
  * submitManualLoginCode(), which feeds OAuthController.onManualCodeInput.
  */
-const loginState = new Map<string, { error?: string; done: boolean }>();
+interface LoginState {
+  flowId: string;
+  error?: string;
+  done: boolean;
+  clientBrowser: boolean;
+  callbackUri?: string;
+}
+const loginState = new Map<string, LoginState>();
 const loginAbort = new Map<string, AbortController>();
 const kiroLoginSettling = new Set<string>();
 
@@ -1037,32 +1055,32 @@ export function reconcileOAuthFlowState(context: GenerationContext): number {
   for (const [provider, state] of loginState) {
     if (context.providerNames.has(provider) || !state.done || loginAbort.has(provider)) continue;
     if (loginState.delete(provider)) removed += 1;
-    if (loginManual.delete(provider)) removed += 1;
+    if (loginManual.delete(state.flowId)) removed += 1;
     if (loginAbort.delete(provider)) removed += 1;
   }
   lastOAuthFlowReconciledGeneration = context.generation;
   return removed;
 }
 
-function clearManualCodeSlot(provider: string): void {
-  loginManual.delete(provider);
+function clearManualCodeSlot(flowId: string): void {
+  loginManual.delete(flowId);
 }
 
-function ensureManualCodeSlot(provider: string): ManualCodeSlot {
-  let slot = loginManual.get(provider);
+function ensureManualCodeSlot(flowId: string): ManualCodeSlot {
+  let slot = loginManual.get(flowId);
   if (!slot) {
     slot = {};
-    loginManual.set(provider, slot);
+    loginManual.set(flowId, slot);
   }
   return slot;
 }
 
 /** Wait for a GUI/CLI paste of the OAuth redirect URL or code (or return a stashed early submit). */
-function waitForManualLoginCode(provider: string, signal: AbortSignal, expectedState?: string): Promise<string> {
+function waitForManualLoginCode(flowId: string, signal: AbortSignal, expectedState?: string): Promise<string> {
   if (signal.aborted) {
     return Promise.reject(new Error(`OAuth callback cancelled: ${signal.reason}`));
   }
-  const slot = ensureManualCodeSlot(provider);
+  const slot = ensureManualCodeSlot(flowId);
   if (expectedState !== undefined) slot.expectedState = expectedState;
   if (slot.pendingInput !== undefined) {
     const value = slot.pendingInput;
@@ -1088,13 +1106,15 @@ function waitForManualLoginCode(provider: string, signal: AbortSignal, expectedS
  * Returns ok:false when no login is waiting (or input is empty). Invalid pastes are accepted
  * here and re-prompted by the OAuth callback loop if they cannot be parsed / fail state checks.
  */
-export function submitManualLoginCode(provider: string, input: string): { ok: true } | { ok: false; error: string } {
+export function submitManualLoginCode(provider: string, input: string, flowId?: string): { ok: true } | { ok: false; error: string } {
   const trimmed = input.trim();
   if (!trimmed) return { ok: false, error: "empty code" };
   if (retainedUtf8Bytes(trimmed) > OAUTH_PENDING_CODE_MAX_BYTES) return { ok: false, error: "code too large" };
   const st = loginState.get(provider);
   if (!st || st.done) return { ok: false, error: "no login in progress" };
-  const slot = ensureManualCodeSlot(provider);
+  if (st.clientBrowser && !flowId) return { ok: false, error: "flowId required for remote login" };
+  if (flowId !== undefined && flowId !== st.flowId) return { ok: false, error: "login flow expired or unknown" };
+  const slot = ensureManualCodeSlot(st.flowId);
   // Synchronous validation (validated request/ack): reject un-parseable input and
   // authorization responses (url/query kind) whose state is missing or mismatched
   // once the flow has registered its expected state. Raw codes stay in-session-PKCE
@@ -1102,6 +1122,18 @@ export function submitManualLoginCode(provider: string, input: string): { ok: tr
   // re-validated by the callback loop.
   const parsed = parseCallbackInput(trimmed);
   if (!parsed.code) return { ok: false, error: "no authorization code found in input" };
+  if (st.clientBrowser) {
+    if (parsed.kind !== "url") return { ok: false, error: "remote callback relay requires the full callback URL" };
+    try {
+      const submitted = new URL(trimmed);
+      const expected = new URL(st.callbackUri ?? "");
+      if (submitted.origin !== expected.origin || submitted.pathname !== expected.pathname) {
+        return { ok: false, error: "callback URL does not match this login flow" };
+      }
+    } catch {
+      return { ok: false, error: "invalid callback URL" };
+    }
+  }
   if (parsed.kind !== "raw" && slot.expectedState !== undefined) {
     if (parsed.state === undefined) return { ok: false, error: "redirect URL is missing the state parameter" };
     if (parsed.state !== slot.expectedState) return { ok: false, error: "state mismatch — paste the redirect URL from THIS login attempt" };
@@ -1119,7 +1151,7 @@ export function submitManualLoginCode(provider: string, input: string): { ok: tr
 
 export interface OAuthAccountSummary { id: string; alias?: string; email?: string; active: boolean; needsReauth?: boolean; expiresAt?: number }
 
-export function getLoginStatus(provider: string): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; done: boolean; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
+export function getLoginStatus(provider: string, flowId?: string): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; done: boolean; expired?: boolean; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
   const cred = getCredential(provider);
   const st = loginState.get(provider);
   const set = getAccountSet(provider);
@@ -1135,8 +1167,9 @@ export function getLoginStatus(provider: string): { loggedIn: boolean; email?: s
     loggedIn: !!cred,
     email: maskEmail(cred?.email) ?? undefined,
     source: cred?.source,
-    error: st?.error,
-    done: st?.done ?? false,
+    ...((st?.clientBrowser && !flowId) || (flowId !== undefined && st?.flowId !== flowId)
+      ? { done: true, expired: true, error: "Login flow expired or unknown" }
+      : { error: st?.error, done: st?.done ?? false }),
     ...(set ? { activeAccountId: set.activeAccountId, accounts } : {}),
   };
 }
@@ -1152,18 +1185,23 @@ export function oauthLoginSummary(): Array<{ provider: string; loggedIn: boolean
 export function clearLoginState(provider: string): void {
   loginAbort.get(provider)?.abort("cleared");
   loginAbort.delete(provider);
-  clearManualCodeSlot(provider);
+  const flowId = loginState.get(provider)?.flowId;
+  if (flowId) clearManualCodeSlot(flowId);
   loginState.delete(provider);
 }
 
-export function cancelLoginFlow(provider: string): boolean {
+export function cancelLoginFlow(provider: string, flowId?: string): boolean {
   const ctrl = loginAbort.get(provider);
   const existing = loginState.get(provider);
   if (!ctrl && (!existing || existing.done)) return false;
+  if (existing?.clientBrowser && !flowId) return false;
+  if (flowId !== undefined && existing?.flowId !== flowId) return false;
   ctrl?.abort("cancelled");
   loginAbort.delete(provider);
-  clearManualCodeSlot(provider);
-  loginState.set(provider, { done: true, error: "Login cancelled" });
+  if (existing) {
+    clearManualCodeSlot(existing.flowId);
+    loginState.set(provider, { ...existing, done: true, error: "Login cancelled" });
+  }
   return true;
 }
 
@@ -1171,28 +1209,31 @@ export async function startLoginFlow(
   provider: string,
   opts?: LoginOpts,
   lifecycle?: LoginFlowLifecycle,
-): Promise<{ url: string; instructions?: string; deviceCode?: string }> {
+): Promise<{ flowId: string; url: string; instructions?: string; deviceCode?: string; callbackUri?: string }> {
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const existing = loginState.get(provider);
   if ((existing && !existing.done) || (provider === "kiro" && kiroLoginSettling.has(provider))) {
     throw new Error(`A login for ${provider} is already in progress`);
   }
-  clearManualCodeSlot(provider);
-  loginState.set(provider, { done: false });
+  const flowId = crypto.randomUUID();
+  loginState.set(provider, { flowId, done: false, clientBrowser: opts?.clientBrowser === true });
   const abort = new AbortController();
   loginAbort.set(provider, abort);
   if (provider === "kiro") kiroLoginSettling.add(provider);
   return new Promise((resolve, reject) => {
     let urlResolved = false;
     const ctrl: OAuthController = {
-      onAuth: ({ url, instructions, deviceCode }) => {
+      onAuth: ({ url, instructions, deviceCode, callbackUri }) => {
+        const state = loginState.get(provider);
+        if (state?.flowId === flowId && callbackUri) state.callbackUri = callbackUri;
         urlResolved = true;
-        resolve({ url, instructions, deviceCode });
+        resolve({ flowId, url, instructions, deviceCode, callbackUri });
       },
       onProgress: () => {},
       // GUI fallback when the browser cannot hit the loopback callback server.
-      onManualCodeInput: (expectedState?: string) => waitForManualLoginCode(provider, abort.signal, expectedState),
+      onManualCodeInput: (expectedState?: string) => waitForManualLoginCode(flowId, abort.signal, expectedState),
+      clientBrowser: opts?.clientBrowser === true,
       signal: abort.signal,
     };
     const abandonIfNotOwner = (error?: unknown): boolean => {
@@ -1214,19 +1255,19 @@ export async function startLoginFlow(
       if (abandonIfNotOwner(finalError)) return;
       if (finalError === undefined) {
         loginAbort.delete(provider);
-        clearManualCodeSlot(provider);
-        loginState.set(provider, { done: true });
+        clearManualCodeSlot(flowId);
+        loginState.set(provider, { flowId, done: true, clientBrowser: opts?.clientBrowser === true });
         // Local-token import (grok-cli / Claude Code keychain) completes WITHOUT firing onAuth —
         // resolve so the GUI call returns instead of hanging.
-        if (!urlResolved) resolve({ url: "", instructions: "Logged in via an existing local CLI/keychain token — no browser needed." });
+        if (!urlResolved) resolve({ flowId, url: "", instructions: "Logged in via an existing local CLI/keychain token — no browser needed." });
         return;
       }
 
       const e = finalError;
       loginAbort.delete(provider);
-      clearManualCodeSlot(provider);
+      clearManualCodeSlot(flowId);
       const msg = publicOAuthAuthenticationErrorMessage(e);
-      loginState.set(provider, { done: true, error: msg });
+      loginState.set(provider, { flowId, done: true, error: msg, clientBrowser: opts?.clientBrowser === true });
       if (!urlResolved) reject(e);
     };
     // Background: runLogin persists the credential + provider entry to disk. The lifecycle hook
@@ -1241,9 +1282,9 @@ export async function startLoginFlow(
       // settle catches lifecycle failures, so this is only a defensive promise-boundary guard.
       if (abandonIfNotOwner(e)) return;
       loginAbort.delete(provider);
-      clearManualCodeSlot(provider);
+      clearManualCodeSlot(flowId);
       const msg = publicOAuthAuthenticationErrorMessage(e);
-      loginState.set(provider, { done: true, error: msg });
+      loginState.set(provider, { flowId, done: true, error: msg, clientBrowser: opts?.clientBrowser === true });
       if (!urlResolved) reject(e);
     }).finally(() => {
       if (provider === "kiro") kiroLoginSettling.delete(provider);
