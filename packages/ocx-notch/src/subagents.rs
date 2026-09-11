@@ -73,6 +73,36 @@ pub struct SubagentState {
 }
 
 impl SubagentState {
+    /// Refresh server-owned choices without discarding an unsaved local draft.
+    pub fn refresh(&mut self, models: SubagentModelsResponse, injection: InjectionModelResponse) {
+        if self.saving {
+            return;
+        }
+        let draft = self
+            .dirty
+            .then(|| (self.chosen.clone(), self.injection_request()));
+        self.apply_models(models);
+        self.apply_injection(injection);
+        if let Some((chosen, settings)) = draft {
+            self.chosen = chosen
+                .into_iter()
+                .filter(|id| self.available.contains(id))
+                .collect();
+            self.model = settings.model.filter(|id| {
+                self.delegation_available
+                    .iter()
+                    .any(|option| option.namespaced == *id)
+            });
+            self.effort = settings
+                .effort
+                .filter(|effort| self.model.is_some() && self.efforts.contains(effort));
+            self.guidance_enabled = settings.multi_agent_guidance_enabled;
+            self.sync_codex_defaults =
+                settings.sync_codex_subagent_defaults && self.model.is_some();
+        }
+        self.message = None;
+    }
+
     pub fn apply_models(&mut self, response: SubagentModelsResponse) {
         self.available = unique_nonblank(response.available, usize::MAX);
         let available = self
@@ -209,6 +239,81 @@ fn next_selection(current: Option<&str>, options: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visibility_refresh_updates_choices_and_preserves_unsaved_edits() {
+        let mut state = SubagentState {
+            available: vec!["p/hidden".into(), "p/kept".into()],
+            chosen: vec!["p/hidden".into(), "p/kept".into()],
+            model: Some("p/kept".into()),
+            effort: Some("high".into()),
+            guidance_enabled: false,
+            sync_codex_defaults: true,
+            dirty: true,
+            ..Default::default()
+        };
+        state.refresh(
+            SubagentModelsResponse {
+                available: vec!["p/kept".into(), "p/new".into()],
+                chosen: vec!["p/new".into()],
+            },
+            InjectionModelResponse {
+                model: Some("p/new".into()),
+                multi_agent_guidance_enabled: true,
+                efforts: vec!["low".into(), "high".into()],
+                available: vec![DelegationModelOption {
+                    namespaced: "p/kept".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.available, ["p/kept", "p/new"]);
+        assert_eq!(state.chosen, ["p/kept"]);
+        assert_eq!(state.model.as_deref(), Some("p/kept"));
+        assert_eq!(state.effort.as_deref(), Some("high"));
+        assert!(!state.guidance_enabled);
+        assert!(state.sync_codex_defaults);
+        assert!(state.dirty);
+        assert!(state.loaded());
+    }
+
+    #[test]
+    fn visibility_refresh_removes_hidden_delegation_from_draft() {
+        let mut state = SubagentState {
+            model: Some("p/hidden".into()),
+            effort: Some("high".into()),
+            sync_codex_defaults: true,
+            dirty: true,
+            ..Default::default()
+        };
+        state.refresh(
+            SubagentModelsResponse::default(),
+            InjectionModelResponse::default(),
+        );
+        assert!(state.model.is_none());
+        assert!(state.effort.is_none());
+        assert!(!state.sync_codex_defaults);
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn refresh_uses_server_selection_when_clean_and_defers_while_saving() {
+        let models = SubagentModelsResponse {
+            available: vec!["p/new".into()],
+            chosen: vec!["p/new".into()],
+        };
+        let mut state = SubagentState {
+            saving: true,
+            ..Default::default()
+        };
+        state.refresh(models.clone(), InjectionModelResponse::default());
+        assert!(!state.models_loaded);
+        state.saving = false;
+        state.refresh(models, InjectionModelResponse::default());
+        assert_eq!(state.chosen, ["p/new"]);
+        assert!(!state.dirty);
+    }
 
     #[test]
     fn responses_parse_dashboard_shapes_and_default_guidance_on() {

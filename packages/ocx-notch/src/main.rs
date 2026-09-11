@@ -477,14 +477,10 @@ impl App {
                     }
                 }
                 Update::Subagents(result) => {
-                    // A periodic refresh must not discard edits that have not
-                    // reached the server yet. Save performs its own refresh.
-                    if !self.state.subagents.dirty && !self.state.subagents.saving {
+                    if !self.state.subagents.saving {
                         match result {
                             Ok((models, injection)) => {
-                                self.state.subagents.apply_models(models);
-                                self.state.subagents.apply_injection(injection);
-                                self.state.subagents.message = None;
+                                self.state.subagents.refresh(models, injection);
                             }
                             Err(error) => self.state.subagents.message = Some(error),
                         }
@@ -4904,9 +4900,11 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
     }
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
+        let mut visibility_changed = false;
         let result: Result<(Vec<ModelRow>, SelectedModelsResponse), String> = (|| {
             let request = provider_visibility_request(&provider, &requested_rows, enabled);
             let _: serde_json::Value = api::put_json("/api/model-visibility", &request)?;
+            visibility_changed = true;
             let rows = api::get_json("/api/models", 30_000)?;
             let selected = api::get_json("/api/selected-models", 30_000)?;
             Ok((rows, selected))
@@ -4919,10 +4917,6 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
                 Ok((rows, selected)) => {
                     app.state.models.apply_rows(rows);
                     app.state.models.apply_selected(selected);
-                    // The server derives the subagent catalog from model
-                    // visibility, so reload that existing API surface after a
-                    // toggle instead of maintaining a second local catalog.
-                    app.force_refresh.store(true, Ordering::Release);
                     app.state.models.message = Some(format!(
                         "{} {}{}",
                         if enabled { "Enabled" } else { "Hidden" },
@@ -4937,6 +4931,24 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
         });
         unsafe {
             let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+        if visibility_changed {
+            // Do not queue this behind provider quota/account polling. The
+            // server owns the catalog; reload it even if the Models read failed.
+            let refreshed = (|| {
+                let models = api::get_json("/api/subagent-models", 30_000)?;
+                let injection = api::get_json("/api/injection-model", 30_000)?;
+                Ok::<_, String>((models, injection))
+            })();
+            with_app(|app| match refreshed {
+                Ok((models, injection)) => app.state.subagents.refresh(models, injection),
+                Err(error) => {
+                    app.state.subagents.message = Some(format!("Refresh failed: {error}"))
+                }
+            });
+            unsafe {
+                let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+            }
         }
     });
 }
