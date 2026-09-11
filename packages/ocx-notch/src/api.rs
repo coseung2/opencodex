@@ -18,6 +18,21 @@ pub mod connection;
 
 use connection::{Connection, Endpoint, Profile};
 
+thread_local! {
+    static POLL_TARGET: std::cell::RefCell<Option<(u64, Connection)>> = const { std::cell::RefCell::new(None) };
+}
+pub fn begin_poll() {
+    POLL_TARGET
+        .with(|slot| *slot.borrow_mut() = Some((connection::generation(), connection::active())));
+}
+pub fn poll_generation() -> u64 {
+    POLL_TARGET.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or_else(connection::generation, |(generation, _)| *generation)
+    })
+}
+
 /// Where one management request is sent, and the credential it carries.
 /// Snapshotted per request so a connection change mid-flight cannot mix a
 /// remote endpoint with a local credential (or the reverse).
@@ -27,7 +42,13 @@ struct Target {
 }
 
 fn active_target() -> Result<Target, String> {
-    match connection::active() {
+    let active = POLL_TARGET
+        .with(|slot| slot.borrow().as_ref().map(|(_, active)| active.clone()))
+        .unwrap_or_else(connection::active);
+    if poll_generation() != connection::generation() {
+        return Err("Connection changed".into());
+    }
+    match active {
         // Remote mode never consults local environment variables or the local
         // admin-token file: the VM credential is the only accepted credential.
         Connection::Remote(profile) => Ok(Target {
@@ -80,14 +101,140 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         if base_url.is_some() || token.is_some() {
             return Err("Remote mode needs both a server address and a token".into());
         }
-        return connection::clear();
+        let before = crate::codex_connection::configure(None, None)?;
+        if let Err(error) = connection::clear() {
+            crate::codex_connection::atomic_write(
+                &crate::codex_connection::codex_dir()?.join("config.toml"),
+                before.as_bytes(),
+            )?;
+            return Err(error);
+        }
+        return Ok(());
     };
     let endpoint = connection::parse_endpoint(base_url)?;
-    let token = token.trim().to_string();
+    let token = if token.trim().is_empty() {
+        connection::saved_profile()?
+            .filter(|p| p.endpoint == endpoint)
+            .map(|p| p.token)
+            .ok_or("Enter the management token for this server")?
+    } else {
+        token.trim().to_string()
+    };
     connection::validate_token(&token)?;
     let profile = Profile { endpoint, token };
     probe_profile(&profile)?;
-    connection::commit(profile)
+    let target = Target {
+        endpoint: profile.endpoint.clone(),
+        token: Some(profile.token.clone()),
+    };
+    let catalog: Value =
+        serde_json::from_slice(&request_to(&target, "GET", "/api/catalog", None, 30_000)?)
+            .map_err(|_| "Invalid remote Codex catalog")?;
+    crate::codex_connection::validate_catalog(&catalog)?;
+    let origin = &profile.endpoint.base_url;
+    let stored = crate::codex_connection::load_key(origin)?;
+    let stored = if let Some(key) = stored {
+        connection::validate_token(&key.key)?;
+        let data = Target {
+            endpoint: profile.endpoint.clone(),
+            token: Some(key.key.clone()),
+        };
+        match request_to(&data, "GET", "/v1/models", None, 10_000) {
+            Ok(_) => Some(key),
+            Err(error) if is_http_status(&error, 401) => None,
+            Err(_) => return Err("Could not verify the existing Codex connection; retry when the server is reachable".into()),
+        }
+    } else {
+        None
+    };
+    let key = if let Some(key) = stored {
+        key
+    } else {
+        let body = br#"{"name":"OCX Notch Codex"}"#;
+        let key: crate::codex_connection::DataKey = serde_json::from_slice(&request_to(
+            &target,
+            "POST",
+            "/api/keys",
+            Some(body),
+            10_000,
+        )?)
+        .map_err(|_| "Invalid Codex credential response")?;
+        // Persist before any later step can fail, so retry reuses this key.
+        connection::validate_token(&key.key)?;
+        if let Err(error) = crate::codex_connection::save_key(origin, &key) {
+            let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
+            let cleanup = request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000);
+            return Err(if cleanup.is_err() {
+                format!("{error}; remove the unused OCX Notch Codex key on the server")
+            } else {
+                error
+            });
+        }
+        key
+    };
+    let data = Target {
+        endpoint: profile.endpoint.clone(),
+        token: Some(key.key),
+    };
+    connection::validate_token(data.token.as_deref().unwrap_or_default())?;
+    request_to(&data, "GET", "/v1/models", None, 10_000)
+        .map_err(|_| "The server rejected the Codex data credential")?;
+    // An empty request must reach Responses validation without running a model.
+    // GET /models alone cannot prove the distinct Responses admission path works.
+    match request_to_with_bearer(&data, "POST", "/v1/responses", Some(b"{}"), 10_000, true) {
+        Err(error) if is_http_status(&error, 400) || is_http_status(&error, 422) => {},
+        _ => return Err("The server must translate Codex bearer authentication into the OCX data header before connecting".into()),
+    }
+    let previous_config = crate::codex_connection::configure(Some(origin), Some(&catalog))?;
+    if let Err(error) = connection::commit(profile) {
+        crate::codex_connection::atomic_write(
+            &crate::codex_connection::codex_dir()?.join("config.toml"),
+            previous_config.as_bytes(),
+        )
+        .map_err(|_| "Could not restore Codex configuration after a failed connection")?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn disconnect_codex() -> Result<(), String> {
+    let profile = connection::saved_profile()?.ok_or("No remote OCX is saved")?;
+    if let Some(key) = crate::codex_connection::load_key(&profile.endpoint.base_url)? {
+        let target = Target {
+            endpoint: profile.endpoint.clone(),
+            token: Some(profile.token.clone()),
+        };
+        let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
+        match request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000) {
+            Ok(_) => {}
+            Err(error) if is_http_status(&error, 404) => {}
+            Err(_) => {
+                return Err(
+                    "Could not revoke the Codex connection on the server; reconnect and retry"
+                        .into(),
+                )
+            }
+        }
+        connection::delete_secret(&crate::codex_connection::key_target(
+            &profile.endpoint.base_url,
+        ))?;
+    }
+    crate::codex_connection::configure(Some("http://127.0.0.1:9"), None)?;
+    connection::disconnect()
+}
+
+pub fn sync_codex_catalog() -> Result<(), String> {
+    if let Connection::Remote(profile) = connection::active() {
+        let target = Target {
+            endpoint: profile.endpoint.clone(),
+            token: Some(profile.token.clone()),
+        };
+        let catalog: Value =
+            serde_json::from_slice(&request_to(&target, "GET", "/api/catalog", None, 30_000)?)
+                .map_err(|_| "Invalid remote Codex catalog")?;
+        crate::codex_connection::sync_catalog(&profile, &catalog)?;
+    }
+    Ok(())
 }
 
 /// Install a connection profile without ever placing the token on a command
@@ -443,6 +590,17 @@ fn request_to(
     body: Option<&[u8]>,
     timeout_ms: i32,
 ) -> Result<Vec<u8>, String> {
+    request_to_with_bearer(target, method, path, body, timeout_ms, false)
+}
+
+fn request_to_with_bearer(
+    target: &Target,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    timeout_ms: i32,
+    bearer: bool,
+) -> Result<Vec<u8>, String> {
     unsafe {
         let session = InternetHandle(valid_handle(WinHttpOpen(
             w!("OCX Notch/0.1"),
@@ -489,7 +647,11 @@ fn request_to(
         )
         .map_err(win_error)?;
 
-        let headers = wide(&request_headers(target, body.is_some()));
+        let mut headers = request_headers(target, body.is_some());
+        if bearer {
+            headers = headers.replacen("X-OpenCodex-API-Key: ", "Authorization: Bearer ", 1);
+        }
+        let headers = wide(&headers);
         WinHttpAddRequestHeaders(
             request.0,
             &headers[..headers.len() - 1],

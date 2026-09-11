@@ -10,12 +10,37 @@ pub struct Health {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryDetails {
+    pub host_cpu: Option<HostCpu>,
+    pub host_memory: Option<HostMemory>,
     pub heap_used: Option<u64>,
     /// Resident set of the OCX process. In remote mode this is the only memory
     /// figure available: the VM's process cannot be sampled from this PC.
     pub rss: Option<u64>,
     pub heap_total: Option<u64>,
     pub observed_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct HostCpu {
+    pub idle: u64,
+    pub total: u64,
+}
+
+impl HostCpu {
+    pub fn percent_since(self, previous: Self) -> Option<f64> {
+        let total = self.total.checked_sub(previous.total)?;
+        let idle = self.idle.checked_sub(previous.idle)?;
+        if total == 0 || idle > total {
+            return None;
+        }
+        Some(100.0 * (total - idle) as f64 / total as f64)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct HostMemory {
+    pub total: u64,
+    pub available: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

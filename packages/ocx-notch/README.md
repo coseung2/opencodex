@@ -26,6 +26,9 @@ For OCX 2.8+, local mode automatically reads the existing `%USERPROFILE%\.openco
 
 ## Data and polling
 
+- Remote Connect configures both Notch and Codex, storing the separate Codex data key in Windows Credential Manager. Codex uses `--codex-token <origin>` through command-backed provider auth and the VM catalog. Restart existing Codex sessions after switching. Disconnect revokes this client's key and suspends polling; Local PC is an explicit action. `--reconnect` and `--disconnect` expose the same actions for automation.
+- In remote mode, `/api/system/memory` polls independently every ~3 seconds. The header's VM CPU segmented meter uses deltas of cumulative host CPU counters; missing or reset counters show no percentage until two valid samples arrive. The lower segmented meter displays VM physical memory usage. No local CPU measurement is substituted.
+
 - `/healthz` supplies the OCX PID and online status every ~30 seconds.
 - Windows `OpenProcess` + `K32GetProcessMemoryInfo` samples working set and private commit every ~2 seconds. The header shows each value on a fixed segmented capacity gauge: Private Max is current private commit plus remaining system commit headroom, and WS Max is current working set plus available physical RAM. Filled ticks show the current share and dim ticks show remaining capacity. Private commit is emphasized because it is the useful leak signal. This does not call the expensive OCX memory endpoint.
 - The same native sample collects `GetPerformanceInfo` physical total/available and commit total/limit values. The header labels the smaller available headroom as `안정`, `주의`, or `위험`; caution and danger use 10%/2 GiB and 5%/1 GiB minimum-headroom thresholds respectively. No memory history is persisted.

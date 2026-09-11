@@ -30,6 +30,7 @@ import { jsonResponse } from "../auth-cors";
 import { getInspectionCounters } from "../relay";
 import type { ManagementContext } from "./context";
 import { acceptSystemRestart } from "./system-restart";
+import { cpus, freemem, totalmem } from "node:os";
 
 const ENDPOINT_SAMPLE_LIMIT = 60;
 
@@ -37,6 +38,12 @@ export async function handleSystemRoutes(ctx: ManagementContext): Promise<Respon
   const { req, url, config } = ctx;
   if (url.pathname === "/api/system/memory" && req.method === "GET") {
     const usage = process.memoryUsage();
+    // Cumulative host counters let each client measure its own interval without
+    // one dashboard's polling resetting another dashboard's CPU sample.
+    const hostCpu = cpus().reduce((sum, cpu) => ({
+      idle: sum.idle + cpu.times.idle,
+      total: sum.total + Object.values(cpu.times).reduce((a, b) => a + b, 0),
+    }), { idle: 0, total: 0 });
     let jscHeap: { heapSize: number; heapCapacity: number; objectCount: number } | null = null;
     try {
       const { heapStats } = await import("bun:jsc");
@@ -81,6 +88,8 @@ export async function handleSystemRoutes(ctx: ManagementContext): Promise<Respon
       platform: process.platform,
       uptimeSeconds: process.uptime(),
       rss: usage.rss,
+      hostCpu,
+      hostMemory: { total: totalmem(), available: freemem() },
       heapUsed: usage.heapUsed,
 	      heapTotal: usage.heapTotal,
 	      external: usage.external,

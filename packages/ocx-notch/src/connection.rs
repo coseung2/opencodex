@@ -8,7 +8,13 @@
 
 use super::wide;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
+
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
@@ -266,20 +272,51 @@ pub fn active() -> Connection {
 fn set_state(next: Connection) {
     if let Ok(mut guard) = state().write() {
         *guard = Some(next);
+        GENERATION.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 /// Persist the profile, then publish it. A failed write leaves the previous
 /// profile in place, both on disk and in this process.
 pub fn commit(profile: Profile) -> Result<(), String> {
+    let previous = saved_profile()?;
     store_credential(&profile)?;
+    if let Err(error) = crate::codex_connection::write_mode("remote") {
+        let restored = match previous {
+            Some(previous) => store_credential(&previous),
+            None => delete_credential(),
+        };
+        return Err(if restored.is_err() {
+            format!("{error}; could not restore the previous server credential")
+        } else {
+            error
+        });
+    }
     set_state(Connection::Remote(profile));
+    Ok(())
+}
+
+pub fn saved_profile() -> Result<Option<Profile>, String> {
+    match read_credential()?.map(interpret_stored) {
+        Some(Connection::Remote(profile)) => Ok(Some(profile)),
+        Some(Connection::Unavailable { reason, .. }) => Err(reason),
+        _ => Ok(None),
+    }
+}
+
+pub fn read_secret(name: &str) -> Result<Option<String>, String> {
+    Ok(read_named_credential(name)?.and_then(|entry| entry.token))
+}
+
+pub fn disconnect() -> Result<(), String> {
+    crate::codex_connection::write_mode("disconnected")?;
+    set_state(load_stored());
     Ok(())
 }
 
 /// Return to local mode and remove the stored credential.
 pub fn clear() -> Result<(), String> {
-    delete_credential()?;
+    crate::codex_connection::write_mode("local")?;
     set_state(Connection::Local);
     Ok(())
 }
@@ -296,6 +333,16 @@ struct StoredEntry {
 }
 
 fn load_stored() -> Connection {
+    match crate::codex_connection::read_mode().as_str() {
+        "local" => return Connection::Local,
+        "disconnected" => {
+            return Connection::Unavailable {
+                base_url: saved_profile().ok().flatten().map(|p| p.endpoint.base_url),
+                reason: "연결 끊김".into(),
+            }
+        }
+        _ => {}
+    }
     match read_credential() {
         // Nothing stored is the only genuine local answer.
         Ok(None) => Connection::Local,
@@ -345,8 +392,12 @@ fn interpret_stored(entry: StoredEntry) -> Connection {
 }
 
 fn read_credential() -> Result<Option<StoredEntry>, String> {
+    read_named_credential(CREDENTIAL_TARGET)
+}
+
+fn read_named_credential(name: &str) -> Result<Option<StoredEntry>, String> {
     unsafe {
-        let target = wide(CREDENTIAL_TARGET);
+        let target = wide(name);
         let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
         if let Err(error) = CredReadW(
             PCWSTR(target.as_ptr()),
@@ -388,11 +439,19 @@ unsafe fn pwstr_to_string(value: PWSTR) -> Option<String> {
 }
 
 fn store_credential(profile: &Profile) -> Result<(), String> {
+    write_secret(
+        CREDENTIAL_TARGET,
+        &profile.endpoint.base_url,
+        &profile.token,
+    )
+}
+
+pub fn write_secret(name: &str, username: &str, secret: &str) -> Result<(), String> {
     unsafe {
-        let mut target = wide(CREDENTIAL_TARGET);
+        let mut target = wide(name);
         let mut comment = wide(CREDENTIAL_COMMENT);
-        let mut user = wide(&profile.endpoint.base_url);
-        let mut blob = profile.token.as_bytes().to_vec();
+        let mut user = wide(username);
+        let mut blob = secret.as_bytes().to_vec();
         let credential = CREDENTIALW {
             Type: CRED_TYPE_GENERIC,
             TargetName: PWSTR(target.as_mut_ptr()),
@@ -409,8 +468,12 @@ fn store_credential(profile: &Profile) -> Result<(), String> {
 }
 
 fn delete_credential() -> Result<(), String> {
+    delete_secret(CREDENTIAL_TARGET)
+}
+
+pub fn delete_secret(name: &str) -> Result<(), String> {
     unsafe {
-        let target = wide(CREDENTIAL_TARGET);
+        let target = wide(name);
         match CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0) {
             Ok(()) => Ok(()),
             Err(error) if error.code().0 == E_NOT_FOUND => Ok(()),

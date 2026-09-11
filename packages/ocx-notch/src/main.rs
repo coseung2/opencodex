@@ -2,6 +2,7 @@
 
 mod api;
 mod callback_relay;
+mod codex_connection;
 mod model;
 mod models;
 mod subagents;
@@ -207,6 +208,7 @@ enum ModalHit {
     ConnectionModeLocal,
     ConnectionModeRemote,
     ConnectionSave,
+    ConnectionDisconnect,
     Cancel,
 }
 
@@ -309,6 +311,8 @@ enum Update {
 
 #[derive(Default)]
 struct ViewState {
+    cpu_sample: Option<HostCpu>,
+    cpu_percent: Option<f64>,
     online: bool,
     status: String,
     action_error: Option<String>,
@@ -336,7 +340,7 @@ struct ViewState {
 }
 
 struct App {
-    rx: Receiver<Update>,
+    rx: Receiver<(u64, Update)>,
     state: ViewState,
     expanded: bool,
     content_tab: ContentTab,
@@ -398,7 +402,10 @@ struct App {
 
 impl App {
     fn drain_updates(&mut self) {
-        while let Ok(update) = self.rx.try_recv() {
+        while let Ok((generation, update)) = self.rx.try_recv() {
+            if generation != api::connection::generation() {
+                continue;
+            }
             match update {
                 Update::NativeMemory {
                     pid,
@@ -431,6 +438,9 @@ impl App {
                 Update::MemoryDetails(result) => {
                     if let Ok(details) = result {
                         apply_memory_details(&mut self.state, details);
+                    } else {
+                        self.state.cpu_percent = None;
+                        self.state.cpu_sample = None;
                     }
                 }
                 Update::Usage(result) => match result {
@@ -730,6 +740,11 @@ fn apply_local_process_memory(
 /// so the server's own figures drive the header; local machine capacity is
 /// dropped because it does not describe the VM.
 fn apply_memory_details(state: &mut ViewState, details: MemoryDetails) {
+    state.cpu_percent = details
+        .host_cpu
+        .zip(state.cpu_sample)
+        .and_then(|(next, previous)| next.percent_since(previous));
+    state.cpu_sample = details.host_cpu;
     if state.remote {
         state.working_set = details.rss.unwrap_or(0);
         state.private_commit = details
@@ -771,6 +786,36 @@ fn main() {
     install_panic_logger();
     match parse_cli(std::env::args().skip(1)) {
         Ok(Cli::Window) => {}
+        Ok(Cli::CodexToken(origin)) => match codex_connection::auth_token(&origin) {
+            Ok(token) => {
+                print!("{token}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        },
+        Ok(Cli::Reconnect) => {
+            let result = api::connection::saved_profile().and_then(|profile| {
+                let profile = profile.ok_or("No remote server is saved")?;
+                api::save_connection(Some(&profile.endpoint.base_url), Some(""))
+            });
+            if let Err(error) = result {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            println!("Codex remote connection configured; restart existing Codex sessions");
+            return;
+        }
+        Ok(Cli::Disconnect) => {
+            if let Err(error) = api::disconnect_codex() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            println!("Disconnected");
+            return;
+        }
         Ok(Cli::Connect(base_url)) => {
             // Token arrives on stdin, never on the command line, and is never echoed.
             std::process::exit(match api::save_connection_from_stdin(&base_url) {
@@ -812,6 +857,9 @@ fn main() {
 /// exit; the default opens the notch window.
 #[derive(Debug, PartialEq, Eq)]
 enum Cli {
+    CodexToken(String),
+    Reconnect,
+    Disconnect,
     Window,
     /// `--connect <base-url>`: read the management token from stdin and store the
     /// remote profile.
@@ -827,6 +875,9 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
     };
     let mode = match first.as_str() {
         "--local" => Cli::Local,
+        "--reconnect" => Cli::Reconnect,
+        "--disconnect" => Cli::Disconnect,
+        "--codex-token" => Cli::CodexToken(args.next().ok_or("Missing server origin")?),
         // The token is deliberately not accepted here: an argv credential would
         // be visible to every process on the machine.
         "--connect" | "--remote-server" => {
@@ -987,7 +1038,7 @@ fn run() -> windows::core::Result<()> {
 
 fn start_workers(
     hwnd: isize,
-    tx: Sender<Update>,
+    tx: Sender<(u64, Update)>,
     force_refresh: Arc<AtomicBool>,
     want_details: Arc<AtomicBool>,
     want_logs: Arc<AtomicBool>,
@@ -1008,6 +1059,11 @@ fn start_workers(
         let mut last_subagents = refresh_seed(now, Duration::from_secs(600));
         let mut slow_interval = Duration::from_secs(300);
         loop {
+            api::begin_poll();
+            if codex_connection::read_mode() == "disconnected" {
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
             let forced = force_refresh.swap(false, Ordering::Relaxed);
             if forced || last_health.elapsed() >= Duration::from_secs(30) {
                 let result = api::get_json::<Health>("/healthz", 8_000);
@@ -1077,6 +1133,7 @@ fn start_workers(
                 let subagents = (|| {
                     let models = api::get_json("/api/subagent-models", 30_000)?;
                     let injection = api::get_json("/api/injection-model", 30_000)?;
+                    api::sync_codex_catalog()?;
                     Ok((models, injection))
                 })();
                 send_update(hwnd, &api_tx, Update::Subagents(subagents));
@@ -1090,7 +1147,8 @@ fn start_workers(
             } else {
                 Duration::from_secs(45)
             };
-            if (api::is_remote() || want_details.load(Ordering::Relaxed))
+            if !api::is_remote()
+                && want_details.load(Ordering::Relaxed)
                 && (forced || last_details.elapsed() >= details_interval)
             {
                 send_update(
@@ -1104,7 +1162,21 @@ fn start_workers(
         }
     });
 
+    let telemetry_tx = tx.clone();
     thread::spawn(move || loop {
+        api::begin_poll();
+        if api::is_remote() && codex_connection::read_mode() != "disconnected" {
+            send_update(
+                hwnd,
+                &telemetry_tx,
+                Update::MemoryDetails(api::get_json("/api/system/memory", 8_000)),
+            );
+        }
+        thread::sleep(Duration::from_secs(3));
+    });
+
+    thread::spawn(move || loop {
+        api::begin_poll();
         let current_pid = pid.load(Ordering::Relaxed);
         // Never OpenProcess in remote mode: the pid belongs to the VM, and any
         // local pid that happens to match would report an unrelated process.
@@ -1143,8 +1215,8 @@ fn provider_refresh_interval(last_fetch_succeeded: bool) -> Duration {
     Duration::from_secs(if last_fetch_succeeded { 300 } else { 5 })
 }
 
-fn send_update(hwnd: isize, tx: &Sender<Update>, update: Update) {
-    if tx.send(update).is_ok() {
+fn send_update(hwnd: isize, tx: &Sender<(u64, Update)>, update: Update) {
+    if tx.send((api::poll_generation(), update)).is_ok() {
         unsafe {
             let _ = PostMessageW(HWND(hwnd as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
         }
@@ -2499,6 +2571,8 @@ fn prepare_kiro_auth_picker() {
 /// connection modal refuses to save while anything is outstanding.
 fn connection_change_busy(app: &App) -> bool {
     let mutations = app.reauth_mutations.len()
+        + app.state.models.mutating.len()
+        + usize::from(app.state.subagents.saving)
         + app.account_mutations.len()
         + app.account_switch_mutations.len()
         + app.reset_credit_mutations.len();
@@ -2598,7 +2672,7 @@ unsafe fn show_connection_modal(hwnd: HWND) {
 /// Apply the edited connection. Local mode clears the stored profile; remote mode
 /// validates and probes the address/credential inside `api::save_connection`, so
 /// a rejected server or token leaves the previous connection in place.
-unsafe fn submit_connection(hwnd: HWND) {
+unsafe fn submit_connection(hwnd: HWND, disconnect: bool) {
     let mut submission = None;
     with_app(|app| {
         if connection_change_busy(app) {
@@ -2621,7 +2695,7 @@ unsafe fn submit_connection(hwnd: HWND) {
         if *submitting {
             return;
         }
-        if !*remote {
+        if disconnect || !*remote {
             *submitting = true;
             *error = None;
             submission = Some((None, app.modal_generation));
@@ -2634,8 +2708,8 @@ unsafe fn submit_connection(hwnd: HWND) {
         };
         let base_url = native_edit_text(url_edit);
         let token = native_edit_text(token_edit);
-        if base_url.trim().is_empty() || token.trim().is_empty() {
-            *error = Some("Enter the server address and the management token".into());
+        if base_url.trim().is_empty() {
+            *error = Some("Enter the server address".into());
             return;
         }
         *submitting = true;
@@ -2655,18 +2729,23 @@ unsafe fn submit_connection(hwnd: HWND) {
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
         let mut remote = remote;
-        let result = match remote.as_mut() {
-            Some((base_url, token)) => {
-                let outcome = api::save_connection(Some(base_url), Some(token));
-                token.as_bytes_mut().fill(0);
-                outcome
+        let result = if disconnect {
+            api::disconnect_codex()
+        } else {
+            match remote.as_mut() {
+                Some((base_url, token)) => {
+                    let outcome = api::save_connection(Some(base_url), Some(token));
+                    token.as_bytes_mut().fill(0);
+                    outcome
+                }
+                None => api::save_connection(None, None),
             }
-            None => api::save_connection(None, None),
         };
         drop(remote);
         with_app(|app| {
             match result {
                 Ok(()) => {
+                    app.state = ViewState::default();
                     app.state.remote = api::is_remote();
                     app.state.connection_error = api::connection_error();
                     // The previous server's data must not linger next to the new
@@ -2682,8 +2761,10 @@ unsafe fn submit_connection(hwnd: HWND) {
                     app.state.quotas.clear();
                     app.state.usage.clear();
                     app.state.logs.clear();
-                    app.state.status = if app.state.remote {
-                        format!("Connected to {}", api::connection_base_url())
+                    app.state.status = if disconnect {
+                        "연결 끊김".into()
+                    } else if app.state.remote {
+                        "VM 설정 적용 · Codex 재시작 필요".into()
                     } else {
                         "Using the local OCX".into()
                     };
@@ -3925,7 +4006,8 @@ unsafe extern "system" fn window_proc(
                             }
                         });
                     }
-                    ModalHit::ConnectionSave => unsafe { submit_connection(hwnd) },
+                    ModalHit::ConnectionSave => unsafe { submit_connection(hwnd, false) },
+                    ModalHit::ConnectionDisconnect => unsafe { submit_connection(hwnd, true) },
                     ModalHit::ResetCreditUse => with_app(|app| {
                         if let Some(ProviderModal::ResetCredits {
                             loading,
@@ -4268,6 +4350,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     );
     let ws = if app.state.working_set > 0 {
         format!("WS {}", format_bytes(app.state.working_set))
+    } else if codex_connection::read_mode() == "disconnected" {
+        "연결 끊김".into()
     } else if let Some(error) = &app.state.connection_error {
         // A stored remote profile that cannot be used: say so instead of showing
         // local numbers under a remote header.
@@ -4293,6 +4377,69 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
 
     let mut private_gauge = header_chart_rect(width, app.expanded, 11, 25);
     let mut working_set_gauge = header_chart_rect(width, app.expanded, 35, 49);
+    if app.state.remote {
+        let mut cpu_gauge = private_gauge;
+        let label_right = (cpu_gauge.left + 74).min(cpu_gauge.right);
+        let cpu_label = app
+            .state
+            .cpu_percent
+            .filter(|_| app.state.online)
+            .map(|value| format!("VM CPU {value:.0}%"))
+            .unwrap_or_else(|| "VM CPU —".into());
+        let _ = SelectObject(dc, small_font);
+        set_text_color(dc, 0x006ee7a8);
+        draw_text(
+            dc,
+            &cpu_label,
+            RECT {
+                right: label_right,
+                top: 5,
+                bottom: 30,
+                ..cpu_gauge
+            },
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        cpu_gauge.left = label_right + 6;
+        draw_capacity_gauge(
+            dc,
+            cpu_gauge,
+            (app.state
+                .cpu_percent
+                .filter(|_| app.state.online)
+                .unwrap_or(0.0)
+                * 100.0) as u64,
+            10_000,
+            0x006ee7a8,
+        );
+        if let Some(memory) = app.state.details.as_ref().and_then(|d| d.host_memory) {
+            let used = memory.total.saturating_sub(memory.available);
+            let percent = if memory.total == 0 {
+                0
+            } else {
+                used.saturating_mul(100) / memory.total
+            };
+            set_text_color(dc, working_set_color);
+            draw_text(
+                dc,
+                &format!("VM RAM {percent}%"),
+                RECT {
+                    right: label_right,
+                    top: 29,
+                    bottom: 53,
+                    ..working_set_gauge
+                },
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+            working_set_gauge.left = label_right + 6;
+            draw_capacity_gauge(
+                dc,
+                working_set_gauge,
+                memory.total.saturating_sub(memory.available),
+                memory.total,
+                working_set_color,
+            );
+        }
+    }
     if let Some(memory) = app.state.system_memory {
         let commit_headroom = memory.commit_limit.saturating_sub(memory.commit_total);
         let private_max = app.state.private_commit.saturating_add(commit_headroom);
@@ -4938,6 +5085,7 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
             let refreshed = (|| {
                 let models = api::get_json("/api/subagent-models", 30_000)?;
                 let injection = api::get_json("/api/injection-model", 30_000)?;
+                api::sync_codex_catalog()?;
                 Ok::<_, String>((models, injection))
             })();
             with_app(|app| match refreshed {
@@ -5295,6 +5443,7 @@ fn handle_subagent_action(hwnd: HWND, action: SubagentHit) {
             let _: serde_json::Value = api::put_json("/api/injection-model", &injection)?;
             let models = api::get_json("/api/subagent-models", 30_000)?;
             let injection = api::get_json("/api/injection-model", 30_000)?;
+            api::sync_codex_catalog()?;
             Ok((models, injection))
         })();
         // Keep edited values on failure so a partial two-endpoint save can be
@@ -6553,13 +6702,13 @@ unsafe fn draw_provider_modal(
                 set_text_color(dc, 0x009da3ad);
                 draw_text(
                     dc,
-                    "중앙 OCX 주소와 관리 토큰을 입력하세요. 토큰은 Windows 자격 증명 관리자에 저장되고 화면에는 다시 표시되지 않습니다.",
+                    "접속하면 Codex도 이 서버를 사용합니다. 같은 서버는 토큰을 비워 두면 저장된 인증을 사용합니다.",
                     RECT { left: 60, top: 142, right: width - 60, bottom: 200 },
                     DT_LEFT | DT_WORDBREAK,
                 );
                 draw_text(
                     dc,
-                    "서버 주소 (예: http://100.120.114.62:10100)",
+                    "서버 주소 (예: https://ocx.example.com)",
                     RECT {
                         left: 60,
                         top: 210,
@@ -6582,7 +6731,7 @@ unsafe fn draw_provider_modal(
                 set_text_color(dc, 0x008e949e);
                 draw_text(
                     dc,
-                    "원격 모드에서는 시작·중지·재시작을 사용할 수 없고, 메모리는 서버에서 가져옵니다.",
+                    "주소·인증·모델 목록을 함께 적용합니다. 실행 중인 Codex는 재시작해야 합니다. 접속 끊기는 VM을 종료하지 않습니다.",
                     RECT { left: 60, top: 356, right: width - 60, bottom: 404 },
                     DT_LEFT | DT_WORDBREAK,
                 );
@@ -6590,7 +6739,7 @@ unsafe fn draw_provider_modal(
                 set_text_color(dc, 0x009da3ad);
                 draw_text(
                     dc,
-                    "이 PC의 OCX(127.0.0.1:10100)에 연결합니다. 저장된 원격 토큰은 삭제되고 기존 로컬 동작이 그대로 유지됩니다.",
+                    "노치와 Codex를 이 PC의 OCX(127.0.0.1:10100)로 전환합니다. 원격 서버 정보는 보관합니다. 실행 중인 Codex는 재시작해야 합니다.",
                     RECT { left: 60, top: 142, right: width - 60, bottom: 210 },
                     DT_LEFT | DT_WORDBREAK,
                 );
@@ -6607,12 +6756,22 @@ unsafe fn draw_provider_modal(
                 if submitting {
                     "확인 중…"
                 } else {
-                    "저장"
+                    "접속"
                 },
                 submitting,
             );
             if !submitting {
                 app.modal_hits.push((save, ModalHit::ConnectionSave));
+                if api::is_remote() && codex_connection::read_mode() != "disconnected" {
+                    let disconnect = RECT {
+                        left: 60,
+                        right: 190,
+                        ..save
+                    };
+                    draw_native_button(dc, disconnect, "접속 끊기", false);
+                    app.modal_hits
+                        .push((disconnect, ModalHit::ConnectionDisconnect));
+                }
             }
             if let Some(error) = error {
                 set_text_color(dc, 0x0024bffb);
@@ -7451,6 +7610,23 @@ mod account_control_tests {
     #[test]
     fn cli_accepts_only_bootstrap_modes_and_never_a_token_argument() {
         assert_eq!(parse_cli(Vec::<String>::new()).unwrap(), Cli::Window);
+        assert_eq!(
+            parse_cli(vec!["--reconnect".into()]).unwrap(),
+            Cli::Reconnect
+        );
+        assert_eq!(
+            parse_cli(vec!["--disconnect".into()]).unwrap(),
+            Cli::Disconnect
+        );
+        assert!(parse_cli(vec!["--codex-token".into()]).is_err());
+        assert_eq!(
+            parse_cli(vec![
+                "--codex-token".into(),
+                "https://ocx.example.com".into()
+            ])
+            .unwrap(),
+            Cli::CodexToken("https://ocx.example.com".into())
+        );
         assert_eq!(parse_cli(vec!["--local".into()]).unwrap(), Cli::Local);
         assert_eq!(
             parse_cli(vec!["--connect".into(), "http://10.0.0.5:10100".into()]).unwrap(),
@@ -7516,6 +7692,7 @@ mod account_control_tests {
                 rss: Some(700),
                 heap_total: Some(300),
                 observed_bytes: Some(500),
+                ..Default::default()
             },
         );
         assert_eq!(state.working_set, 700);
@@ -7540,6 +7717,7 @@ mod account_control_tests {
                 rss: Some(700),
                 heap_total: Some(300),
                 observed_bytes: Some(500),
+                ..Default::default()
             },
         );
         assert_eq!(

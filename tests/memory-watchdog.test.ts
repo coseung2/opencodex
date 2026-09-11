@@ -255,6 +255,22 @@ describe("startMemoryWatchdog", () => {
 });
 
 describe("GET /api/system/memory", () => {
+  test("host CPU counters are cumulative and host memory is bounded", async () => {
+    const read = async () => {
+      const req = new Request("http://127.0.0.1:10100/api/system/memory");
+      const response = await handleManagementAPI(req, new URL(req.url), config());
+      return response!.json() as Promise<{ hostCpu: { idle: number; total: number }; hostMemory: { total: number; available: number } }>;
+    };
+    const before = await read();
+    const after = await read();
+    expect(before.hostCpu.total).toBeGreaterThan(0);
+    expect(after.hostCpu.total).toBeGreaterThanOrEqual(before.hostCpu.total);
+    expect(after.hostCpu.idle).toBeGreaterThanOrEqual(before.hostCpu.idle);
+    expect(after.hostCpu.idle).toBeLessThanOrEqual(after.hostCpu.total);
+    expect(after.hostMemory.total).toBeGreaterThan(0);
+    expect(after.hostMemory.available).toBeGreaterThanOrEqual(0);
+    expect(after.hostMemory.available).toBeLessThanOrEqual(after.hostMemory.total);
+  });
   test("returns runtime identity, memory scalars, gate decision, and sliced watchdog samples", async () => {
     let t = 1000;
     startMemoryWatchdog({

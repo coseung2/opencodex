@@ -4,7 +4,7 @@ description: Manage one OCX server from multiple Windows PCs.
 ---
 
 Remote mode connects Windows Notch to an OCX server on a private network. Accounts,
-provider keys, pool settings, usage and runtime memory come from that server.
+provider keys, pool settings, usage, host CPU and runtime memory come from that server.
 Local mode remains the default.
 
 ## Connect
@@ -35,7 +35,56 @@ credential in Windows Credential Manager. Plain HTTP is accepted only for loopba
 private, link-local, or `100.64.0.0/10` overlay IP addresses. Public addresses and
 hostnames require HTTPS.
 
-Remote mode displays connection status and server memory. Its Providers, Logs,
+For Codex connection control, expose OCX through an HTTPS reverse proxy that maps
+OCX data bearer tokens to `X-OpenCodex-API-Key` and removes that bearer from the
+upstream `Authorization` header. OCX reserves the Responses Authorization header
+for upstream OpenAI authentication. Keep other Authorization values unchanged.
+For nginx, place these maps in the `http` context:
+
+```nginx
+map $http_authorization $notch_data_key {
+    default $http_x_opencodex_api_key;
+    "~^Bearer (ocx_data_[a-f0-9]{40})$" $1;
+}
+map $http_authorization $notch_upstream_authorization {
+    default $http_authorization;
+    "~^Bearer ocx_data_[a-f0-9]{40}$" "";
+}
+```
+
+In the OCX proxy location, use `proxy_set_header X-OpenCodex-API-Key $notch_data_key;`
+and `proxy_set_header Authorization $notch_upstream_authorization;` alongside the
+existing Host and forwarding headers. OCX still validates the data key; this mapping
+does not bypass authentication. Notch checks Responses admission before saving.
+The server must also have a generated `/api/catalog` available. On a server without
+Codex installed, seed its native catalog from the connecting Codex version's
+`codex debug models --bundled` output, then synchronize it using the server's OCX
+configuration so provider visibility and subagent choices come from that server.
+
+**Connect** also configures this PC's Codex to use the server directly. Notch creates
+a separate data credential, stores it in Windows Credential Manager, and downloads
+the VM's Codex model catalog. Codex retrieves the credential through its supported
+command-backed provider authentication; no token is written into `config.toml`.
+Use a Codex version supporting `model_providers.<id>.auth.command`.
+Restart already-running Codex sessions after changing servers. Existing threads may
+retain their previous provider; start a new thread after restarting when needed.
+The connection uses the custom provider `ocx-notch`; it does not rewrite conversation history.
+
+Leave the management token blank when reconnecting to the same saved server.
+**Disconnect** revokes this Notch client's data key and stops Notch polling without
+stopping the VM or switching to local OCX. A request already accepted by the server
+may finish. Server contact is required to confirm key revocation; a failed revocation
+is shown as an error. **Local PC** explicitly configures Codex and Notch for local OCX.
+Saved server information remains in the vault for reconnection.
+
+Notch preserves unrelated Codex settings and saves `config.toml.before-notch` before
+its first configuration change. An active Codex profile or multiline TOML strings
+require manual configuration; Notch reports these before changing the config.
+
+Remote mode displays connection status, VM CPU as a segmented meter, and server memory.
+CPU is computed from successive VM host counters, not this PC's CPU or only OCX's
+process usage. The first sample or a server lacking these fields displays `—`.
+Telemetry polls independently of account quotas. Its Providers, Logs,
 Models, and Subagents pages call the same existing Management API on the VM. Model
 visibility changes use the VM catalog, and the Subagents page selects up to five
 workers from models that are currently visible there. Remote mode has no Start,
@@ -65,6 +114,6 @@ settings. Kiro needs its client registration, region and organization profile al
 its tokens. Do not copy Windows-specific runtime paths or local process state to a VM.
 
 Notch uses a **management credential**. Codex and Claude model requests use a separate
-**data credential**. Connecting Notch does not change those clients' model endpoints;
-configure them to use the central server as well. After cutover, use the server as the
+**data credential**. Connecting Notch configures Codex as described above; Claude and
+other clients still require separate endpoint configuration. After cutover, use the server as the
 single active owner of transferred refresh tokens. Keep protected backups for recovery.
