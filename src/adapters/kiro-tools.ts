@@ -2,6 +2,7 @@ import type { OcxParsedRequest, OcxTool } from "../types";
 import { namespacedToolName } from "../types";
 import { normalizeKiroModelId } from "../providers/kiro-models";
 import { createKiroToolNameRegistry, type KiroToolNameRegistry } from "./kiro-wire";
+import { isBareShellBridgeTool, isCodexCodeModeExecTool } from "./tool-catalog-nudge";
 
 const MAX_KIRO_TOOL_DESCRIPTION_UNVERIFIED = 1024;
 const MAX_KIRO_TOOL_DESCRIPTION_GPT_56_SOL = 9_216;
@@ -172,18 +173,23 @@ function omittedToolCatalogNotice(kept: number, omitted: readonly OcxTool[], reg
   return `[opencodex] Kiro's outbound catalog budget allows ${kept} of ${kept + omitted.length} client tools this turn. Omitted and unavailable this turn: ${summary}.`;
 }
 
+function boundedCatalogPriority(tool: OcxTool): number {
+  if (tool.loadedFromToolSearch) return 0;
+  if (isCodexCodeModeExecTool(tool)) return 1;
+  if (tool.toolSearch) return 2;
+  return 3;
+}
+
 export function convertKiroToolContext(
   parsed: OcxParsedRequest,
   registry: KiroToolNameRegistry = createKiroToolNameRegistry(),
-): { tools: unknown[]; systemAdditions: string[]; nameMap: Map<string, string>; registry: KiroToolNameRegistry } {
+): { tools: unknown[]; systemAdditions: string[]; nameMap: Map<string, string>; registry: KiroToolNameRegistry; codeModeExecName?: string } {
   const tools = parsed.context.tools ?? [];
   const descriptionLimit = toolDescriptionLimit(parsed.modelId);
   // Validate every listed name even when tool_choice:none emulates a tool-free turn.
   for (const tool of tools) registry.alias(namespacedToolName(tool.namespace, tool.name));
   const effectiveTools = parsed.options.toolChoice === "none" ? [] : tools;
-  const convertedTools: unknown[] = [];
-  let omittedAt = effectiveTools.length;
-  for (const [index, tool] of effectiveTools.entries()) {
+  const entries = effectiveTools.map((tool, index) => {
     const description = tool.description || `Tool: ${tool.name}`;
     // Send the full namespaced wire name (e.g. mcp__chrome-devtools__navigate_page) so Kiro echoes
     // it back; the bridge's toolNsMap is keyed by this name and restores the MCP namespace Codex
@@ -198,24 +204,43 @@ export function convertKiroToolContext(
         inputSchema: { json: ensureRootObjectType(sanitizeKiroSchema(tool.parameters ?? {})) },
       },
     };
-    // Preserve declaration order and only omit a suffix. Ranking tools would make a catalog change
-    // silently alter which capability disappears; this deterministic policy is paired with a
-    // model-visible omission notice so unavailable tools are explicit rather than assumed absent.
-    if (
-      convertedTools.length >= MAX_KIRO_TOOL_COUNT
-      || serializedToolCatalogBytes([...convertedTools, converted]) > MAX_KIRO_TOOL_CATALOG_BYTES
-    ) {
-      omittedAt = index;
-      break;
-    }
-    convertedTools.push(converted);
+    return { tool, index, converted };
+  });
+  const exceedsBudget = entries.length > MAX_KIRO_TOOL_COUNT
+    || serializedToolCatalogBytes(entries.map(entry => entry.converted)) > MAX_KIRO_TOOL_CATALOG_BYTES;
+  const candidates = exceedsBudget
+    ? entries.toSorted((a, b) => boundedCatalogPriority(a.tool) - boundedCatalogPriority(b.tool) || a.index - b.index)
+    : entries;
+  // Upstream #2475/#2750: loaded tools outrank filler, but reserve the execution path even when
+  // loaded tools alone occupy every slot. Without exec their nested helpers become unreachable.
+  const reserved = candidates.find(entry => isCodexCodeModeExecTool(entry.tool));
+  if (reserved && serializedToolCatalogBytes([reserved.converted]) > MAX_KIRO_TOOL_CATALOG_BYTES) {
+    throw new Error("Kiro code-mode exec exceeds the outbound tool catalog byte budget");
   }
-  const omittedTools = effectiveTools.slice(omittedAt);
+  const admitted = new Set<number>();
+  const filled: unknown[] = [];
+  for (const entry of candidates) {
+    if (entry === reserved) continue;
+    const projected = reserved ? [...filled, entry.converted, reserved.converted] : [...filled, entry.converted];
+    if (projected.length > MAX_KIRO_TOOL_COUNT || serializedToolCatalogBytes(projected) > MAX_KIRO_TOOL_CATALOG_BYTES) break;
+    filled.push(entry.converted);
+    admitted.add(entry.index);
+  }
+  if (reserved) admitted.add(reserved.index);
+  const emitted = candidates.filter(entry => admitted.has(entry.index));
+  const convertedTools = emitted.map(entry => entry.converted);
+  const omittedTools = candidates.filter(entry => !admitted.has(entry.index)).map(entry => entry.tool);
+  // Detect the catalog the model actually receives, not a shell bridge omitted by its budget.
+  const emittedExec = emitted.find(entry => isCodexCodeModeExecTool(entry.tool));
+  const codeModeExecName = emittedExec && !emitted.some(entry => isBareShellBridgeTool(entry.tool))
+    ? emittedExec.converted.toolSpecification.name
+    : undefined;
   return {
     tools: convertedTools,
     systemAdditions: omittedTools.length > 0 ? [omittedToolCatalogNotice(convertedTools.length, omittedTools, registry)] : [],
     nameMap: registry.nameMap,
     registry,
+    ...(codeModeExecName ? { codeModeExecName } : {}),
   };
 }
 

@@ -43,6 +43,7 @@ import { extractKiroImages, normalizeKiroImages, type KiroImage } from "./kiro-i
 import { sniffImageDimensions } from "./anthropic-image-guard";
 import { fetchKiroWithRetry, noteKiroTransientThrottle } from "./kiro-retry";
 import { convertKiroToolContext } from "./kiro-tools";
+import { normalizeCodeModeToolResult } from "./exec-tool-result-normalize";
 import { neutralizeIdentity } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeFromNames } from "./tool-catalog-nudge";
 import {
@@ -514,7 +515,11 @@ export function buildKiroPayload(
     const boundedAddition = boundedInjectedInstruction(addition, injectedChars);
     if (boundedAddition) systemParts.push(boundedAddition);
   }
-  const toolCatalogNudge = buildNonOpenAIToolCatalogNudgeFromNames(kiroToolWireNames(kiroTools));
+  const toolCatalogNudge = buildNonOpenAIToolCatalogNudgeFromNames(
+    kiroToolWireNames(kiroTools),
+    undefined,
+    toolContext.codeModeExecName,
+  );
   const boundedNudge = toolCatalogNudge ? boundedInjectedInstruction(toolCatalogNudge, injectedChars) : undefined;
   if (boundedNudge) systemParts.push(boundedNudge);
   if (completionMode !== "disabled") {
@@ -571,8 +576,20 @@ export function buildKiroPayload(
     texts: string[];
     count: number;
     hasImages: boolean;
+    codeModeExec: boolean;
   } | undefined;
   const finishAdjacentResult = (): void => {
+    if (adjacentResult?.codeModeExec) {
+      const normalized = normalizeCodeModeToolResult(adjacentResult.texts, {
+        isError: adjacentResult.result.status === "error",
+        hasImages: adjacentResult.hasImages,
+      });
+      if (normalized) {
+        adjacentResult.result.content = normalized.map(text => ({ text }));
+        adjacentResult = undefined;
+        return;
+      }
+    }
     if (adjacentResult && adjacentResult.count > 1) {
       if (adjacentResult.texts.some(text => text.trim())) {
         adjacentResult.result.content = adjacentResult.texts.map(text => ({ text }));
@@ -647,6 +664,9 @@ export function buildKiroPayload(
       const text = userContentText(tr.content);
       const resultText = text.trim() ? text : KIRO_EMPTY_TOOL_RESULT_MESSAGE;
       const images = isReplayedMessage ? [] : extractKiroImages(tr.content);
+      // Retired image bytes still prove the tool produced output; do not diagnose them as a
+      // missing text() call merely because the fork omits old pixels from continuation history.
+      const hasImages = typeof tr.content !== "string" && tr.content.some(part => part.type === "image");
       const toolUseId = normalizeToolId(tr.toolCallId);
       const call = priorCalls.get(toolUseId);
       if (!call || call.rawId !== tr.toolCallId) {
@@ -659,7 +679,7 @@ export function buildKiroPayload(
         && last.toolResults.at(-1) === adjacentResult.result
       ) {
         adjacentResult.count += 1;
-        adjacentResult.hasImages ||= images.length > 0;
+        adjacentResult.hasImages ||= hasImages;
         if (text.length > 0) adjacentResult.texts.push(text);
         last.images.push(...images);
         if (tr.isError) adjacentResult.result.status = "error";
@@ -681,7 +701,9 @@ export function buildKiroPayload(
         result,
         texts: text.length > 0 ? [text] : [],
         count: 1,
-        hasImages: images.length > 0,
+        hasImages,
+        // Ownership comes from the paired call and the emitted freeform catalog, never tr.toolName.
+        codeModeExec: toolContext.codeModeExecName !== undefined && call.wireName === "exec",
       };
     }
   }

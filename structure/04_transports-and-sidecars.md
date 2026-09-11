@@ -521,6 +521,29 @@ allowed for a blocking question when only the user can supply the missing decisi
 clarification, so Kiro does not write the question as commentary and then invent its own answer to
 keep the work loop moving.
 
+### Kiro code-mode continuity
+
+The bounded catalog preserves tool-search discoveries ahead of ordinary declarations and reserves
+space for Codex's bare freeform `exec`, including when discovered tools fill all 48 slots. The
+reservation participates in the 96,000-byte budget; an oversized exec fails explicitly. Under-budget
+catalog order is unchanged. Code-mode guidance is derived from emitted tool objects (freeform exec
+without a bare shell bridge), not from tool names alone or a result's self-reported name.
+
+Kiro supplies the nested-helper discovery and explicit text/notify echo contract before execution.
+After adjacent outputs have been grouped by original call identity, empty code-mode results receive
+one missing-output explanation. Errors, nonempty output order, and current or retired image evidence
+are preserved. Known host failures gain an idempotent recovery hint only in leading error context.
+No tool is executed or retried by this normalization. Commentary/image retirement, encrypted reasoning
+pairing, private completion, and local delivered-answer termination remain independent.
+
+[Decision Log]
+- 목적과 의도: Stop missing code-mode output and catalog eviction from looking like lost task state.
+- 기존 구현 및 제약 조건: The fork had upstream final-answer termination but not the empty-exec repair or execution-path reservation; Kiro requires valid tool/result pairing and bounded catalogs.
+- 검토한 주요 대안: Replay every command, remove repeated calls by argument equality, merge all upstream adapter changes, or adapt the missing contracts only.
+- 선택한 방식: Port the scoped behavior from upstream #2819/#2475/#2750 and host-error follow-ups; normalize after original-id grouping, gate by emitted freeform ownership, and retain every existing terminal/replay guard.
+- 다른 대안 대신 이 방식을 선택한 이유: Repeated calls can be legitimate and replaying a side effect is unsafe. A name alone does not establish JavaScript semantics, and an execution-path reservation cannot bypass transport limits.
+- 장점, 단점 및 영향: The model receives actionable output and retains its execution path without new settings. Deterministic adapter regressions establish the missing contracts, not a guarantee that every live model loop has this cause.
+
 ## Kiro reasoning round-trip (`redactedContent`)
 
 Kiro never returns plaintext reasoning for its **GPT-5.6 family** (`gpt-5.6-sol`, `-terra`,

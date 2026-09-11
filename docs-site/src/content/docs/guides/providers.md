@@ -154,6 +154,8 @@ and WARN rows that include a recovery Action. When an OAuth provider account nee
 
 ### Kiro credential import
 
+For repeated work or apparently missing tool output, see [Kiro repeats completed work](/troubleshooting/kiro-task-repetition/). This is separate from account login.
+
 Kiro login expects the Kiro CLI: on Unix, install it with `curl -fsSL https://cli.kiro.dev/install | bash`;
 on Windows PowerShell, use `irm 'https://cli.kiro.dev/install.ps1' | iex`; then sign in with `kiro-cli login`.
 Without a `kiro-cli` session, `ocx login kiro` falls
