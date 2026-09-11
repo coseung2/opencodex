@@ -1581,7 +1581,10 @@ export async function handleCodexAuthAPI(
           let completed = false;
           for (let i = 0; i < 150; i++) {
             await new Promise(r => setTimeout(r, 2000));
-            const st = getLoginStatus("chatgpt");
+            // Remote/client-browser flows are flow-scoped. Polling without the
+            // OAuth flow id deliberately reports them as expired, which used to
+            // terminate every remote OpenAI login before its callback arrived.
+            const st = getLoginStatus("chatgpt", result.flowId);
             if (st.done && st.loggedIn) {
               const { getCredential } = await import("../oauth/store");
               const cred = getCredential("chatgpt");
