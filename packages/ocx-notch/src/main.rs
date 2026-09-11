@@ -13,7 +13,8 @@ use crate::models::{
     ModelRow, ModelVisibilityRequest, ModelsState, SelectedModelsResponse, VisibilityTarget,
 };
 use crate::subagents::{
-    InjectionModelResponse, SubagentModelsRequest, SubagentModelsResponse, SubagentState,
+    InjectionModelResponse, MultiAgentModeResponse, SubagentModelsRequest, SubagentModelsResponse,
+    SubagentState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -131,6 +132,7 @@ enum SubagentHit {
     CycleEffort,
     ToggleGuidance,
     ToggleSyncDefaults,
+    CycleMultiAgentMode,
     Save,
 }
 
@@ -306,7 +308,16 @@ enum Update {
     Pools(Vec<AccountPool>),
     OpenAiPool(Result<AccountPool, String>),
     Models(Result<(Vec<ModelRow>, SelectedModelsResponse), String>),
-    Subagents(Result<(SubagentModelsResponse, InjectionModelResponse), String>),
+    Subagents(
+        Result<
+            (
+                SubagentModelsResponse,
+                InjectionModelResponse,
+                MultiAgentModeResponse,
+            ),
+            String,
+        >,
+    ),
 }
 
 #[derive(Default)]
@@ -489,8 +500,8 @@ impl App {
                 Update::Subagents(result) => {
                     if !self.state.subagents.saving {
                         match result {
-                            Ok((models, injection)) => {
-                                self.state.subagents.refresh(models, injection);
+                            Ok((models, injection, mode)) => {
+                                self.state.subagents.refresh(models, injection, mode);
                             }
                             Err(error) => self.state.subagents.message = Some(error),
                         }
@@ -841,9 +852,35 @@ fn main() {
                 }
             });
         }
+        Ok(Cli::SetSubagentMode(mode)) => {
+            let request = subagents::MultiAgentModeRequest {
+                multi_agent_mode: mode,
+            };
+            std::process::exit(
+                match api::put_json::<MultiAgentModeResponse>("/api/v2", &request) {
+                    Ok(response) if response.multi_agent_mode == mode => {
+                        println!("Subagent mode set to {}", mode.label());
+                        0
+                    }
+                    Ok(response) => {
+                        eprintln!(
+                            "OCX reported subagent mode {} after the update",
+                            response.multi_agent_mode.label()
+                        );
+                        1
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        1
+                    }
+                },
+            );
+        }
         Err(error) => {
             eprintln!("{error}");
-            eprintln!("usage: ocx-notch [--connect <http://host:port> | --local]");
+            eprintln!(
+                "usage: ocx-notch [--connect <http://host:port> | --local | --set-subagent-mode <v1|default|v2>]"
+            );
             std::process::exit(2);
         }
     }
@@ -866,6 +903,8 @@ enum Cli {
     Connect(String),
     /// `--local`: return to local mode and drop the stored credential.
     Local,
+    /// Update the selected local or remote OCX through its management API.
+    SetSubagentMode(subagents::MultiAgentMode),
 }
 
 fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
@@ -878,6 +917,16 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
         "--reconnect" => Cli::Reconnect,
         "--disconnect" => Cli::Disconnect,
         "--codex-token" => Cli::CodexToken(args.next().ok_or("Missing server origin")?),
+        "--set-subagent-mode" => {
+            let value = args.next().ok_or("Missing subagent mode")?;
+            let mode = match value.to_ascii_lowercase().as_str() {
+                "v1" => subagents::MultiAgentMode::V1,
+                "default" => subagents::MultiAgentMode::Default,
+                "v2" => subagents::MultiAgentMode::V2,
+                _ => return Err("Subagent mode must be v1, default, or v2".into()),
+            };
+            Cli::SetSubagentMode(mode)
+        }
         // The token is deliberately not accepted here: an argv credential would
         // be visible to every process on the machine.
         "--connect" | "--remote-server" => {
@@ -1133,8 +1182,9 @@ fn start_workers(
                 let subagents = (|| {
                     let models = api::get_json("/api/subagent-models", 30_000)?;
                     let injection = api::get_json("/api/injection-model", 30_000)?;
+                    let mode = api::get_json("/api/v2", 30_000)?;
                     api::sync_codex_catalog()?;
-                    Ok((models, injection))
+                    Ok((models, injection, mode))
                 })();
                 send_update(hwnd, &api_tx, Update::Subagents(subagents));
                 last_subagents = Instant::now();
@@ -1328,6 +1378,36 @@ fn reset_credit_action_rect(account_action: RECT) -> RECT {
         right: account_action.right + ACCOUNT_ACTION_GAP + RESET_CREDIT_ACTION_WIDTH,
         bottom: account_action.bottom,
     }
+}
+
+fn account_delete_rect(width: i32, top: i32) -> RECT {
+    RECT {
+        left: width - 62,
+        top,
+        right: width - 14,
+        bottom: top + ACCOUNT_ACTION_HEIGHT,
+    }
+}
+
+fn account_health_rect(width: i32, top: i32, can_delete: bool) -> RECT {
+    let right = if can_delete {
+        account_delete_rect(width, top).left - ACCOUNT_ACTION_GAP
+    } else {
+        width - 18
+    };
+    RECT {
+        left: width - 244,
+        top,
+        right,
+        bottom: top + ACCOUNT_ACTION_HEIGHT,
+    }
+}
+
+fn account_identity_right(width: i32, action_left: Option<i32>, reauth_left: Option<i32>) -> i32 {
+    action_left
+        .or(reauth_left)
+        .map(|left| left - ACCOUNT_ACTION_GAP)
+        .unwrap_or_else(|| account_health_rect(width, 0, false).left - ACCOUNT_ACTION_GAP)
 }
 
 fn reauth_action_rect(width: i32, top: i32) -> RECT {
@@ -4647,13 +4727,9 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     let account_height = account_height(&account);
                     let reauth = reauth_eligible(&provider.name, &account);
                     let reauth_rect = reauth_action_rect(width, y);
-                    if !account.is_main && account.id != "__main__" {
-                        let rect = RECT {
-                            left: width - 62,
-                            top: y,
-                            right: width - 14,
-                            bottom: y + 30,
-                        };
+                    let can_delete = !account.is_main && account.id != "__main__";
+                    if can_delete {
+                        let rect = account_delete_rect(width, y);
                         let control = AccountSwitchControl {
                             provider: provider.name.clone(),
                             id: account.id.clone(),
@@ -4690,13 +4766,11 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                         .account_switch_mutations
                         .contains(&account_switch_mutation_key(&provider.name, &account.id));
                     set_text_color(dc, 0x00c7cbd2);
-                    let identity_right = if show_action_control {
-                        action_rect.left - ACCOUNT_ACTION_GAP
-                    } else if reauth {
-                        reauth_rect.left - ACCOUNT_ACTION_GAP
-                    } else {
-                        width - 250
-                    };
+                    let identity_right = account_identity_right(
+                        width,
+                        show_action_control.then_some(action_rect.left),
+                        reauth.then_some(reauth_rect.left),
+                    );
                     draw_text(
                         dc,
                         &account.identity,
@@ -4822,12 +4896,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     draw_text(
                         dc,
                         &health,
-                        RECT {
-                            left: width - 244,
-                            top: y,
-                            right: width - 18,
-                            bottom: y + 30,
-                        },
+                        account_health_rect(width, y, can_delete),
                         DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                     );
                     let columns = quota_columns(account.quota.as_ref());
@@ -5085,11 +5154,14 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
             let refreshed = (|| {
                 let models = api::get_json("/api/subagent-models", 30_000)?;
                 let injection = api::get_json("/api/injection-model", 30_000)?;
+                let mode = api::get_json("/api/v2", 30_000)?;
                 api::sync_codex_catalog()?;
-                Ok::<_, String>((models, injection))
+                Ok::<_, String>((models, injection, mode))
             })();
             with_app(|app| match refreshed {
-                Ok((models, injection)) => app.state.subagents.refresh(models, injection),
+                Ok((models, injection, mode)) => {
+                    app.state.subagents.refresh(models, injection, mode)
+                }
                 Err(error) => {
                     app.state.subagents.message = Some(format!("Refresh failed: {error}"))
                 }
@@ -5415,12 +5487,14 @@ fn handle_subagent_action(hwnd: HWND, action: SubagentHit) {
             SubagentHit::CycleEffort => app.state.subagents.cycle_effort(),
             SubagentHit::ToggleGuidance => app.state.subagents.toggle_guidance(),
             SubagentHit::ToggleSyncDefaults => app.state.subagents.toggle_sync_defaults(),
+            SubagentHit::CycleMultiAgentMode => app.state.subagents.cycle_multi_agent_mode(),
             SubagentHit::Save if app.state.subagents.dirty => {
                 app.state.subagents.saving = true;
                 app.state.subagents.message = None;
                 save = Some((
                     app.state.subagents.chosen.clone(),
                     app.state.subagents.injection_request(),
+                    app.state.subagents.mode_request(),
                 ));
             }
             SubagentHit::Save => {}
@@ -5430,28 +5504,38 @@ fn handle_subagent_action(hwnd: HWND, action: SubagentHit) {
         resize_for_state(hwnd);
         let _ = InvalidateRect(hwnd, None, false);
     }
-    let Some((chosen, injection)) = save else {
+    let Some((chosen, injection, mode)) = save else {
         return;
     };
     let hwnd_value = hwnd.0 as isize;
     thread::spawn(move || {
-        let result: Result<(SubagentModelsResponse, InjectionModelResponse), String> = (|| {
+        let result: Result<
+            (
+                SubagentModelsResponse,
+                InjectionModelResponse,
+                MultiAgentModeResponse,
+            ),
+            String,
+        > = (|| {
             let _: serde_json::Value = api::put_json(
                 "/api/subagent-models",
                 &SubagentModelsRequest { models: &chosen },
             )?;
             let _: serde_json::Value = api::put_json("/api/injection-model", &injection)?;
+            let _: MultiAgentModeResponse = api::put_json("/api/v2", &mode)?;
             let models = api::get_json("/api/subagent-models", 30_000)?;
             let injection = api::get_json("/api/injection-model", 30_000)?;
+            let mode = api::get_json("/api/v2", 30_000)?;
             api::sync_codex_catalog()?;
-            Ok((models, injection))
+            Ok((models, injection, mode))
         })();
-        // Keep edited values on failure so a partial two-endpoint save can be
-        // retried and converge both server settings on the same selection.
+        // Keep edited values on failure so a partial three-endpoint save can be
+        // retried and converge all server settings on the same selection.
         with_app(|app| match result {
-            Ok((models, injection)) => {
+            Ok((models, injection, mode)) => {
                 app.state.subagents.apply_models(models);
                 app.state.subagents.apply_injection(injection);
+                app.state.subagents.apply_mode(mode);
                 app.state.subagents.mark_saved();
             }
             Err(error) => {
@@ -5478,7 +5562,7 @@ fn subagent_content_height(state: &SubagentState) -> i32 {
     64 + state.chosen.len() as i32 * 38
         + 34
         + available * 34
-        + 234
+        + 276
         + if state.message.is_some() { 34 } else { 0 }
 }
 
@@ -5743,6 +5827,13 @@ unsafe fn draw_subagents(
             SubagentHit::ToggleSyncDefaults,
             state.model.is_some(),
             state.sync_codex_defaults,
+        ),
+        (
+            "Subagent mode",
+            state.multi_agent_mode.label(),
+            SubagentHit::CycleMultiAgentMode,
+            true,
+            state.multi_agent_mode != subagents::MultiAgentMode::Default,
         ),
     ] {
         let row = RECT {
@@ -7629,6 +7720,15 @@ mod account_control_tests {
         );
         assert_eq!(parse_cli(vec!["--local".into()]).unwrap(), Cli::Local);
         assert_eq!(
+            parse_cli(vec!["--set-subagent-mode".into(), "v1".into()]).unwrap(),
+            Cli::SetSubagentMode(subagents::MultiAgentMode::V1)
+        );
+        assert_eq!(
+            parse_cli(vec!["--set-subagent-mode".into(), "DEFAULT".into()]).unwrap(),
+            Cli::SetSubagentMode(subagents::MultiAgentMode::Default)
+        );
+        assert!(parse_cli(vec!["--set-subagent-mode".into(), "v3".into()]).is_err());
+        assert_eq!(
             parse_cli(vec!["--connect".into(), "http://10.0.0.5:10100".into()]).unwrap(),
             Cli::Connect("http://10.0.0.5:10100".into())
         );
@@ -8137,6 +8237,40 @@ mod account_control_tests {
         assert_eq!(rect.left, ACCOUNT_IDENTITY_LEFT + 96 + ACCOUNT_ACTION_GAP);
         assert_eq!(rect.right - rect.left, ACCOUNT_ACTION_WIDTH);
         assert!(rect.right <= DEFAULT_WIDTH - 244);
+    }
+
+    #[test]
+    fn deletable_account_health_stays_clear_of_delete_action() {
+        for width in [MIN_WIDTH, DEFAULT_WIDTH] {
+            let health = account_health_rect(width, 120, true);
+            let delete = account_delete_rect(width, 120);
+
+            assert!(health.left < health.right);
+            assert_eq!(delete.left - health.right, ACCOUNT_ACTION_GAP);
+            assert_eq!(health.top, delete.top);
+            assert_eq!(health.bottom, delete.bottom);
+        }
+    }
+
+    #[test]
+    fn single_account_identity_has_room_before_health() {
+        for width in [MIN_WIDTH, DEFAULT_WIDTH] {
+            let identity_right = account_identity_right(width, None, None);
+            let health = account_health_rect(width, 120, false);
+
+            assert!(identity_right > ACCOUNT_IDENTITY_LEFT);
+            assert_eq!(health.left - identity_right, ACCOUNT_ACTION_GAP);
+        }
+    }
+
+    #[test]
+    fn account_identity_stops_before_action_or_reauth() {
+        assert_eq!(account_identity_right(DEFAULT_WIDTH, Some(210), None), 206);
+        assert_eq!(account_identity_right(DEFAULT_WIDTH, None, Some(300)), 296);
+        assert_eq!(
+            account_identity_right(DEFAULT_WIDTH, Some(210), Some(300)),
+            206
+        );
     }
 
     #[test]

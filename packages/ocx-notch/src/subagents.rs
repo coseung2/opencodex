@@ -41,6 +41,46 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MultiAgentMode {
+    V1,
+    #[default]
+    Default,
+    V2,
+}
+
+impl MultiAgentMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::V1 => "V1",
+            Self::Default => "Default",
+            Self::V2 => "V2",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::V1 => Self::V2,
+            Self::Default => Self::V1,
+            Self::V2 => Self::Default,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiAgentModeResponse {
+    #[serde(default)]
+    pub multi_agent_mode: MultiAgentMode,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiAgentModeRequest {
+    pub multi_agent_mode: MultiAgentMode,
+}
+
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct SubagentModelsRequest<'a> {
     pub models: &'a [String],
@@ -65,8 +105,10 @@ pub struct SubagentState {
     pub effort: Option<String>,
     pub guidance_enabled: bool,
     pub sync_codex_defaults: bool,
+    pub multi_agent_mode: MultiAgentMode,
     pub models_loaded: bool,
     pub injection_loaded: bool,
+    pub mode_loaded: bool,
     pub dirty: bool,
     pub saving: bool,
     pub message: Option<String>,
@@ -74,16 +116,26 @@ pub struct SubagentState {
 
 impl SubagentState {
     /// Refresh server-owned choices without discarding an unsaved local draft.
-    pub fn refresh(&mut self, models: SubagentModelsResponse, injection: InjectionModelResponse) {
+    pub fn refresh(
+        &mut self,
+        models: SubagentModelsResponse,
+        injection: InjectionModelResponse,
+        mode: MultiAgentModeResponse,
+    ) {
         if self.saving {
             return;
         }
-        let draft = self
-            .dirty
-            .then(|| (self.chosen.clone(), self.injection_request()));
+        let draft = self.dirty.then(|| {
+            (
+                self.chosen.clone(),
+                self.injection_request(),
+                self.multi_agent_mode,
+            )
+        });
         self.apply_models(models);
         self.apply_injection(injection);
-        if let Some((chosen, settings)) = draft {
+        self.apply_mode(mode);
+        if let Some((chosen, settings, multi_agent_mode)) = draft {
             self.chosen = chosen
                 .into_iter()
                 .filter(|id| self.available.contains(id))
@@ -99,6 +151,7 @@ impl SubagentState {
             self.guidance_enabled = settings.multi_agent_guidance_enabled;
             self.sync_codex_defaults =
                 settings.sync_codex_subagent_defaults && self.model.is_some();
+            self.multi_agent_mode = multi_agent_mode;
         }
         self.message = None;
     }
@@ -133,8 +186,13 @@ impl SubagentState {
         self.injection_loaded = true;
     }
 
+    pub fn apply_mode(&mut self, response: MultiAgentModeResponse) {
+        self.multi_agent_mode = response.multi_agent_mode;
+        self.mode_loaded = true;
+    }
+
     pub fn loaded(&self) -> bool {
-        self.models_loaded && self.injection_loaded
+        self.models_loaded && self.injection_loaded && self.mode_loaded
     }
 
     pub fn toggle_featured(&mut self, model: &str) -> bool {
@@ -196,6 +254,11 @@ impl SubagentState {
         }
     }
 
+    pub fn cycle_multi_agent_mode(&mut self) {
+        self.multi_agent_mode = self.multi_agent_mode.next();
+        self.mark_dirty();
+    }
+
     pub fn mark_saved(&mut self) {
         self.dirty = false;
         self.saving = false;
@@ -213,6 +276,12 @@ impl SubagentState {
             effort: self.effort.clone(),
             multi_agent_guidance_enabled: self.guidance_enabled,
             sync_codex_subagent_defaults: self.sync_codex_defaults && self.model.is_some(),
+        }
+    }
+
+    pub fn mode_request(&self) -> MultiAgentModeRequest {
+        MultiAgentModeRequest {
+            multi_agent_mode: self.multi_agent_mode,
         }
     }
 }
@@ -267,6 +336,9 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            MultiAgentModeResponse {
+                multi_agent_mode: MultiAgentMode::V2,
+            },
         );
         assert_eq!(state.available, ["p/kept", "p/new"]);
         assert_eq!(state.chosen, ["p/kept"]);
@@ -274,6 +346,7 @@ mod tests {
         assert_eq!(state.effort.as_deref(), Some("high"));
         assert!(!state.guidance_enabled);
         assert!(state.sync_codex_defaults);
+        assert_eq!(state.multi_agent_mode, MultiAgentMode::Default);
         assert!(state.dirty);
         assert!(state.loaded());
     }
@@ -290,6 +363,7 @@ mod tests {
         state.refresh(
             SubagentModelsResponse::default(),
             InjectionModelResponse::default(),
+            MultiAgentModeResponse::default(),
         );
         assert!(state.model.is_none());
         assert!(state.effort.is_none());
@@ -307,11 +381,22 @@ mod tests {
             saving: true,
             ..Default::default()
         };
-        state.refresh(models.clone(), InjectionModelResponse::default());
+        state.refresh(
+            models.clone(),
+            InjectionModelResponse::default(),
+            MultiAgentModeResponse::default(),
+        );
         assert!(!state.models_loaded);
         state.saving = false;
-        state.refresh(models, InjectionModelResponse::default());
+        state.refresh(
+            models,
+            InjectionModelResponse::default(),
+            MultiAgentModeResponse {
+                multi_agent_mode: MultiAgentMode::V1,
+            },
+        );
         assert_eq!(state.chosen, ["p/new"]);
+        assert_eq!(state.multi_agent_mode, MultiAgentMode::V1);
         assert!(!state.dirty);
     }
 
@@ -325,10 +410,13 @@ mod tests {
             r#"{"model":"openai/gpt-5.6-sol","effort":"high","efforts":["low","high"],"available":[{"provider":"openai","model":"gpt-5.6-sol","namespaced":"openai/gpt-5.6-sol"}]}"#,
         )
         .unwrap();
+        let mode: MultiAgentModeResponse =
+            serde_json::from_str(r#"{"multiAgentMode":"v1"}"#).unwrap();
 
         assert_eq!(models.chosen, ["openai/gpt-5.6-sol"]);
         assert!(injection.multi_agent_guidance_enabled);
         assert_eq!(injection.available[0].namespaced, "openai/gpt-5.6-sol");
+        assert_eq!(mode.multi_agent_mode, MultiAgentMode::V1);
     }
 
     #[test]
@@ -377,6 +465,19 @@ mod tests {
     }
 
     #[test]
+    fn multi_agent_mode_cycles_through_all_server_options() {
+        let mut state = SubagentState::default();
+        assert_eq!(state.multi_agent_mode, MultiAgentMode::Default);
+        state.cycle_multi_agent_mode();
+        assert_eq!(state.multi_agent_mode, MultiAgentMode::V1);
+        state.cycle_multi_agent_mode();
+        assert_eq!(state.multi_agent_mode, MultiAgentMode::V2);
+        state.cycle_multi_agent_mode();
+        assert_eq!(state.multi_agent_mode, MultiAgentMode::Default);
+        assert!(state.dirty);
+    }
+
+    #[test]
     fn save_payloads_match_both_put_contracts() {
         let state = SubagentState {
             chosen: vec!["openai/gpt-5.6-sol".into(), "kiro/auto".into()],
@@ -401,6 +502,13 @@ mod tests {
                 "multiAgentGuidanceEnabled":false,
                 "syncCodexSubagentDefaults":true
             })
+        );
+        assert_eq!(
+            serde_json::to_value(MultiAgentModeRequest {
+                multi_agent_mode: MultiAgentMode::V1,
+            })
+            .unwrap(),
+            serde_json::json!({"multiAgentMode":"v1"})
         );
     }
 }
