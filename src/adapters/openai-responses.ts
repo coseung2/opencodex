@@ -12,6 +12,7 @@ import { isXaiSchemaTarget, normalizeXaiToolParameters, XaiToolSchemaCompatibili
 import { normalizeXaiResponsesWebSearch } from "./xai-web-search";
 import { collectResponsesToolGroups } from "../responses/tool-groups";
 import { lowerXaiResponsesCustomTools } from "../responses/xai-custom-tool-compat";
+import { lowerXaiResponsesNamespaceTools } from "../responses/xai-namespace-tool-compat";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
@@ -1133,6 +1134,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = buildRoutedCompactionBody(outBody);
       }
       if (isXaiResponsesDestination(provider)) {
+        outBody = lowerXaiResponsesNamespaceTools(outBody).body;
         outBody = lowerXaiResponsesCustomTools(outBody).body;
       }
       let sanitizedBody = stripXaiOAuthOnlyParams(

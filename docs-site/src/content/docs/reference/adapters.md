@@ -52,9 +52,11 @@ streams the response back **untranslated**.
   that also powers the [sidecars](/guides/sidecars/).
 - xAI OAuth routes Grok 4.5/4.6 Responses clients through the subscription gateway's native
   Responses wire. The adapter removes xAI-rejected OpenAI-only controls, normalizes hosted search,
-  applies bounded/lossless root-schema flattening only on the Grok CLI proxy, and lowers client
-  custom tools such as `apply_patch` to functions upstream before restoring their Responses custom
-  call identity for the client. API-key and translated Chat/Anthropic requests keep their existing wire.
+  applies bounded/lossless root-schema flattening only on the Grok CLI proxy, lowers client custom
+  tools such as `apply_patch` to functions, and flattens Codex `namespace` tool groups to safe xAI
+  function aliases before restoring both custom-call and namespace identity for the client. The same
+  request-shape compatibility applies to the public xAI Responses endpoint; translated Chat/Anthropic
+  requests keep their existing wire.
 
 ## `anthropic`
 
