@@ -761,6 +761,7 @@ const apiKeyEntrySchema = z.object({
   id: z.string().catch(""),
   name: z.string().catch(""),
   createdAt: z.string().catch(""),
+  role: z.enum(["user", "viewer", "operator", "admin"]).catch("user"),
 }).passthrough();
 
 const configSchema = z.object({

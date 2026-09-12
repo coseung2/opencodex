@@ -194,6 +194,31 @@ function equalSecret(actual: string, expected: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+export type ManagementRole = "user" | "viewer" | "operator" | "admin";
+
+function presentedToken(req: Request): string {
+  return req.headers.get("x-opencodex-api-key")?.trim()
+    || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim()
+    || "";
+}
+
+/** Resolve the role without treating a data-plane-only key as an admin credential. */
+export function managementRoleForRequest(
+  req: Request,
+  config: OcxConfig,
+  state: ManagementAuthState,
+): ManagementRole | null {
+  const actual = presentedToken(req);
+  if (!actual || !state.available) return null;
+  if (equalSecret(actual, state.token)) return "admin";
+  removeExpiredSessions(state);
+  if (state.sessions.has(actual)) return "admin";
+  for (const entry of config.apiKeys ?? []) {
+    if (equalSecret(actual, entry.key)) return entry.role ?? "user";
+  }
+  return null;
+}
+
 function removeExpiredSessions(state: Extract<ManagementAuthState, { available: true }>, now = Date.now()): void {
   for (const [token, session] of state.sessions) {
     if (session.expiresAt <= now) state.sessions.delete(token);
@@ -243,8 +268,7 @@ export function requireManagementAuth(
       hint: "Set OPENCODEX_ADMIN_AUTH_TOKEN to bypass file-backed admin token ACL hardening",
     }, { status: 503 });
   }
-  const actual = req.headers.get("x-opencodex-api-key")?.trim()
-    || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const actual = presentedToken(req);
   if (actual && equalSecret(actual, state.token)) return null;
   if (actual && config) {
     removeExpiredSessions(state);
@@ -262,6 +286,22 @@ export function requireManagementAuth(
         return null;
       }
     }
+    const keyRole = (config.apiKeys ?? []).find(entry => equalSecret(actual, entry.key))?.role;
+    if (keyRole === "viewer" || keyRole === "operator" || keyRole === "admin") return null;
   }
   return Response.json({ error: "opencodex admin token required" }, { status: 401 });
+}
+
+/** Enforce the deliberately small console RBAC policy after authentication. */
+export function requireManagementRole(
+  req: Request,
+  url: URL,
+  config: OcxConfig,
+  state: ManagementAuthState,
+): Response | null {
+  const role = managementRoleForRequest(req, config, state);
+  if (role === "admin") return null;
+  if ((role === "viewer" || role === "operator") && (req.method === "GET" || req.method === "HEAD")) return null;
+  if (role === "operator" && req.method === "POST" && url.pathname === "/api/providers/test") return null;
+  return Response.json({ error: "insufficient management permissions", requiredRole: "admin" }, { status: 403 });
 }

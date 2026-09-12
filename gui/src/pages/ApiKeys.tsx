@@ -104,6 +104,7 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
   const [copiedModelId, setCopiedModelId] = useState<string | null>(null);
   const [modelTests, setModelTests] = useState<ModelTests>({});
   const [newName, setNewName] = useState("");
+  const [newRole, setNewRole] = useState<"user" | "viewer" | "operator" | "admin">("user");
   const [creating, setCreating] = useState(false);
   const [newKey, setNewKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -214,7 +215,7 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
       const res = await fetch(`${apiBase}/api/keys`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: effectiveName || "default" }),
+        body: JSON.stringify({ name: effectiveName || "default", role: newRole }),
       });
       const data = await readJsonOrThrow<CreateKeyResponse>(res, t("api.createFailed"));
       if (typeof data?.key !== "string" || data.key.length === 0) {
@@ -433,6 +434,8 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
         copiedModelId={copiedModelId}
         modelTests={modelTests}
         onNewNameChange={setNewName}
+        newRole={newRole}
+        onNewRoleChange={setNewRole}
         onCreate={() => { void handleCreate(); }}
         onDismissNewKey={() => setNewKey(null)}
         onCopyKey={() => { void copyKey(); }}

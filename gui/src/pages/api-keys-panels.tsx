@@ -22,6 +22,7 @@ export function ApiKeysManagePanel({
   keysLoading = false,
   keysLoadFailed,
   newName,
+  newRole,
   creating,
   newKey,
   copied,
@@ -29,6 +30,7 @@ export function ApiKeysManagePanel({
   localeTag,
   showKeyList = true,
   onNewNameChange,
+  onNewRoleChange,
   onCreate,
   onDismissNewKey,
   onCopyKey,
@@ -40,6 +42,7 @@ export function ApiKeysManagePanel({
   keysLoading?: boolean;
   keysLoadFailed: boolean;
   newName: string;
+  newRole: "user" | "viewer" | "operator" | "admin";
   creating: boolean;
   newKey: string | null;
   copied: boolean;
@@ -48,6 +51,7 @@ export function ApiKeysManagePanel({
   /** When false, only generate / reveal-new-key UI is shown (workspace rail owns the list). */
   showKeyList?: boolean;
   onNewNameChange: (value: string) => void;
+  onNewRoleChange: (value: "user" | "viewer" | "operator" | "admin") => void;
   onCreate: () => void;
   onDismissNewKey: () => void;
   onCopyKey: () => void;
@@ -88,6 +92,12 @@ export function ApiKeysManagePanel({
             onChange={e => onNewNameChange(e.target.value)}
             className="input"
           />
+          <select className="input" value={newRole} onChange={e => onNewRoleChange(e.target.value as typeof newRole)} aria-label={t("api.key.roleLabel")}>
+            <option value="user">{t("api.key.roleUser")}</option>
+            <option value="viewer">{t("api.key.roleViewer")}</option>
+            <option value="operator">{t("api.key.roleOperator")}</option>
+            <option value="admin">{t("api.key.roleAdmin")}</option>
+          </select>
           <button type="button" className="btn btn-primary" onClick={onCreate} disabled={creating}>
             <IconPlus /> {creating ? t("api.generating") : t("api.generate")}
           </button>

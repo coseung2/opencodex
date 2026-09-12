@@ -537,6 +537,8 @@ export interface OcxApiKeyEntry {
   name: string;
   key: string;
   createdAt: string;
+  /** Management-console role; user keys remain data-plane-only. */
+  role?: "user" | "viewer" | "operator" | "admin";
 }
 
 export interface OcxConfig {
