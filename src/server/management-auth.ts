@@ -269,8 +269,7 @@ export function requireManagementAuth(
     }, { status: 503 });
   }
   const actual = presentedToken(req);
-  const role = config ? managementRoleForRequest(req, config, state) : null;
-  if (role === "admin" || role === "viewer" || role === "operator") return null;
+  if (actual && equalSecret(actual, state.token)) return null;
   if (actual && config) {
     removeExpiredSessions(state);
     const session = state.sessions.get(actual);
@@ -287,6 +286,8 @@ export function requireManagementAuth(
         return null;
       }
     }
+    const keyRole = (config.apiKeys ?? []).find(entry => equalSecret(actual, entry.key))?.role;
+    if (keyRole === "viewer" || keyRole === "operator" || keyRole === "admin") return null;
   }
   return Response.json({ error: "opencodex admin token required" }, { status: 401 });
 }
