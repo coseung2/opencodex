@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildKiroPayload } from "../src/adapters/kiro";
 import { KIRO_COMPLETION_TOOL_NAME, KIRO_EMPTY_TOOL_RESULT_MESSAGE } from "../src/adapters/kiro-constants";
 import { convertKiroToolContext, MAX_KIRO_TOOL_CATALOG_BYTES, MAX_KIRO_TOOL_COUNT } from "../src/adapters/kiro-tools";
+import { COMPACT_PROMPT } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
 import type { OcxMessage, OcxParsedRequest, OcxTool } from "../src/types";
 
@@ -143,6 +144,51 @@ describe("Kiro task continuity: code-mode contract and tool results", () => {
       { type: "custom_tool_call_output", call_id: "call_exec", output: "" },
     ], tools: [{ type: "custom", name: "exec", description: "JavaScript in a V8 isolate", format: { type: "text" } }] });
     expect(wire(parsed).results[0].content[0].text).toContain("not lost context");
+  });
+});
+
+describe("Kiro task continuity: commentary survives continuation and compaction", () => {
+  test("tool-result continuation keeps prior commentary decisions in provider history", () => {
+    const decision = "The migration already ran successfully; do not run it again. Next verify the generated files.";
+    const parsed = parseRequest({
+      model: "claude-sonnet-4.5",
+      stream: true,
+      tools: [{ type: "function", name: "read_file", description: "read", parameters: { type: "object" } }],
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "finish the migration work" }] },
+        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: decision }] },
+        { type: "function_call", call_id: "call_read", name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_read", output: "generated files exist" },
+      ],
+    });
+    const state = buildKiroPayload(parsed, undefined).payload.conversationState as {
+      history?: Array<{ assistantResponseMessage?: { content: string } }>;
+    };
+    expect(state.history?.some(entry => entry.assistantResponseMessage?.content === decision)).toBe(true);
+  });
+
+  test("compaction summarizer receives commentary that carries progress and next steps", () => {
+    const checkpoint = "Root cause confirmed in the Kiro adapter. Keep the completed edits; next run the focused regression suite.";
+    const parsed = parseRequest({
+      model: "claude-sonnet-4.5",
+      stream: false,
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "investigate the repeated-work bug" }] },
+        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: checkpoint }] },
+        { type: "compaction_trigger" },
+      ],
+    });
+    expect(parsed._compactionRequest).toBe(true);
+    // This is the same prompt append performed by the routed-compaction server path before the
+    // provider adapter is invoked. The Kiro payload must retain the preceding commentary so the
+    // summary can carry progress/decisions into the replacement history.
+    parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: 0 });
+    const state = buildKiroPayload(parsed, undefined).payload.conversationState as {
+      history?: Array<{ assistantResponseMessage?: { content: string } }>;
+      currentMessage: { userInputMessage: { content: string } };
+    };
+    expect(state.history?.some(entry => entry.assistantResponseMessage?.content === checkpoint)).toBe(true);
+    expect(state.currentMessage.userInputMessage.content).toContain("CONTEXT CHECKPOINT COMPACTION");
   });
 });
 

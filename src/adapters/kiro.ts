@@ -628,13 +628,12 @@ export function buildKiroPayload(
         .filter((b): b is OcxTextContent => b.type === "text")
         .map(b => b.text)
         .join("");
-      // Responses commentary is transient UI progress, not durable assistant state. Replaying it
-      // into every Kiro tool-result continuation teaches the model to repeat the same update and
-      // grows the upstream context on each client-driven tool round. Keep the structural tool use,
-      // but omit commentary prose from normal history. The adapter-owned completion retry appends
-      // its one replayable assistant turn without a commentary phase below, so that bounded path is
-      // preserved.
-      const text = aMsg.phase === "commentary" ? "" : rawText;
+      // Responses commentary is already-visible UI progress, but it can also carry durable task
+      // state: decisions, completed steps, rejected hypotheses, and the next action. Preserve it in
+      // Kiro's explicit history so tool-result continuations and compaction can resume from that
+      // state. Historical input is never re-emitted by the stream parser; the completion contract
+      // separately tells Kiro not to repeat or paraphrase an earlier progress update.
+      const text = rawText;
       const toolCalls = (aMsg.content || [])
         .filter((b): b is OcxToolCall => b.type === "toolCall");
       const toolUses: KiroToolUse[] = toolCalls.map(tc => {
@@ -648,7 +647,7 @@ export function buildKiroPayload(
       });
       if (!text && toolUses.length === 0) {
         const hasReasoning = aMsg.content.some(part => part.type === "thinking" && part.thinking.trim());
-        if (hasReasoning || aMsg.phase === "commentary") continue;
+        if (hasReasoning) continue;
       }
       pushAssistant(
         text,
@@ -2028,9 +2027,8 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       retryParsed.context.messages.push({
         role: "assistant",
         content: [{ type: "text" as const, text: assistantText }],
-        // Intentionally omit `phase:"commentary"`: normal client commentary is filtered from
-        // Kiro history, while this adapter-owned one-shot replay is the evidence the bounded
-        // completion retry must validate.
+        // This adapter-owned one-shot replay is durable evidence for the bounded completion retry.
+        // It is not emitted by history replay; only the provider's new response is streamed.
         model: retryParsed.modelId,
         timestamp: Date.now(),
       });

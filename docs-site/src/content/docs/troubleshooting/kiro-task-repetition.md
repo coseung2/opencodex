@@ -29,7 +29,9 @@ Below the budget, declaration order is unchanged. Namespaced MCP shell tools do 
 
 Kiro's existing private completion channel still ends the turn. Progress text is not a final answer, and a delivered final answer must not reopen the task. Real user follow-ups continue normally. This correction does not discard tool history, change reasoning-blob replay, remove repeated calls solely because their arguments match, or introduce automatic command retries.
 
-The adapter tests reproduce missing-output guidance and catalog eviction deterministically; they do not prove that every model-generated repetition has the same cause. If repetition persists after deploying the corrected build, distinguish whether the preceding output was empty, an error, a successful result, or an already-delivered final answer. Record the running version and sanitized request identifiers, not credentials or raw private prompts.
+Assistant messages marked `phase: "commentary"` are preserved in the Kiro history. They can contain decisions, completed steps, rejected hypotheses, and the next unfinished action, so dropping them can make a later tool-result round look as if the task state was lost. The same history is used when a routed compaction turn creates its checkpoint summary, so preserving commentary also prevents those decisions from disappearing at compaction. Historical commentary is input context only; OpenCodex does not automatically stream it to the UI again, and Kiro is explicitly instructed not to repeat or paraphrase earlier progress updates.
+
+The adapter tests reproduce missing-output guidance, catalog eviction, commentary loss, and compaction-context loss deterministically; they do not prove that every model-generated repetition has the same cause. If repetition persists after deploying the corrected build, distinguish whether the preceding output was empty, an error, a successful result, an already-delivered final answer, or a compaction boundary. Record the running version and sanitized request identifiers, not credentials or raw private prompts.
 
 ## Upstream references
 
