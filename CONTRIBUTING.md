@@ -10,14 +10,17 @@ Thanks for helping with opencodex.
 
 ## Branches
 
-- `dev` — the only integration target for pull requests.
-- `main` — releases only; moves by maintainer-controlled promotion from `dev`.
+- This downstream fork uses its default `main` branch as the integration target
+  for pull requests.
+- Canonical upstream (`lidge-jun/opencodex`) uses `dev` as its integration
+  target; upstream `main` remains release-only and moves by promotion from
+  upstream `dev`.
 - `preview` — prerelease train.
 
 The `dev2-go` Go native-port line has been retired. Its history is archived at
-[lidge-jun/opencodex-go-archive](https://github.com/lidge-jun/opencodex-go-archive),
-and everything now goes to `dev`. See [`MAINTAINERS.md`](./MAINTAINERS.md) for
-the reasoning.
+[lidge-jun/opencodex-go-archive](https://github.com/lidge-jun/opencodex-go-archive).
+New work goes to the active integration branch (`main` in this fork, `dev`
+upstream). See [`MAINTAINERS.md`](./MAINTAINERS.md) for the reasoning.
 
 Rebase pull requests are welcome: bringing a stale branch onto the current head
 is normal contribution. Note the source commits in the description.

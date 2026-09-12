@@ -97,6 +97,11 @@ export type RunOptions = {
   openPulls?: unknown[];
   /** Page-keyed open PR fixtures for `pulls.list` (1-based via array index). */
   openPullPages?: unknown[][];
+  /** Repository metadata carried by the pull_request_target webhook. */
+  repository?: {
+    fork?: boolean;
+    default_branch?: string;
+  };
 };
 
 /**
@@ -696,7 +701,8 @@ export async function runEnforcePrTarget(
         id: 987654321,
         name: "opencodex",
         full_name: "lidge-jun/opencodex",
-        default_branch: "main",
+        fork: options.repository?.fork ?? false,
+        default_branch: options.repository?.default_branch ?? "main",
         private: false,
         owner: { login: "lidge-jun", id: 12345, type: "User" },
         html_url: "https://github.com/lidge-jun/opencodex",

@@ -136,28 +136,34 @@ non-trivial change. CI runs these on Linux, Windows, and macOS.
 
 ## Branch policy
 
-- `dev` — the single integration branch and the target for every pull request.
-- `main` — release branch. It only moves by maintainer-controlled promotion
-  from `dev` (releases, docs deploys). Do not open feature PRs against `main`.
+- **This downstream fork (`coseung2/opencodex`)** uses its repository default
+  branch as the integration target. The default branch is `main`, so ordinary
+  pull requests in this repository target `main`.
+- **Canonical upstream (`lidge-jun/opencodex`)** keeps `dev` as its single
+  integration branch; upstream `main` moves by maintainer-controlled promotion
+  from `dev`.
 - `preview` — prerelease train (`x.y.z-preview.*` versions).
 
-Bun-native TypeScript on `dev` is the only runtime line. If native code
-returns, the expectation is an incremental module (for example Rust via N-API)
-landing on `dev`, not a second full-runtime branch.
+Bun-native TypeScript is the only runtime line. New work lands on the active
+integration branch (`main` in this fork, `dev` upstream), not on a second
+full-runtime branch.
 
 Stacked child pull requests that target another **open** PR's head branch are
 an intentional review workflow, not an alternate integration line. The
 **`enforce-target`** check skips the wrong-base gate for those children; after
-the parent lands or closes, retarget the child to `dev`.
+the parent lands or closes, retarget the child to the repository integration
+branch (`main` here, `dev` upstream).
 
 Rebase pull requests are welcome. Bringing a stale branch onto the current head
 is ordinary maintenance — open it as a normal pull request and name the source
 commits in the description.
 
-The **`enforce-target`** CI check rejects pull requests whose head
-ancestry sits on the **`main`** tip while far behind **`dev`**, and rejects
-empty, thin, or malformed descriptions; authors with repository push permission
-skip the ancestry heuristic only. As with approval requirements in
+The **`enforce-target`** CI check resolves the target policy from repository
+metadata: downstream forks accept their default branch, while canonical upstream
+accepts `dev`. Upstream also rejects pull requests whose head ancestry sits on
+the **`main`** tip while far behind **`dev`**. All repositories reject empty,
+thin, or malformed descriptions; authors with repository push permission skip
+the ancestry heuristic only. As with approval requirements in
 [`MAINTAINERS.md`](./MAINTAINERS.md), this is enforced by convention until
 branch protection is configured.
 
@@ -174,8 +180,9 @@ reviewers (Codex, CodeRabbit).
   language. Be detailed and specific: name the file and line, describe the
   concrete failure mode, and suggest a fix. Avoid vague or purely stylistic
   commentary.
-- **Branch targeting:** flag any pull request that does not target `dev`
-  (releases and maintainer promotions are the only exceptions).
+- **Branch targeting:** in this downstream fork, flag ordinary pull requests
+  that do not target `main` (stacked children are the documented exception).
+  Canonical upstream reviews continue to require `dev`.
 - **Security boundary (highest priority):** changes touching authentication,
   credential/token handling, OAuth flows, GitHub Actions workflows, release
   automation (`scripts/release.ts`, `.github/workflows/release.yml`), or

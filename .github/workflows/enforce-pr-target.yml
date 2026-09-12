@@ -42,8 +42,15 @@ jobs:
               path.join(process.cwd(), ".github", "scripts", "pr-quality.cjs"),
             );
 
-            const ALLOWED_BASES = ["dev"];
-            const DEFAULT_BASE = "dev";
+            const repository = context.payload.repository;
+            const IS_DOWNSTREAM_FORK = repository.fork === true;
+            const DEFAULT_BASE = IS_DOWNSTREAM_FORK
+              ? repository.default_branch
+              : "dev";
+            if (typeof DEFAULT_BASE !== "string" || !DEFAULT_BASE.trim()) {
+              throw new Error("Repository default branch is unavailable; refusing to guess a PR target branch.");
+            }
+            const ALLOWED_BASES = [DEFAULT_BASE];
             const TITLE_PREFIX = "[WRONG BRANCH] ";
             const COMMENT_MARKER = "<!-- pr-quality-enforcer -->";
             const LEGACY_COMMENT_MARKER = "<!-- wrong-branch-enforcer -->";
@@ -206,12 +213,15 @@ jobs:
               const sections = [];
 
               if (failures.some(failure => failure.code === "wrong_base")) {
+                const branchPolicyExplanation = IS_DOWNSTREAM_FORK
+                  ? `This downstream fork accepts contributions into its default branch ${inlineCode(DEFAULT_BASE)}.`
+                  : `All contributions go to ${inlineCode(DEFAULT_BASE)}; \`main\` receives only release promotions.`;
                 sections.push(
                   "⚠️ **Wrong target branch**",
                   "",
                   `This pull request currently targets ${inlineCode(pr.base.ref)}, but pull requests must target one of ${ALLOWED_BASES.map(inlineCode).join(" or ")}.`,
                   "",
-                  `@${pr.user.login} Please retarget this PR to ${inlineCode(DEFAULT_BASE)}. All contributions go to ${inlineCode(DEFAULT_BASE)}; \`main\` receives only release promotions. See our [Contributing guide](https://lidge-jun.github.io/opencodex/contributing/) for details. Thanks! 🙏`
+                  `@${pr.user.login} Please retarget this PR to ${inlineCode(DEFAULT_BASE)}. ${branchPolicyExplanation} See our [Contributing guide](https://opencodex.me/contributing/) for details. Thanks! 🙏`
                 );
               }
 

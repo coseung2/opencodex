@@ -80,18 +80,24 @@ bun run release:watch               # 가장 최근 Release workflow run 감시
 
 ## 브랜치
 
-- `dev` — 유일한 통합 대상. 모든 PR을 여기로 올립니다.
-- `main` — 릴리즈 전용. `dev`에서 메인테이너가 승격시킬 때만 움직이며, 기능 PR을 직접
-  올리지 않습니다.
+- 이 downstream fork는 저장소 기본 브랜치인 `main`을 통합 대상으로 사용합니다. 이
+  저장소의 PR은 `main`을 대상으로 올립니다.
+- canonical upstream(`lidge-jun/opencodex`)은 `dev`를 유일한 통합 대상으로 사용합니다.
+  upstream `main`은 릴리즈 전용이며 upstream `dev`에서 메인테이너가 승격할 때만 움직입니다.
 - `preview` — 프리릴리즈 트레인.
 
 Go 네이티브 포트를 담당했던 `dev2-go`는 정리했고, 두 라인을 동시에 유지하던 정책도
 함께 끝났습니다. 히스토리는
 [lidge-jun/opencodex-go-archive](https://github.com/lidge-jun/opencodex-go-archive)에
-읽기 전용으로 남아 있습니다. 지금은 `dev`의 Bun 네이티브 TypeScript가 단일 런타임입니다.
+읽기 전용으로 남아 있습니다. Bun 네이티브 TypeScript가 단일 런타임이며, 새 작업은 이
+fork에서는 `main`, upstream에서는 `dev`에 반영합니다.
 
 리베이스 PR은 환영합니다. 오래된 브랜치를 현재 head 위로 리베이스하는 것은 잡음이 아니라
 정상적인 기여입니다. 설명란에 출처 커밋을 적어주세요.
+
+이 fork의 **`enforce-target`** 워크플로는 신뢰된 저장소 이벤트에서 fork 여부와 기본 브랜치를
+읽어 `main`을 허용합니다. canonical upstream에서는 기존대로 `dev`만 허용합니다. PR 코드가
+자기 대상 브랜치 정책을 바꾸도록 허용하지 않습니다.
 
 ## 컨벤션
 

@@ -95,15 +95,18 @@ bun run release:watch               # watch the newest Release workflow run
 
 ## Branches
 
-- `dev` — the only integration target. Open your pull request here.
-- `main` — releases only. It moves by maintainer-controlled promotion from
-  `dev`; do not open feature pull requests against it.
+- This downstream fork uses its default `main` branch as the integration target.
+  Open pull requests for this repository against `main`.
+- Canonical upstream (`lidge-jun/opencodex`) uses `dev` as its only integration
+  target. Upstream `main` remains release-only and moves by maintainer-controlled
+  promotion from upstream `dev`.
 - `preview` — the prerelease train.
 
 The `dev2-go` line that carried the Go native port has been retired, and the
 dual-track carry policy with it. Its history is published read-only at
 [lidge-jun/opencodex-go-archive](https://github.com/lidge-jun/opencodex-go-archive).
-Bun-native TypeScript on `dev` is the single runtime line.
+Bun-native TypeScript is the single runtime line; new work lands on `main` in
+this fork and on `dev` upstream.
 
 Rebase pull requests are welcome. Bringing a stale branch onto the current head
 is normal contribution rather than noise — note the source commits in the
@@ -111,8 +114,9 @@ description.
 
 ## Pull requests
 
-- Target **`dev`**. Do not open feature or fix pull requests against **`main`**.
-- Branch from the current **`dev`** tip, not from **`main`**. The required **`enforce-target`** check rejects heads whose merge base sits on the **`main`** tip while the branch is far behind the pull request base (the failure mode seen in #644).
+- In this downstream fork, target **`main`** and branch from the current **`main`** tip.
+- In canonical upstream, target **`dev`** and branch from the current **`dev`** tip, not upstream **`main`**. The required **`enforce-target`** check keeps this upstream stale-ancestry guard (the failure mode seen in #644).
+- The **`enforce-target`** workflow detects downstream forks from the trusted repository payload and accepts the fork's default branch; it does not infer policy from pull-request code.
 - Write a real description: a **Summary** of what changed and why, plus a **Test plan** (or equivalent substance). Empty bodies, placeholder-only text, and descriptions that use escaped `\n` instead of real line breaks fail the check.
 - Workflow changes in this repository use **`pull_request_target`**. Updated enforcement logic applies only after the workflow is promoted to the repository default branch — the same operational caveat documented in #631.
 

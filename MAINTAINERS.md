@@ -14,19 +14,25 @@ review and merge policy.
 The table describes project responsibilities. Actual repository permissions remain controlled
 through GitHub repository settings.
 
-`dev` is the only integration line. The former `dev2-go` carry duty is retired;
-see [The retired `dev2-go` line](#the-retired-dev2-go-line).
+Canonical upstream uses `dev` as its only integration line. This downstream
+fork uses the repository default branch as its local integration line; for
+`coseung2/opencodex` that branch is `main`. The former `dev2-go` carry duty is
+retired; see [The retired `dev2-go` line](#the-retired-dev2-go-line).
 
 ## Review and merge policy
 
-- Pull requests target `dev`. It is the only integration line, and promotion to
-  `main` happens only from `dev`. The target-branch check accepts `dev` alone.
+- Pull requests in this downstream fork target `main`. Canonical upstream pull
+  requests target `dev`, where promotion to upstream `main` remains
+  maintainer-controlled. The target-branch check enforces `dev` on the canonical
+  repository and the repository default branch on downstream forks.
 - The **`enforce-target`** CI check rejects pull requests whose head
-  ancestry sits on the **`main`** tip while far behind **`dev`**, and rejects
-  empty, thin, or malformed descriptions; authors with repository push
-  permission skip the ancestry heuristic only. As with the approval requirement
-  above, this is enforced by convention until branch protection is configured
-  (see the note under the change log).
+  ancestry sits on the **`main`** tip while far behind upstream **`dev`**, and
+  rejects empty, thin, or malformed descriptions; authors with repository push
+  permission skip the ancestry heuristic only. The stale-main ancestry case is
+  an upstream integration check; a downstream fork whose integration branch is
+  `main` does not create that `main`-to-`dev` mismatch. As with the approval
+  requirement above, this is enforced by convention until branch protection is
+  configured (see the note under the change log).
 - A pull request requires approval from at least one maintainer and successful required CI checks
   before merge.
 - Authors do not approve their own pull requests.
@@ -45,7 +51,9 @@ see [The retired `dev2-go` line](#the-retired-dev2-go-line).
   practical.
 - Direct pushes are reserved for maintainer-owned integration work, urgent repairs, or incident
   recovery. The same CI and documentation requirements still apply.
-- Promotion from `dev` to `main` and npm releases is maintainer-controlled.
+- Canonical upstream promotion from `dev` to `main` and all npm releases are
+  maintainer-controlled. This downstream fork integrates reviewed changes
+  directly into its default `main` branch.
 
 ## The retired `dev2-go` line
 

@@ -79,14 +79,15 @@ manual. When an investigation graduates into a maintained invariant, summarize i
 [`AGENTS.md`](../AGENTS.md) and [`MAINTAINERS.md`](../MAINTAINERS.md) are authoritative; this section
 exists so the repository-shape source of truth does not omit the shape of its own history.
 
-- `dev` is the single integration branch and the target for ordinary pull requests. `main` moves only
-  by maintainer-controlled promotion; `preview` carries the `x.y.z-preview.*` train. One documented
-  exception: a stacked child PR may target another **open** PR's head branch as a review workflow, and
-  is retargeted to `dev` once the parent lands or closes.
-- Bun-native TypeScript on `dev` is the only runtime line. The former Go native-runtime experiment is
+- Canonical upstream uses `dev` as the single integration branch. Downstream forks use their
+  repository default branch; `coseung2/opencodex` therefore accepts ordinary pull requests into
+  `main`. `preview` carries the `x.y.z-preview.*` train. One documented exception: a stacked child PR
+  may target another **open** PR's head branch as a review workflow, and is retargeted to the active
+  integration branch once the parent lands or closes.
+- Bun-native TypeScript on the active integration branch is the only runtime line. The former Go native-runtime experiment is
   retired and archived, and no `go/` tree is tracked in this repository; a local `go/` directory is
   untracked leftovers. If native code returns, the expectation is an incremental module landing on
-  `dev`, not a second full-runtime branch.
+  `main` in this fork (`dev` upstream), not a second full-runtime branch.
 - `devlog/` is a tracked directory in this repository — no submodule, no private mirror. Open units
   live in `devlog/_plan/`, closed units in `devlog/_fin/`, and external parity references in
   `devlog/_chase/` (the reference clones themselves are gitignored).

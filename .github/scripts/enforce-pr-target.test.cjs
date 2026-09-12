@@ -61,6 +61,13 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /collectPrQualityFailures/);
   });
 
+  it("keeps canonical dev policy while downstream forks use their default branch", () => {
+    assert.match(workflow, /repository\.fork\s*===\s*true/);
+    assert.match(workflow, /repository\.default_branch/);
+    assert.match(workflow, /:\s*"dev";/);
+    assert.match(workflow, /const ALLOWED_BASES = \[DEFAULT_BASE\]/);
+  });
+
   it("checks stacked bases via open PR heads before wrong_base enforcement", () => {
     assert.match(workflow, /stackedBase/);
     assert.match(workflow, /github\.rest\.pulls\.list/);

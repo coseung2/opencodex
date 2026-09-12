@@ -210,13 +210,13 @@ describe("GitHub Actions hardening", () => {
   test("PR checks reach every branch the target gate accepts", async () => {
     // These two lists have to move together with enforce-pr-target.yml. A PR
     // that passes the gate but triggers no checks is worse than one that is
-    // blocked: it looks reviewable and has nothing behind it. Pin the
-    // pull_request branch lists to the gate's allow-list plus main.
+    // blocked: it looks reviewable and has nothing behind it. Canonical upstream
+    // accepts dev; downstream forks accept their trusted repository default
+    // branch (main in this fork), so CI must cover both refs.
     const gate = await readText(".github/workflows/enforce-pr-target.yml");
-    const allowed = gate.match(/const ALLOWED_BASES = \[([^\]]*)\];/);
-    expect(allowed).not.toBeNull();
-    const bases = [...(allowed?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(m => m[1]);
-    expect(bases).toEqual(["dev"]);
+    expect(gate).toMatch(/const IS_DOWNSTREAM_FORK = repository\.fork === true;/);
+    expect(gate).toMatch(/const DEFAULT_BASE = IS_DOWNSTREAM_FORK\s*\? repository\.default_branch\s*:\s*"dev";/);
+    expect(gate).toMatch(/const ALLOWED_BASES = \[DEFAULT_BASE\];/);
 
     for (const path of [".github/workflows/ci.yml", ".github/workflows/service-lifecycle.yml"]) {
       const workflow = Bun.YAML.parse(await readText(path)) as {
@@ -812,11 +812,13 @@ describe("GitHub Actions hardening", () => {
     expect(script).toContain("collectPrQualityFailures");
     expect(script).toContain("github.rest.repos.getCollaboratorPermissionLevel");
     expect(script).toContain("github.rest.repos.compareCommitsWithBasehead");
-    // The allow-list is the gate's whole policy, so it is pinned by value and
-    // not just by shape: a widened list is the one edit that opens every base
-    // at once while every behavioural scenario below still passes.
-    expect(script).toMatch(/const ALLOWED_BASES = \["dev"\];/);
-    expect(script).toMatch(/const DEFAULT_BASE = "dev";/);
+    // The branch policy is intentionally two-mode and comes only from trusted
+    // repository metadata: canonical upstream stays on dev, while downstream
+    // forks use their configured default branch. The behavioral tests below pin
+    // both paths so this cannot silently widen to arbitrary PR-controlled refs.
+    expect(script).toMatch(/const IS_DOWNSTREAM_FORK = repository\.fork === true;/);
+    expect(script).toMatch(/const DEFAULT_BASE = IS_DOWNSTREAM_FORK\s*\? repository\.default_branch\s*:\s*"dev";/);
+    expect(script).toMatch(/const ALLOWED_BASES = \[DEFAULT_BASE\];/);
 
     // Every mutation targets the PR the event fired for. `pull_number` is the
     // only handle the script has, and an audit round repointed it at
@@ -987,6 +989,39 @@ describe("GitHub Actions hardening", () => {
       // Reads only. If a rewrite adds a write here, it appears in this list.
       expect(methodsOf(result)).toEqual(readsAllowedBase());
       expect(result.logs.join(" ")).toContain("All PR quality gates passed");
+    });
+
+    test("a downstream fork accepts its default branch as the integration target", async () => {
+      const result = await run({
+        pr: { base: { ref: "main" } },
+        repository: { fork: true, default_branch: "main" },
+      });
+
+      expect(methodsOf(result)).toEqual(readsAllowedBase());
+      expect(result.logs.join(" ")).toContain("All PR quality gates passed");
+      expect(result.warnings.some((w) => w.startsWith("setFailed:"))).toBe(false);
+    });
+
+    test("a downstream fork rejects non-default bases and points back to main", async () => {
+      const result = await run({
+        pr: { base: { ref: "dev" }, title: "Add a thing", draft: false },
+        repository: { fork: true, default_branch: "main" },
+      });
+
+      expect(methodsOf(result)).toEqual(readsWrongBase([
+        "issues.createComment",
+        "pulls.update",
+        "issues.updateComment",
+        "graphql",
+        "issues.updateComment",
+        "issues.updateComment",
+      ]));
+      const commentBody = lastEnforcerCommentBody(result);
+      expect(commentBody).toContain("must target one of `main`");
+      expect(commentBody).toContain("Please retarget this PR to `main`");
+      expect(commentBody).toContain("downstream fork accepts contributions into its default branch `main`");
+      expect(commentBody).not.toContain("main` receives only release promotions");
+      expect(result.warnings.some((w) => w.startsWith("setFailed:"))).toBe(true);
     });
 
     const HEAD_SHA = "3f1c0de0a6a4d0a3f9a1b2c3d4e5f60718293a4b";
@@ -1593,7 +1628,7 @@ describe("GitHub Actions hardening", () => {
       expect(commentBody).toContain("`main`");
       expect(commentBody).toContain("`dev`");
       // Points at the documentation rather than assuming the reader knows.
-      expect(commentBody).toContain("https://lidge-jun.github.io/opencodex/contributing/");
+      expect(commentBody).toContain("https://opencodex.me/contributing/");
       // And carries the state the next run needs.
       expect(commentBody).toContain(MARKER);
       expect(commentBody).toContain('"version":1');
