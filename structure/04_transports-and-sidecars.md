@@ -332,10 +332,12 @@ deadline for the next client replay. Retries are bounded to three attempts; hard
 ordinary 5xx errors are not replayed. Completion fallback rebuilds only replayable text, preserves
 the original user/tool-result turn for reasoning-only attempts, supplies neutral non-empty carriers
 for empty tool output, and validates role alternation plus tool-use/result pairing before transport.
-Responses assistant prose marked `phase: "commentary"` remains client-visible but is omitted from
-normal Kiro continuation history; paired tool uses and results remain intact. This keeps transient
-progress from conditioning repeated updates or inflating every later tool round, while the
-adapter-owned one-shot completion retry still replays its own validation text.
+Responses assistant prose marked `phase: "commentary"` remains client-visible and is also preserved
+in Kiro continuation history because it can carry durable task state: decisions, completed steps,
+rejected hypotheses, and the next unfinished action. Historical commentary is input context only; it
+is not re-emitted by the stream parser. The completion instruction still forbids repeating or
+paraphrasing an earlier progress update, so continuity and duplicate-UI suppression are separate
+concerns rather than solving repetition by deleting memory.
 
 Responses continuation replay records both its raw-item prefix and the parsed-message count produced
 by that prefix. If a client already supplied the exact stored prefix together with
@@ -347,12 +349,12 @@ inspection is therefore scoped to the turn that introduced an image; a later tur
 again when the pixels themselves are needed.
 
 [Decision Log]
-- 목적과 의도: Prevent Kiro progress from becoming a false final answer, reject invalid empty completion retries, stop duplicate Responses replay, retire completed-turn image bytes, and keep concurrent transient 429s from consuming independent retry budgets.
-- 기존 구현 및 제약 조건: Kiro text has no trustworthy phase; stop metadata arrives only at stream end; Kiro requires explicit history even with a stable conversation id; the private completion tool is adapter-owned; current user/tool-result images must survive; normal parallel tool traffic must remain parallel; client cancellation must interrupt all waits.
-- 검토한 주요 대안: Trust native `END_TURN`; infer completion from wording; send only a Kiro conversation id or current delta; keep every historical image forever; guess image relevance from prompt wording; serialize every Kiro request; leave throttling entirely to the client; manufacture empty assistant turns to preserve alternation.
-- 선택한 방식: Require the private completion tool on tool-enabled turns, rebuild only valid replayable wire turns, de-duplicate an exact already-supplied Responses prefix, mark its parsed-message boundary, omit image bytes only inside that completed prefix, validate the final conversation, and activate a shared cooldown plus single probe only after a transient throttle.
-- 다른 대안 대신 이 방식을 선택한 이유: Native stop metadata has mislabeled progress, wording and image-relevance heuristics are language-dependent, Kiro's wire still needs explicit text/tool history, global serialization harms healthy concurrency, client-only retries amplify bursts, and empty structural turns are rejected upstream.
-- 장점, 단점 및 영향: Completion phase is deterministic, duplicate history and stale visual context no longer accumulate, current-turn images and tool pairing remain valid, and throttled concurrency recovers without a request storm; some clean Kiro stops pay one bounded validation call, an exactly repeated completion answer may be shown twice to preserve `final_answer` semantics, and later pixel-level image follow-ups must reattach the image.
+- 목적과 의도: Prevent Kiro progress from becoming a false final answer without erasing progress that is needed as task memory; reject invalid empty completion retries, stop duplicate Responses replay, retire completed-turn image bytes, and keep concurrent transient 429s from consuming independent retry budgets.
+- 기존 구현 및 제약 조건: Kiro text has no trustworthy terminal phase; commentary can contain substantive state; stop metadata arrives only at stream end; Kiro requires explicit history even with a stable conversation id; the private completion tool is adapter-owned; current user/tool-result images must survive; normal parallel tool traffic must remain parallel; client cancellation must interrupt all waits.
+- 검토한 주요 대안: Trust native `END_TURN`; infer completion from wording; delete all historical commentary; send only a Kiro conversation id or current delta; keep every historical image forever; guess image relevance from prompt wording; serialize every Kiro request; leave throttling entirely to the client; manufacture empty assistant turns to preserve alternation.
+- 선택한 방식: Require the private completion tool on tool-enabled turns, preserve commentary as explicit Kiro history while instructing the model not to repeat it, rebuild only valid replayable wire turns, de-duplicate an exact already-supplied Responses prefix, mark its parsed-message boundary, omit image bytes only inside that completed prefix, validate the final conversation, and activate a shared cooldown plus single probe only after a transient throttle.
+- 다른 대안 대신 이 방식을 선택한 이유: Deleting commentary removed decisions and next-step state from later tool rounds and from compaction input; native stop metadata has mislabeled progress, wording and image-relevance heuristics are language-dependent, Kiro's wire still needs explicit text/tool history, global serialization harms healthy concurrency, client-only retries amplify bursts, and empty structural turns are rejected upstream.
+- 장점, 단점 및 영향: Completion phase is deterministic, task memory survives tool rounds and checkpoint compaction, historical commentary is not automatically emitted to the UI, duplicate input/image history stays bounded, current-turn images and tool pairing remain valid, and throttled concurrency recovers without a request storm; preserving commentary consumes context proportional to real progress text, some clean Kiro stops pay one bounded validation call, an exactly repeated completion answer may be shown twice to preserve `final_answer` semantics, and later pixel-level image follow-ups must reattach the image.
 
 Historical `web_search_call` output items from previous Responses turns are not converted into
 assistant text. They are UI/search-cell evidence, not a replayable search result payload; turning
@@ -499,7 +501,7 @@ A Responses `parallel_tool_calls: true` value permits parallelism; it does not r
 unsupported wire control. Kiro accepts the hint without sending any parallel-control field.
 The existing Kiro preset and catalog still advertise serialized execution. Plain text output
 controls are likewise tolerated; actual schema-constrained output remains unsupported.
-The current fork's commentary/image replay retirement and private completion contract are
+The current fork's commentary preservation, completed-prefix image retirement, and private completion contract are
 independent of these input compatibility rules and must remain intact. Adjacent outputs from one
 custom-tool invocation are collapsed into a single Kiro result only when their original caller ids
 match exactly; normalized wire ids are never used as the ownership proof. Any non-result message is
@@ -520,6 +522,64 @@ turning a finished answer back into an open work loop. The same terminal channel
 allowed for a blocking question when only the user can supply the missing decision, information, or
 clarification, so Kiro does not write the question as commentary and then invent its own answer to
 keep the work loop moving.
+
+### Kiro native boundary ownership
+
+Kiro is already a direct native transport: the proxy sends CodeWhisperer
+`GenerateAssistantResponse` requests to Kiro rather than routing through another compatibility
+server. The provider-specific code is split so a transport concern cannot silently redefine task
+memory:
+
+- `kiro-continuity.ts` owns delivered-answer termination, completion-mode selection, the private
+  terminal tool/instruction budget, and preparation of the one bounded completion-validation replay.
+  It has no credential, endpoint, fetch, or event-stream dependency.
+- `kiro-codec.ts` owns both directions of the Kiro wire translation: canonical OCX history to
+  `conversationState`, and AWS event-stream/Kiro events back to `AdapterEvent`. It preserves
+  commentary, tool/result ownership, redacted reasoning, replay-prefix image policy, usage/context
+  accounting, and completion-attempt parsing, but cannot resolve credentials or perform network I/O.
+- `kiro-transport.ts` owns account-derived region/profile selection, CLI-vs-IDE envelope choice,
+  native headers/user agents, `x-amz-target`, runtime endpoint selection, request serialization after
+  image normalization, safe request diagnostics, and retry-aware fetch. It does not decide whether
+  assistant text is durable history or terminal output.
+- `kiro.ts` is the stable `ProviderAdapter` facade. It keeps only the per-request state needed to
+  connect build/fetch/parse calls, constructs the bounded fallback through the three layers, and
+  re-exports the historical test/helper surface.
+
+The dependency rule is one-way: continuity contains policy without transport; codec may use
+continuity and pure Kiro helpers; transport may use codec; the facade composes all three. Architecture
+regressions are pinned by `tests/kiro-architecture-boundary.test.ts`. In particular, neither codec nor
+transport may erase a canonical assistant message because it looks like UI-only commentary.
+
+[Decision Log]
+- 목적과 의도: Make Kiro's direct native integration structurally comparable to other providers, while preventing UI/output policy from mutating durable task history.
+- 기존 구현 및 제약 조건: A single 2,163-line `kiro.ts` mixed task continuity, CodeWhisperer payload mapping, event decoding, auth/region/header construction, retries, and the ProviderAdapter facade. That coupling allowed a fork-only commentary dedupe change to delete model memory.
+- 검토한 주요 대안: Remove the Kiro adapter entirely; proxy the Codex Responses body directly to Kiro; split only helper files while keeping policy and transport mixed; or introduce explicit continuity/codec/transport boundaries behind the stable adapter surface.
+- 선택한 방식: Keep the required protocol translation but split policy, bidirectional wire codec, native transport, and facade, retaining stable exports and behavior.
+- 다른 대안 대신 이 방식을 선택한 이유: Kiro does not speak OpenAI Responses, so some translation is mandatory. Separating the translation from task policy preserves direct connectivity without repeating the memory-loss failure mode.
+- 장점, 단점 및 영향: The adapter entry point is small and reviewable, auth/network changes cannot redefine history policy, and future upstream fixes have a clearer landing zone. The codec remains intentionally large because request and response wire translation share Kiro-specific state and accounting; further splitting is optional only when it preserves this dependency direction.
+
+### Kiro code-mode continuity
+
+The bounded catalog preserves tool-search discoveries ahead of ordinary declarations and reserves
+space for Codex's bare freeform `exec`, including when discovered tools fill all 48 slots. The
+reservation participates in the 96,000-byte budget; an oversized exec fails explicitly. Under-budget
+catalog order is unchanged. Code-mode guidance is derived from emitted tool objects (freeform exec
+without a bare shell bridge), not from tool names alone or a result's self-reported name.
+
+Kiro supplies the nested-helper discovery and explicit text/notify echo contract before execution.
+After adjacent outputs have been grouped by original call identity, empty code-mode results receive
+one missing-output explanation. Errors, nonempty output order, and current or retired image evidence
+are preserved. Known host failures gain an idempotent recovery hint only in leading error context.
+No tool is executed or retried by this normalization. Commentary preservation, completed-prefix image retirement,
+encrypted reasoning pairing, private completion, and local delivered-answer termination remain independent.
+
+[Decision Log]
+- 목적과 의도: Stop missing code-mode output and catalog eviction from looking like lost task state.
+- 기존 구현 및 제약 조건: The fork had upstream final-answer termination but not the empty-exec repair or execution-path reservation; Kiro requires valid tool/result pairing and bounded catalogs.
+- 검토한 주요 대안: Replay every command, remove repeated calls by argument equality, merge all upstream adapter changes, or adapt the missing contracts only.
+- 선택한 방식: Port the scoped behavior from upstream #2819/#2475/#2750 and host-error follow-ups; normalize after original-id grouping, gate by emitted freeform ownership, and retain every existing terminal/replay guard.
+- 다른 대안 대신 이 방식을 선택한 이유: Repeated calls can be legitimate and replaying a side effect is unsafe. A name alone does not establish JavaScript semantics, and an execution-path reservation cannot bypass transport limits.
+- 장점, 단점 및 영향: The model receives actionable output and retains its execution path without new settings. Deterministic adapter regressions establish the missing contracts, not a guarantee that every live model loop has this cause.
 
 ## Kiro reasoning round-trip (`redactedContent`)
 

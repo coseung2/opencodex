@@ -106,6 +106,8 @@ Providers 페이지에서 계정을 추가하고, 다른 계정을 로그아웃�
 
 ### Kiro 자격 증명 가져오기
 
+작업을 반복하거나 도구 출력이 사라진 것처럼 보이면 [Kiro가 완료한 작업을 반복할 때](/ko/troubleshooting/kiro-task-repetition/)를 참고하세요. 계정 로그인과는 별도의 문제입니다.
+
 Kiro 로그인에는 Kiro CLI가 필요합니다. Unix에서는 `curl -fsSL https://cli.kiro.dev/install | bash`, Windows PowerShell에서는 `irm 'https://cli.kiro.dev/install.ps1' | iex`로 설치한 뒤 먼저 `kiro-cli login`으로 로그인하세요. `kiro-cli` 세션이 없으면 `ocx login kiro`는 붙여 넣은 액세스 토큰이나 `KIRO_ACCESS_TOKEN` 환경 변수로 폴백합니다.
 
 일반 `ocx login kiro` 가져오기는 CLI SQLite 데이터베이스를 읽기 전용으로 열며 데이터베이스, WAL, SHM을 수정하지 않습니다.

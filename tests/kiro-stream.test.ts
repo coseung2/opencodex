@@ -1758,18 +1758,19 @@ describe("kiro adapter — parseStream", () => {
     ]);
   });
 
-  test("does not replay Responses commentary prose across Kiro tool-result rounds", async () => {
-    const repeatedProgress = "I am checking the same state again.";
+  test("preserves Responses commentary as durable Kiro history across tool-result rounds", async () => {
+    const firstProgress = "Repository status is clean; next I will inspect the latest commit.";
+    const secondProgress = "The latest commit is abc123; next I will inspect the affected adapter.";
     const parsed = parseRequest({
       model: "claude-sonnet-4.5",
       stream: true,
       tools: [{ type: "function", ...bashTool }],
       input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "inspect the repository" }] },
-        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: repeatedProgress }] },
+        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: firstProgress }] },
         { type: "function_call", call_id: "call-1", name: "bash", arguments: '{"command":"git status"}' },
         { type: "function_call_output", call_id: "call-1", output: "clean" },
-        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: repeatedProgress }] },
+        { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: secondProgress }] },
         { type: "function_call", call_id: "call-2", name: "bash", arguments: '{"command":"git log -1"}' },
         { type: "function_call_output", call_id: "call-2", output: "abc123" },
       ],
@@ -1778,14 +1779,15 @@ describe("kiro adapter — parseStream", () => {
     const { body } = await createKiroAdapter(provider).buildRequest(parsed);
     const state = JSON.parse(body).conversationState;
 
-    expect(body).not.toContain(repeatedProgress);
+    expect(body).toContain(firstProgress);
+    expect(body).toContain(secondProgress);
     expect(state.history).toHaveLength(4);
     expect(state.history[1].assistantResponseMessage).toEqual({
-      content: "",
+      content: firstProgress,
       toolUses: [{ name: "bash", input: { command: "git status" }, toolUseId: "call-1" }],
     });
     expect(state.history[3].assistantResponseMessage).toEqual({
-      content: "",
+      content: secondProgress,
       toolUses: [{ name: "bash", input: { command: "git log -1" }, toolUseId: "call-2" }],
     });
     expect(state.currentMessage.userInputMessage.userInputMessageContext.toolResults).toEqual([
@@ -1793,18 +1795,37 @@ describe("kiro adapter — parseStream", () => {
     ]);
   });
 
-  test("drops commentary-only assistant turns instead of creating invalid empty Kiro history", async () => {
+  test("preserves commentary-only assistant turns as task memory", async () => {
     const { body } = await createKiroAdapter(provider).buildRequest(parsedWith([
       { role: "user", content: "first instruction" },
-      { role: "assistant", phase: "commentary", content: [{ type: "text", text: "Still checking." }] },
+      { role: "assistant", phase: "commentary", content: [{ type: "text", text: "Still checking; the first hypothesis was ruled out." }] },
       { role: "user", content: "second instruction" },
     ], [bashTool]));
     const state = JSON.parse(body).conversationState;
 
-    expect(body).not.toContain("Still checking.");
-    expect(state.history).toBeUndefined();
-    expect(state.currentMessage.userInputMessage.content).toContain("first instruction");
+    expect(state.history).toHaveLength(2);
+    expect(state.history[0].userInputMessage.content).toContain("first instruction");
+    expect(state.history[1].assistantResponseMessage.content).toBe("Still checking; the first hypothesis was ruled out.");
     expect(state.currentMessage.userInputMessage.content).toContain("second instruction");
+  });
+
+  test("preserved historical commentary is input-only and is not re-emitted by the stream parser", async () => {
+    const historical = "Already shown progress: configuration is valid; next inspect the adapter.";
+    const adapter = createKiroAdapter(provider);
+    const { body } = await adapter.buildRequest(parsedWith([
+      { role: "user", content: "inspect it" },
+      { role: "assistant", phase: "commentary", content: [{ type: "text", text: historical }] },
+      { role: "user", content: "continue" },
+    ]));
+    expect(body).toContain(historical);
+
+    const events = await collectAdapterEvents(adapter.parseStream(new Response(streamOf(
+      eventFrame({ content: "Fresh provider output only." }),
+    ))));
+    expect(events.filter(event => event.type === "text_delta")).toEqual([
+      { type: "text_delta", text: "Fresh provider output only." },
+    ]);
+    expect(events.some(event => event.type === "text_delta" && event.text.includes(historical))).toBe(false);
   });
 
   test("resumed tool-result usage remains current-turn only after payload repair", async () => {
