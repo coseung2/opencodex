@@ -230,6 +230,69 @@ describe("xAI OAuth native Responses streaming", () => {
     }
   });
 
+  test("flattens namespace tools for Grok and restores namespaced function calls to Codex", async () => {
+    let outboundBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url !== RESPONSES_ENDPOINT) return originalFetch(input, init);
+      outboundBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const item = {
+        type: "function_call",
+        id: "fc_read",
+        call_id: "call_read",
+        name: "mcp__workspace__read_file",
+        arguments: JSON.stringify({ path: "README.md" }),
+        status: "completed",
+      };
+      const frames = [
+        { type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress" } },
+        { type: "response.output_item.done", output_index: 0, item },
+        { type: "response.completed", response: { id: "resp_namespace", status: "completed", model: "grok-4.6", output: [item] } },
+      ];
+      return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n", {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const response = await originalFetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "xai/grok-4.6",
+          input: "read the file",
+          stream: true,
+          store: false,
+          tools: [{
+            type: "namespace",
+            name: "mcp__workspace",
+            tools: [{
+              type: "function",
+              name: "read_file",
+              description: "Read a file",
+              parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+            }],
+          }],
+        }),
+      });
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      const outboundTools = outboundBody?.tools as Array<Record<string, unknown>>;
+      expect(outboundTools).toEqual([expect.objectContaining({
+        type: "function",
+        name: "mcp__workspace__read_file",
+      })]);
+      expect(outboundTools.some(tool => tool.type === "namespace")).toBe(false);
+      expect(text).toContain('"namespace":"mcp__workspace"');
+      expect(text).toContain('"name":"read_file"');
+      expect(text).not.toContain('"name":"mcp__workspace__read_file"');
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("a selected Grok tool whose schema cannot be represented fails locally as a 400", async () => {
     let upstreamCalls = 0;
     globalThis.fetch = (async (input, init) => {

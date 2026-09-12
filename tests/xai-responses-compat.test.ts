@@ -6,6 +6,12 @@ import {
   lowerXaiResponsesCustomTools,
   restoreXaiCustomCallsInJson,
 } from "../src/responses/xai-custom-tool-compat";
+import {
+  createXaiNamespaceToolPayloadRewrite,
+  lowerXaiResponsesNamespaceTools,
+  restoreXaiNamespaceCallsInJson,
+  xaiResponsesNamespaceToolAliases,
+} from "../src/responses/xai-namespace-tool-compat";
 import { withTestTranslatorBudget } from "./helpers/translator-budget";
 
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
@@ -130,6 +136,87 @@ describe("xAI Responses custom-tool compatibility", () => {
   });
 });
 
+describe("xAI Responses namespace-tool compatibility", () => {
+  test("flattens Codex namespaces, preserves the synthetic functions group, and avoids flat-name collisions", () => {
+    const raw = {
+      tools: [
+        { type: "function", name: "mcp__repo__read", parameters: { type: "object" } },
+        {
+          type: "namespace",
+          name: "mcp__repo",
+          tools: [{ type: "function", name: "read", defer_loading: true, parameters: { type: "object" } }],
+        },
+        {
+          type: "namespace",
+          name: "functions",
+          tools: [{ type: "function", name: "shell", defer_loading: true, parameters: { type: "object" } }],
+        },
+      ],
+      tool_choice: { type: "function", namespace: "mcp__repo", name: "read" },
+      input: [
+        { type: "function_call", namespace: "mcp__repo", name: "read", call_id: "call_read", arguments: "{}" },
+        {
+          type: "additional_tools",
+          tools: [{
+            type: "namespace",
+            name: "mcp__browser",
+            tools: [{ type: "function", name: "click", parameters: { type: "object" } }],
+          }],
+        },
+      ],
+    };
+
+    const lowered = lowerXaiResponsesNamespaceTools(raw);
+    const body = lowered.body as typeof raw;
+    const repo = body.tools.find(tool => tool.type === "function" && tool.name !== "mcp__repo__read" && tool.name !== "shell")!;
+    expect(repo.name).toStartWith("ocxns_");
+    expect(repo).not.toHaveProperty("defer_loading");
+    expect(body.tools.some(tool => tool.type === "namespace")).toBe(false);
+    expect(body.tools.find(tool => tool.name === "shell")).not.toHaveProperty("defer_loading");
+    expect(body.tool_choice).toEqual({ type: "function", name: repo.name });
+    expect(body.input[0]).toMatchObject({ type: "function_call", name: repo.name, call_id: "call_read" });
+    expect(body.input[0]).not.toHaveProperty("namespace");
+    const additional = body.input[1] as { tools: Array<Record<string, unknown>> };
+    expect(additional.tools).toEqual([{
+      type: "function",
+      name: "mcp__browser__click",
+      parameters: { type: "object" },
+    }]);
+    expect(lowered.aliases.get(repo.name)).toEqual({ namespace: "mcp__repo", name: "read" });
+    expect(raw.tools[1].type).toBe("namespace");
+  });
+
+  test("restores xAI namespace aliases in JSON and SSE without guessing unknown flat names", () => {
+    const raw = {
+      tools: [{
+        type: "namespace",
+        name: "mcp__workspace",
+        tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
+      }],
+    };
+    const aliases = xaiResponsesNamespaceToolAliases(raw);
+    expect(aliases.get("mcp__workspace__read_file")).toEqual({ namespace: "mcp__workspace", name: "read_file" });
+
+    const json = JSON.stringify({
+      output: [
+        { type: "function_call", name: "mcp__workspace__read_file", call_id: "call_1", arguments: "{}" },
+        { type: "function_call", name: "unknown__tool", call_id: "call_2", arguments: "{}" },
+      ],
+    });
+    const restored = JSON.parse(restoreXaiNamespaceCallsInJson(json, aliases)) as { output: Array<Record<string, unknown>> };
+    expect(restored.output[0]).toMatchObject({ namespace: "mcp__workspace", name: "read_file" });
+    expect(restored.output[1]).toMatchObject({ name: "unknown__tool" });
+    expect(restored.output[1]).not.toHaveProperty("namespace");
+
+    const rewrite = createXaiNamespaceToolPayloadRewrite(aliases)!;
+    const event = JSON.parse(rewrite(JSON.stringify({
+      type: "response.output_item.done",
+      item: { type: "function_call", name: "mcp__workspace__read_file", call_id: "call_1", arguments: "{}" },
+    })));
+    expect(event.item).toMatchObject({ namespace: "mcp__workspace", name: "read_file" });
+  });
+});
+
 describe("xAI Responses search and schema compatibility", () => {
   test("normalizes Codex hosted-search fields on both xAI Responses destinations", () => {
     const raw = {
@@ -175,6 +262,11 @@ describe("xAI Responses search and schema compatibility", () => {
         input: [],
         tools: [
           { type: "custom", name: "apply_patch", description: "Patch", format: { type: "text" } },
+          {
+            type: "namespace",
+            name: "mcp__workspace",
+            tools: [{ type: "function", name: "read_file", parameters: { type: "object", properties: {} } }],
+          },
           { type: "web_search_preview", external_web_access: true, search_context_size: "medium" },
           {
             type: "function",
@@ -192,9 +284,12 @@ describe("xAI Responses search and schema compatibility", () => {
     const body = JSON.parse(request.body) as { tools: Array<Record<string, unknown>> };
     const patch = body.tools.find(tool => tool.name === "apply_patch");
     const search = body.tools.find(tool => tool.type === "web_search");
+    const workspace = body.tools.find(tool => tool.name === "mcp__workspace__read_file");
     const mode = body.tools.find(tool => tool.name === "mode");
     expect(patch).toMatchObject({ type: "function", parameters: { type: "object" } });
     expect(search).toEqual({ type: "web_search" });
+    expect(workspace).toMatchObject({ type: "function", parameters: { type: "object" } });
+    expect(body.tools.some(tool => tool.type === "namespace")).toBe(false);
     expect(mode?.parameters).toEqual({
       type: "object",
       properties: { value: { anyOf: [{ const: "a" }, { const: "b" }] } },
