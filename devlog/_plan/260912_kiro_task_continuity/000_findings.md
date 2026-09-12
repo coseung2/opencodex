@@ -88,3 +88,12 @@ No real Kiro account request, credential mutation, automatic deployment, or oper
 was performed. A read-only health check reported the operational service as `2.8.0-cs.18`;
 that version string alone does not establish which selectively copied modules are loaded.
 The source correction and deployment status are deliberately separate.
+
+## Structural follow-up
+
+The continuity findings above exposed a layering problem as well as individual bugs: one monolithic
+Kiro adapter owned task policy, wire mapping, auth/transport and event decoding. The follow-up plan
+and implementation are documented in `devlog/_plan/260912_kiro_native_boundaries/000_plan.md`.
+That refactor keeps this unit's behavior while separating continuity policy, bidirectional Kiro codec,
+native transport, and the stable ProviderAdapter facade. Post-refactor focused coverage expands to
+**357 pass, 0 fail, 1,206 assertions across 12 files**, including explicit architecture-boundary tests.

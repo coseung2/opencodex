@@ -501,7 +501,7 @@ A Responses `parallel_tool_calls: true` value permits parallelism; it does not r
 unsupported wire control. Kiro accepts the hint without sending any parallel-control field.
 The existing Kiro preset and catalog still advertise serialized execution. Plain text output
 controls are likewise tolerated; actual schema-constrained output remains unsupported.
-The current fork's commentary/image replay retirement and private completion contract are
+The current fork's commentary preservation, completed-prefix image retirement, and private completion contract are
 independent of these input compatibility rules and must remain intact. Adjacent outputs from one
 custom-tool invocation are collapsed into a single Kiro result only when their original caller ids
 match exactly; normalized wire ids are never used as the ownership proof. Any non-result message is
@@ -523,6 +523,41 @@ allowed for a blocking question when only the user can supply the missing decisi
 clarification, so Kiro does not write the question as commentary and then invent its own answer to
 keep the work loop moving.
 
+### Kiro native boundary ownership
+
+Kiro is already a direct native transport: the proxy sends CodeWhisperer
+`GenerateAssistantResponse` requests to Kiro rather than routing through another compatibility
+server. The provider-specific code is split so a transport concern cannot silently redefine task
+memory:
+
+- `kiro-continuity.ts` owns delivered-answer termination, completion-mode selection, the private
+  terminal tool/instruction budget, and preparation of the one bounded completion-validation replay.
+  It has no credential, endpoint, fetch, or event-stream dependency.
+- `kiro-codec.ts` owns both directions of the Kiro wire translation: canonical OCX history to
+  `conversationState`, and AWS event-stream/Kiro events back to `AdapterEvent`. It preserves
+  commentary, tool/result ownership, redacted reasoning, replay-prefix image policy, usage/context
+  accounting, and completion-attempt parsing, but cannot resolve credentials or perform network I/O.
+- `kiro-transport.ts` owns account-derived region/profile selection, CLI-vs-IDE envelope choice,
+  native headers/user agents, `x-amz-target`, runtime endpoint selection, request serialization after
+  image normalization, safe request diagnostics, and retry-aware fetch. It does not decide whether
+  assistant text is durable history or terminal output.
+- `kiro.ts` is the stable `ProviderAdapter` facade. It keeps only the per-request state needed to
+  connect build/fetch/parse calls, constructs the bounded fallback through the three layers, and
+  re-exports the historical test/helper surface.
+
+The dependency rule is one-way: continuity contains policy without transport; codec may use
+continuity and pure Kiro helpers; transport may use codec; the facade composes all three. Architecture
+regressions are pinned by `tests/kiro-architecture-boundary.test.ts`. In particular, neither codec nor
+transport may erase a canonical assistant message because it looks like UI-only commentary.
+
+[Decision Log]
+- 목적과 의도: Make Kiro's direct native integration structurally comparable to other providers, while preventing UI/output policy from mutating durable task history.
+- 기존 구현 및 제약 조건: A single 2,163-line `kiro.ts` mixed task continuity, CodeWhisperer payload mapping, event decoding, auth/region/header construction, retries, and the ProviderAdapter facade. That coupling allowed a fork-only commentary dedupe change to delete model memory.
+- 검토한 주요 대안: Remove the Kiro adapter entirely; proxy the Codex Responses body directly to Kiro; split only helper files while keeping policy and transport mixed; or introduce explicit continuity/codec/transport boundaries behind the stable adapter surface.
+- 선택한 방식: Keep the required protocol translation but split policy, bidirectional wire codec, native transport, and facade, retaining stable exports and behavior.
+- 다른 대안 대신 이 방식을 선택한 이유: Kiro does not speak OpenAI Responses, so some translation is mandatory. Separating the translation from task policy preserves direct connectivity without repeating the memory-loss failure mode.
+- 장점, 단점 및 영향: The adapter entry point is small and reviewable, auth/network changes cannot redefine history policy, and future upstream fixes have a clearer landing zone. The codec remains intentionally large because request and response wire translation share Kiro-specific state and accounting; further splitting is optional only when it preserves this dependency direction.
+
 ### Kiro code-mode continuity
 
 The bounded catalog preserves tool-search discoveries ahead of ordinary declarations and reserves
@@ -535,8 +570,8 @@ Kiro supplies the nested-helper discovery and explicit text/notify echo contract
 After adjacent outputs have been grouped by original call identity, empty code-mode results receive
 one missing-output explanation. Errors, nonempty output order, and current or retired image evidence
 are preserved. Known host failures gain an idempotent recovery hint only in leading error context.
-No tool is executed or retried by this normalization. Commentary/image retirement, encrypted reasoning
-pairing, private completion, and local delivered-answer termination remain independent.
+No tool is executed or retried by this normalization. Commentary preservation, completed-prefix image retirement,
+encrypted reasoning pairing, private completion, and local delivered-answer termination remain independent.
 
 [Decision Log]
 - 목적과 의도: Stop missing code-mode output and catalog eviction from looking like lost task state.
