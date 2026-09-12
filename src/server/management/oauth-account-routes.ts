@@ -611,6 +611,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       keys: keys.map(k => ({
         id: k.id,
         name: k.name,
+        role: k.role ?? "user",
         prefix: k.key.slice(0, 17) + "...",
         createdAt: k.createdAt,
         usage: rollup.get(k.id) ?? { requests7d: 0, totalRequests: 0 },
@@ -629,17 +630,21 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const nameField = validateKeyName(body.name, { required: false });
     if ("error" in nameField) return jsonResponse({ error: nameField.error }, 400, req, config);
     const name = nameField.value || "default";
+    const requestedRole = body.role === undefined ? "user" : body.role;
+    if (requestedRole !== "user" && requestedRole !== "viewer" && requestedRole !== "operator" && requestedRole !== "admin") {
+      return jsonResponse({ error: "role must be user, viewer, operator, or admin" }, 400, req, config);
+    }
     // A direct random draw. The previous derivation hashed every configured
     // provider API key into the input, which was never needed for uniqueness and
     // made this secret's safety argument depend on string concatenation rather
     // than the RNG. 20 bytes is the same 40 hex characters as before, so nothing
     // that pattern-matches the key shape changes.
     const key = "ocx_data_" + randomBytes(20).toString("hex");
-    const entry = { id: randomUUID(), name, key, createdAt: new Date().toISOString() };
+    const entry = { id: randomUUID(), name, key, role: requestedRole as "user" | "viewer" | "operator" | "admin", createdAt: new Date().toISOString() };
     config.apiKeys = [...(config.apiKeys ?? []), entry];
     saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
-    return jsonResponse({ id: entry.id, name: entry.name, key: entry.key, createdAt: entry.createdAt }, 201, req, config);
+    return jsonResponse({ id: entry.id, name: entry.name, role: entry.role, key: entry.key, createdAt: entry.createdAt }, 201, req, config);
   }
 
   if (url.pathname === "/api/keys" && req.method === "PATCH") {
@@ -654,7 +659,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     // Never echo key material from a rename.
-    return jsonResponse({ id: entry.id, name: entry.name, createdAt: entry.createdAt }, 200, req, config);
+    return jsonResponse({ id: entry.id, name: entry.name, role: entry.role ?? "user", createdAt: entry.createdAt }, 200, req, config);
   }
 
   if (url.pathname === "/api/keys" && req.method === "DELETE") {

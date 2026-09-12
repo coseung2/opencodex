@@ -54,10 +54,11 @@ async function keysRequest(
   server: { url: URL },
   method: string,
   body?: unknown,
+  token: string = ADMIN_TOKEN,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(new URL("/api/keys", server.url), {
     method,
-    headers: { "Content-Type": "application/json", "x-opencodex-api-key": ADMIN_TOKEN },
+    headers: { "Content-Type": "application/json", "x-opencodex-api-key": token },
     ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
   });
   let json: Record<string, unknown> = {};
@@ -96,6 +97,24 @@ describe("POST /api/keys", () => {
       const stored = loadConfig().apiKeys ?? [];
       expect(stored).toHaveLength(1);
       expect(stored[0]!.key).toBe(created.json.key as string);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("assigns a console role and prevents viewer keys from mutating management state", async () => {
+    saveConfig(baseConfig());
+    const server = startServer(0);
+    try {
+      const created = await keysRequest(server, "POST", { name: "friend", role: "viewer" });
+      expect(created.status).toBe(201);
+      expect(created.json.role).toBe("viewer");
+      const viewerKey = created.json.key as string;
+      const listed = await keysRequest(server, "GET", undefined, viewerKey);
+      expect(listed.status).toBe(200);
+      const denied = await keysRequest(server, "POST", { name: "should-not-create" }, viewerKey);
+      expect(denied.status).toBe(403);
+      expect(denied.json.error).toBe("insufficient management permissions");
     } finally {
       await server.stop(true);
     }
