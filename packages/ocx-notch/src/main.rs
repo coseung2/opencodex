@@ -211,6 +211,8 @@ enum ModalHit {
     ConnectionModeRemote,
     ConnectionSave,
     ConnectionDisconnect,
+    IssuedKeysOpen,
+    IssuedKeyDelete(String),
     Cancel,
 }
 
@@ -251,6 +253,13 @@ enum ProviderModal {
     Connection {
         remote: bool,
         submitting: bool,
+        error: Option<String>,
+    },
+    IssuedKeys {
+        keys: Vec<api::IssuedApiKey>,
+        loading: bool,
+        confirming_delete: Option<String>,
+        deleting: Option<String>,
         error: Option<String>,
     },
     ResetCredits {
@@ -898,7 +907,7 @@ enum Cli {
     Reconnect,
     Disconnect,
     Window,
-    /// `--connect <base-url>`: read the management token from stdin and store the
+    /// `--connect <base-url>`: read the OCX API key from stdin and store the
     /// remote profile.
     Connect(String),
     /// `--local`: return to local mode and drop the stored credential.
@@ -2749,6 +2758,110 @@ unsafe fn show_connection_modal(hwnd: HWND) {
     let _ = InvalidateRect(hwnd, None, false);
 }
 
+unsafe fn show_issued_keys_modal(hwnd: HWND) {
+    let mut generation = 0;
+    with_app(|app| {
+        destroy_api_key_edit(app);
+        app.modal_generation = app.modal_generation.wrapping_add(1);
+        generation = app.modal_generation;
+        app.provider_modal = Some(ProviderModal::IssuedKeys {
+            keys: Vec::new(),
+            loading: true,
+            confirming_delete: None,
+            deleting: None,
+            error: None,
+        });
+    });
+    unsafe {
+        resize_for_state(hwnd);
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::fetch_issued_api_keys();
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            if let Some(ProviderModal::IssuedKeys {
+                keys,
+                loading,
+                error,
+                ..
+            }) = &mut app.provider_modal
+            {
+                *loading = false;
+                match result {
+                    Ok(rows) => *keys = rows,
+                    Err(message) => *error = Some(message),
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+fn delete_issued_key(hwnd: HWND, id: String) {
+    let mut generation = None;
+    with_app(|app| {
+        let Some(ProviderModal::IssuedKeys {
+            confirming_delete,
+            deleting,
+            error,
+            ..
+        }) = &mut app.provider_modal
+        else {
+            return;
+        };
+        if deleting.is_some() {
+            return;
+        }
+        if confirming_delete.as_deref() != Some(id.as_str()) {
+            *confirming_delete = Some(id.clone());
+            *error = None;
+            unsafe {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            return;
+        }
+        *confirming_delete = None;
+        *deleting = Some(id.clone());
+        *error = None;
+        generation = Some(app.modal_generation);
+    });
+    let Some(generation) = generation else { return };
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::delete_issued_api_key(&id);
+        with_app(|app| {
+            if app.modal_generation != generation {
+                return;
+            }
+            if let Some(ProviderModal::IssuedKeys {
+                keys,
+                deleting,
+                error,
+                ..
+            }) = &mut app.provider_modal
+            {
+                *deleting = None;
+                match result {
+                    Ok(()) => keys.retain(|key| key.id != id),
+                    Err(message) => *error = Some(message),
+                }
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
 /// Apply the edited connection. Local mode clears the stored profile; remote mode
 /// validates and probes the address/credential inside `api::save_connection`, so
 /// a rejected server or token leaves the previous connection in place.
@@ -4088,6 +4201,8 @@ unsafe extern "system" fn window_proc(
                     }
                     ModalHit::ConnectionSave => unsafe { submit_connection(hwnd, false) },
                     ModalHit::ConnectionDisconnect => unsafe { submit_connection(hwnd, true) },
+                    ModalHit::IssuedKeysOpen => unsafe { show_issued_keys_modal(hwnd) },
+                    ModalHit::IssuedKeyDelete(id) => delete_issued_key(hwnd, id),
                     ModalHit::ResetCreditUse => with_app(|app| {
                         if let Some(ProviderModal::ResetCredits {
                             loading,
@@ -6259,6 +6374,7 @@ unsafe fn draw_provider_modal(
     set_text_color(dc, 0x00f0ece8);
     let modal_title = match app.provider_modal.as_ref() {
         Some(ProviderModal::ResetCredits { .. }) => "초기화권",
+        Some(ProviderModal::IssuedKeys { .. }) => "발급 API 키 관리",
         Some(ProviderModal::Connection { .. }) => "연결 설정",
         _ => "프로바이더 추가",
     };
@@ -6793,7 +6909,7 @@ unsafe fn draw_provider_modal(
                 set_text_color(dc, 0x009da3ad);
                 draw_text(
                     dc,
-                    "접속하면 Codex도 이 서버를 사용합니다. 같은 서버는 토큰을 비워 두면 저장된 인증을 사용합니다.",
+                    "서버에서 발급받은 API 키를 입력하세요. 권한은 자동으로 인식됩니다. 같은 서버는 비워 두면 저장된 키를 사용합니다.",
                     RECT { left: 60, top: 142, right: width - 60, bottom: 200 },
                     DT_LEFT | DT_WORDBREAK,
                 );
@@ -6810,7 +6926,7 @@ unsafe fn draw_provider_modal(
                 );
                 draw_text(
                     dc,
-                    "관리 토큰",
+                    "OCX API 키",
                     RECT {
                         left: 60,
                         top: 290,
@@ -6853,6 +6969,14 @@ unsafe fn draw_provider_modal(
             );
             if !submitting {
                 app.modal_hits.push((save, ModalHit::ConnectionSave));
+                let manage = RECT {
+                    left: 60,
+                    top: 366,
+                    right: 196,
+                    bottom: 402,
+                };
+                draw_native_button(dc, manage, "발급 키 관리", false);
+                app.modal_hits.push((manage, ModalHit::IssuedKeysOpen));
                 if api::is_remote() && codex_connection::read_mode() != "disconnected" {
                     let disconnect = RECT {
                         left: 60,
@@ -6874,6 +6998,120 @@ unsafe fn draw_provider_modal(
                         top: 456,
                         right: width - 60,
                         bottom: 524,
+                    },
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            }
+        }
+        Some(ProviderModal::IssuedKeys {
+            keys,
+            loading,
+            confirming_delete,
+            deleting,
+            error,
+        }) => {
+            let _ = SelectObject(dc, small_font);
+            set_text_color(dc, 0x009da3ad);
+            draw_text(
+                dc,
+                "키 원문은 다시 표시되지 않습니다. 삭제하면 해당 키를 사용하는 친구의 연결이 즉시 해제됩니다.",
+                RECT { left: 32, top: 58, right: width - 32, bottom: 100 },
+                DT_LEFT | DT_WORDBREAK,
+            );
+            if *loading {
+                draw_text(
+                    dc,
+                    "발급 키를 불러오는 중…",
+                    RECT {
+                        left: 32,
+                        top: 120,
+                        right: width - 32,
+                        bottom: 160,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                );
+            } else if keys.is_empty() {
+                draw_text(
+                    dc,
+                    "발급된 API 키가 없습니다.",
+                    RECT {
+                        left: 32,
+                        top: 120,
+                        right: width - 32,
+                        bottom: 160,
+                    },
+                    DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                );
+            } else {
+                for (index, key) in keys.iter().take(6).enumerate() {
+                    let top = 108 + index as i32 * 58;
+                    let row = RECT {
+                        left: 24,
+                        top,
+                        right: width - 24,
+                        bottom: top + 52,
+                    };
+                    fill_solid(dc, row, 0x002d2825);
+                    set_text_color(dc, 0x00e9e4df);
+                    draw_text(
+                        dc,
+                        &format!("{} · {}", key.name, key.role),
+                        RECT {
+                            left: row.left + 12,
+                            top: row.top + 5,
+                            right: row.right - 82,
+                            bottom: row.top + 27,
+                        },
+                        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                    );
+                    set_text_color(dc, 0x008e949e);
+                    draw_text(
+                        dc,
+                        &format!("{}  ·  {}", key.prefix, key.created_at),
+                        RECT {
+                            left: row.left + 12,
+                            top: row.top + 27,
+                            right: row.right - 82,
+                            bottom: row.bottom - 3,
+                        },
+                        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                    );
+                    let deleting_this = deleting.as_deref() == Some(key.id.as_str());
+                    let confirming_this = confirming_delete.as_deref() == Some(key.id.as_str());
+                    let button = RECT {
+                        left: row.right - 72,
+                        top: row.top + 10,
+                        right: row.right - 10,
+                        bottom: row.bottom - 10,
+                    };
+                    draw_native_button(
+                        dc,
+                        button,
+                        if deleting_this {
+                            "삭제 중"
+                        } else if confirming_this {
+                            "확인"
+                        } else {
+                            "삭제"
+                        },
+                        deleting.is_some(),
+                    );
+                    if deleting.is_none() {
+                        app.modal_hits
+                            .push((button, ModalHit::IssuedKeyDelete(key.id.clone())));
+                    }
+                }
+            }
+            if let Some(error) = error {
+                set_text_color(dc, 0x0024bffb);
+                draw_text(
+                    dc,
+                    error,
+                    RECT {
+                        left: 32,
+                        top: 470,
+                        right: width - 32,
+                        bottom: 530,
                     },
                     DT_LEFT | DT_WORDBREAK,
                 );

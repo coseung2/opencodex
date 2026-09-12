@@ -24,7 +24,7 @@ ocx-notch
 
 The npm release workflow uses npm Trusted Publishing (OIDC), so it does not keep a long-lived `NPM_TOKEN`. Because npm requires a package to exist before its trusted publisher can be configured, the package owner must publish `0.1.0` once with npm authentication, then add this GitHub repository and `.github/workflows/release.yml` in the package's Trusted Publisher settings. Later `v*` tags publish automatically.
 
-For OCX 2.8+, local mode automatically reads the existing `%USERPROFILE%\.opencodex\admin-api-token` management credential (or `OPENCODEX_HOME\admin-api-token`). `OPENCODEX_ADMIN_AUTH_TOKEN` remains supported. Remote profiles store their VM management credential in Windows Credential Manager; tokens are never displayed, logged, or written to `window.json`.
+For OCX 2.8+, local mode automatically reads the existing `%USERPROFILE%\.opencodex\admin-api-token` management credential (or `OPENCODEX_HOME\admin-api-token`). `OPENCODEX_ADMIN_AUTH_TOKEN` remains supported. Remote profiles store their OCX API key in Windows Credential Manager; keys are never displayed, logged, or written to `window.json`.
 
 ## Remote setup
 
@@ -42,9 +42,9 @@ address `10.0.0.5`; replace both with your own values.
   a private interface reachable by nginx, for example `10.0.0.5:10100`.
 - A non-loopback OCX listener requires data-plane authentication. Configure its
   service with `OPENCODEX_API_AUTH_TOKEN` or a supported configured data key.
-- Obtain the separate management token from the service's
-  `OPENCODEX_ADMIN_AUTH_TOKEN` or its protected `~/.opencodex/admin-api-token` file.
-  Notch uses this credential to manage OCX and create a separate Codex data key.
+- Obtain an OCX API key with at least the `viewer` role. The service's
+  `OPENCODEX_ADMIN_AUTH_TOKEN` or protected `~/.opencodex/admin-api-token`
+  credential also works for administrators.
 - Configure DNS and a trusted TLS certificate for the HTTPS endpoint. Allow its
   exact origin in OCX's `corsAllowOrigins`, such as `https://ocx.example.com`.
 - Use a server build exposing `hostCpu` and `hostMemory` in `/api/system/memory`
@@ -138,15 +138,19 @@ Use a Codex version supporting `model_providers.<id>.auth.command`.
 2. Select **원격 서버** (Remote server).
 3. Enter your server origin, such as `https://ocx.example.com`, without `/v1`,
    `/api`, query parameters, or a token in the URL.
-4. Enter the server's management token and click **접속** (Connect). When reconnecting
-   to the same saved address, leave the token empty to reuse the saved credential.
+4. Enter an OCX API key with at least the `viewer` role and click **접속**
+   (Connect). The legacy server management token remains supported. When
+   reconnecting to the same saved address, leave the field empty to reuse the
+   saved credential.
 5. Fully close and reopen Codex. Start a new conversation if an existing thread
    retains its previous provider. Confirm that a new request appears in the VM's logs.
 
-Connect checks management access, downloads the server catalog, creates or reuses
-this client's data key, and checks Responses authentication before saving Codex
-routing. Tokens live in Windows Credential Manager. Codex retrieves its data key
-through Notch's credential command; no token is written into `config.toml`.
+Connect detects the key's effective permissions, downloads the server catalog,
+and checks Responses authentication before saving Codex routing. A `viewer` or
+`operator` key is reused directly because it cannot mint credentials. An admin
+key or legacy management token creates or reuses a client-specific data key.
+Credentials live in Windows Credential Manager. Codex retrieves its key through
+Notch's credential command; no token is written into `config.toml`.
 
 Notch updates `CODEX_HOME/config.toml` (normally `%USERPROFILE%\.codex\config.toml`)
 and uses the `ocx-notch` provider with the downloaded `ocx-notch-catalog.json`.
@@ -163,17 +167,18 @@ is not migrated, and Claude or other clients are not automatically reconfigured.
 | **접속 끊기** (Disconnect) | Revokes this client's Codex data key and stops Notch polling. The VM keeps running; no automatic local fallback occurs. |
 | **로컬 PC → 접속** (Local PC → Connect) | Explicitly points Notch and Codex at `127.0.0.1:10100`. Saved remote server information remains available. Restart Codex after switching. |
 
-Disconnect needs server contact to confirm revocation. A failure is shown as an
-error, and a request already accepted by the server may finish. Each Windows user
-has their own credential vault; do not share a management token with someone who
-should not be able to manage the server's accounts and settings.
+Disconnect needs server contact to confirm revocation for a client-specific key.
+A directly entered API key remains on the server and is removed only from this
+PC. A failure is shown as an error, and a request already accepted by the server
+may finish. Each Windows user has their own credential vault; issue `viewer`
+keys to people who need Notch read access without server mutation rights.
 
 ### Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
 | Could not reach OCX | DNS, trusted TLS certificate, HTTPS listener, and proxy-to-backend connectivity. |
-| Management token rejected | Use the server's management token, not a data key or the local PC's token. Check the allowed HTTPS origin. |
+| OCX API key rejected | Use a key with at least `viewer` access. A data-plane-only `user` key cannot populate Notch. Check the allowed HTTPS origin. |
 | Header-translation error or Responses 401 | Apply both nginx maps and both authentication headers above. A successful `/v1/models` request alone does not prove Responses authentication works. |
 | `catalog not found` | Complete catalog setup under the server service's account and environment. |
 | VM logs remain old while local logs advance | An existing Codex process or thread is still using local OCX. Fully restart Codex and use a new conversation; verify a fresh VM log entry. |

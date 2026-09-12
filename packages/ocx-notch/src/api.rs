@@ -41,6 +41,24 @@ struct Target {
     token: Option<String>,
 }
 
+fn direct_key_after_create_error(
+    error: String,
+    supplied_key: &str,
+) -> Result<crate::codex_connection::DataKey, String> {
+    if !is_http_status(&error, 403) {
+        return Err(error);
+    }
+    Ok(crate::codex_connection::DataKey {
+        id: String::new(),
+        key: supplied_key.to_string(),
+        server_issued: false,
+    })
+}
+
+fn should_revoke_data_key(key: &crate::codex_connection::DataKey) -> bool {
+    key.server_issued
+}
+
 fn active_target() -> Result<Target, String> {
     let active = POLL_TARGET
         .with(|slot| slot.borrow().as_ref().map(|(_, active)| active.clone()))
@@ -94,8 +112,10 @@ pub fn connection_error() -> Option<String> {
 }
 
 /// Switch modes. `None`/`None` returns to local mode; otherwise both the
-/// address and the token are required. A remote profile is probed before it is
-/// committed, so a failed update leaves the previous profile untouched.
+/// address and an OCX API key are required. The key may be a viewer/operator/
+/// admin API key or the legacy server management token. A remote profile is
+/// probed before it is committed, so a failed update leaves the previous
+/// profile untouched.
 pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<(), String> {
     let (Some(base_url), Some(token)) = (base_url, token) else {
         if base_url.is_some() || token.is_some() {
@@ -112,16 +132,18 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         return Ok(());
     };
     let endpoint = connection::parse_endpoint(base_url)?;
-    let token = if token.trim().is_empty() {
+    let explicit_token = !token.trim().is_empty();
+    let token = if !explicit_token {
         connection::saved_profile()?
             .filter(|p| p.endpoint == endpoint)
             .map(|p| p.token)
-            .ok_or("Enter the management token for this server")?
+            .ok_or("Enter the OCX API key for this server")?
     } else {
         token.trim().to_string()
     };
     connection::validate_token(&token)?;
     let profile = Profile { endpoint, token };
+    let previous_profile = connection::saved_profile()?;
     probe_profile(&profile)?;
     let target = Target {
         endpoint: profile.endpoint.clone(),
@@ -131,8 +153,16 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         serde_json::from_slice(&request_to(&target, "GET", "/api/catalog", None, 30_000)?)
             .map_err(|_| "Invalid remote Codex catalog")?;
     crate::codex_connection::validate_catalog(&catalog)?;
-    let origin = &profile.endpoint.base_url;
-    let stored = crate::codex_connection::load_key(origin)?;
+    let origin = profile.endpoint.base_url.clone();
+    // A saved data key belongs only to the empty-field reconnect path. When the
+    // user enters a credential, classify and install that credential instead of
+    // silently continuing to use an older key for the same origin.
+    let previous_key = crate::codex_connection::load_key(&origin)?;
+    let stored = if explicit_token {
+        None
+    } else {
+        previous_key.clone()
+    };
     let stored = if let Some(key) = stored {
         connection::validate_token(&key.key)?;
         let data = Target {
@@ -147,54 +177,109 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
     } else {
         None
     };
-    let key = if let Some(key) = stored {
-        key
+    let (key, created_this_attempt) = if let Some(key) = stored {
+        (key, false)
     } else {
         let body = br#"{"name":"OCX Notch Codex"}"#;
-        let key: crate::codex_connection::DataKey = serde_json::from_slice(&request_to(
-            &target,
-            "POST",
-            "/api/keys",
-            Some(body),
-            10_000,
-        )?)
-        .map_err(|_| "Invalid Codex credential response")?;
-        // Persist before any later step can fail, so retry reuses this key.
+        let (key, created) = match request_to(&target, "POST", "/api/keys", Some(body), 10_000) {
+            Ok(response) => {
+                let mut key: crate::codex_connection::DataKey =
+                    serde_json::from_slice(&response)
+                        .map_err(|_| "Invalid Codex credential response")?;
+                key.server_issued = true;
+                (key, true)
+            }
+            // Viewer and operator keys can read the Notch management views and
+            // use the data plane, but deliberately cannot mint credentials.
+            // Reuse the supplied key and record that it is externally owned.
+            Err(error) => (direct_key_after_create_error(error, &profile.token)?, false),
+        };
         connection::validate_token(&key.key)?;
-        if let Err(error) = crate::codex_connection::save_key(origin, &key) {
-            let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
-            let cleanup = request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000);
-            return Err(if cleanup.is_err() {
-                format!("{error}; remove the unused OCX Notch Codex key on the server")
-            } else {
-                error
-            });
-        }
-        key
+        (key, created)
     };
     let data = Target {
         endpoint: profile.endpoint.clone(),
-        token: Some(key.key),
+        token: Some(key.key.clone()),
     };
     connection::validate_token(data.token.as_deref().unwrap_or_default())?;
-    request_to(&data, "GET", "/v1/models", None, 10_000)
-        .map_err(|_| "The server rejected the Codex data credential")?;
+    if request_to(&data, "GET", "/v1/models", None, 10_000).is_err() {
+        cleanup_new_server_key(&target, &key, created_this_attempt);
+        return Err("The server rejected the Codex data credential".into());
+    }
     // An empty request must reach Responses validation without running a model.
     // GET /models alone cannot prove the distinct Responses admission path works.
     match request_to_with_bearer(&data, "POST", "/v1/responses", Some(b"{}"), 10_000, true) {
-        Err(error) if is_http_status(&error, 400) || is_http_status(&error, 422) => {},
-        _ => return Err("The server must translate Codex bearer authentication into the OCX data header before connecting".into()),
+        Err(error) if is_http_status(&error, 400) || is_http_status(&error, 422) => {}
+        _ => {
+            cleanup_new_server_key(&target, &key, created_this_attempt);
+            return Err("The server must translate Codex bearer authentication into the OCX data header before connecting".into());
+        }
     }
-    let previous_config = crate::codex_connection::configure(Some(origin), Some(&catalog))?;
+    let previous_config = match crate::codex_connection::configure(Some(&origin), Some(&catalog)) {
+        Ok(config) => config,
+        Err(error) => {
+            cleanup_new_server_key(&target, &key, created_this_attempt);
+            return Err(error);
+        }
+    };
+    if let Err(error) = crate::codex_connection::save_key(&origin, &key) {
+        let _ = crate::codex_connection::atomic_write(
+            &crate::codex_connection::codex_dir()?.join("config.toml"),
+            previous_config.as_bytes(),
+        );
+        cleanup_new_server_key(&target, &key, created_this_attempt);
+        return Err(error);
+    }
     if let Err(error) = connection::commit(profile) {
         crate::codex_connection::atomic_write(
             &crate::codex_connection::codex_dir()?.join("config.toml"),
             previous_config.as_bytes(),
         )
         .map_err(|_| "Could not restore Codex configuration after a failed connection")?;
+        restore_saved_data_key(&origin, previous_key.as_ref())?;
+        cleanup_new_server_key(&target, &key, created_this_attempt);
         return Err(error);
     }
+    if explicit_token {
+        if let Some(previous) = previous_key
+            .as_ref()
+            .filter(|previous| previous.server_issued && previous.id != key.id)
+        {
+            if let Some(previous_profile) =
+                previous_profile.filter(|profile| profile.endpoint.base_url == origin)
+            {
+                let previous_target = Target {
+                    endpoint: previous_profile.endpoint,
+                    token: Some(previous_profile.token),
+                };
+                let body = serde_json::to_vec(&serde_json::json!({"id":previous.id})).unwrap();
+                let _ = request_to(&previous_target, "DELETE", "/api/keys", Some(&body), 10_000);
+            }
+        }
+    }
     Ok(())
+}
+
+fn cleanup_new_server_key(
+    target: &Target,
+    key: &crate::codex_connection::DataKey,
+    created_this_attempt: bool,
+) {
+    if created_this_attempt && should_revoke_data_key(key) {
+        let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
+        let _ = request_to(target, "DELETE", "/api/keys", Some(&body), 10_000);
+    }
+}
+
+fn restore_saved_data_key(
+    origin: &str,
+    previous: Option<&crate::codex_connection::DataKey>,
+) -> Result<(), String> {
+    if let Some(previous) = previous {
+        crate::codex_connection::save_key(origin, previous)
+    } else {
+        connection::delete_secret(&crate::codex_connection::key_target(origin))
+    }
 }
 
 pub fn disconnect_codex() -> Result<(), String> {
@@ -204,15 +289,17 @@ pub fn disconnect_codex() -> Result<(), String> {
             endpoint: profile.endpoint.clone(),
             token: Some(profile.token.clone()),
         };
-        let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
-        match request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000) {
-            Ok(_) => {}
-            Err(error) if is_http_status(&error, 404) => {}
-            Err(_) => {
-                return Err(
-                    "Could not revoke the Codex connection on the server; reconnect and retry"
-                        .into(),
-                )
+        if should_revoke_data_key(&key) {
+            let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
+            match request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000) {
+                Ok(_) => {}
+                Err(error) if is_http_status(&error, 404) => {}
+                Err(_) => {
+                    return Err(
+                        "Could not revoke the Codex connection on the server; reconnect and retry"
+                            .into(),
+                    )
+                }
             }
         }
         connection::delete_secret(&crate::codex_connection::key_target(
@@ -253,7 +340,9 @@ pub fn save_connection_from_stdin(base_url: &str) -> Result<(), String> {
 
 /// Confirm the endpoint answers and the credential is accepted before the
 /// profile replaces the working one. `/healthz` proves reachability;
-/// `/api/system/memory` is management-gated, so it proves the credential.
+/// `/api/system/memory` is management-gated, so it proves the credential has
+/// at least viewer access. Data-plane-only user keys are rejected with a clear
+/// permission error instead of connecting to a mostly empty Notch.
 fn probe_profile(profile: &Profile) -> Result<(), String> {
     let target = Target {
         endpoint: profile.endpoint.clone(),
@@ -263,7 +352,7 @@ fn probe_profile(profile: &Profile) -> Result<(), String> {
         .map_err(|error| format!("Could not reach {}: {error}", profile.endpoint.base_url))?;
     request_to(&target, "GET", "/api/system/memory", None, 8_000).map_err(|error| {
         if is_http_status(&error, 401) || is_http_status(&error, 403) {
-            "The server rejected this management token".to_string()
+            "The server rejected this OCX API key or it lacks viewer access".to_string()
         } else {
             error
         }
@@ -306,6 +395,34 @@ pub fn post_empty(path: &str, value: &impl serde::Serialize) -> Result<(), Strin
 
 pub fn post_raw(path: &str, body: &[u8]) -> Result<(), String> {
     request("POST", path, Some(body), 20_000).map(|_| ())
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuedApiKey {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub prefix: String,
+    pub created_at: String,
+}
+
+#[derive(serde::Deserialize)]
+struct IssuedApiKeysResponse {
+    keys: Vec<IssuedApiKey>,
+}
+
+pub fn fetch_issued_api_keys() -> Result<Vec<IssuedApiKey>, String> {
+    Ok(get_json::<IssuedApiKeysResponse>("/api/keys", 10_000)?.keys)
+}
+
+pub fn delete_issued_api_key(id: &str) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("API key identifier is missing".into());
+    }
+    let body = serde_json::to_vec(&serde_json::json!({"id": id}))
+        .map_err(|error| format!("Invalid request: {error}"))?;
+    request("DELETE", "/api/keys", Some(&body), 10_000).map(|_| ())
 }
 
 pub fn put_json<T: DeserializeOwned>(
@@ -1154,6 +1271,35 @@ mod tests {
         assert!(save_connection(None, Some("ocx_admin_abc")).is_err());
         // A rejected update must not have switched this process to remote mode.
         assert!(!is_remote());
+    }
+
+    #[test]
+    fn only_forbidden_key_creation_reuses_the_supplied_key_without_ownership() {
+        let direct = direct_key_after_create_error(
+            "OCX returned HTTP 403: insufficient management permissions".into(),
+            "ocx_viewer_friend",
+        )
+        .expect("viewer key fallback");
+        assert_eq!(direct.key, "ocx_viewer_friend");
+        assert!(direct.id.is_empty());
+        assert!(!should_revoke_data_key(&direct));
+
+        let server_issued = crate::codex_connection::DataKey {
+            id: "generated".into(),
+            key: "ocx_data_generated".into(),
+            server_issued: true,
+        };
+        assert!(should_revoke_data_key(&server_issued));
+        assert!(direct_key_after_create_error(
+            "OCX returned HTTP 401: unauthorized".into(),
+            "bad-key",
+        )
+        .is_err());
+        assert!(direct_key_after_create_error(
+            "OCX returned HTTP 500: unavailable".into(),
+            "ocx_viewer_friend",
+        )
+        .is_err());
     }
 
     #[test]

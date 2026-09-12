@@ -232,16 +232,16 @@ fn validate_host_name(host: &str) -> Result<(), String> {
 /// Reject anything that could not travel safely in an HTTP header value.
 pub fn validate_token(token: &str) -> Result<(), String> {
     if token.is_empty() {
-        return Err("Enter the management token".into());
+        return Err("Enter the OCX API key".into());
     }
     if token.len() > MAX_TOKEN_LEN {
-        return Err("Management token is too long".into());
+        return Err("OCX API key is too long".into());
     }
     if !token
         .bytes()
         .all(|byte| (0x21..=0x7e).contains(&byte) || byte == b' ')
     {
-        return Err("Management token contains invalid characters".into());
+        return Err("OCX API key contains invalid characters".into());
     }
     Ok(())
 }
@@ -379,14 +379,11 @@ fn interpret_stored(entry: StoredEntry) -> Connection {
     let Some(token) = entry.token else {
         return unusable(
             stored_base_url,
-            "The saved management token is missing from Credential Manager".into(),
+            "The saved OCX API key is missing from Credential Manager".into(),
         );
     };
     if validate_token(&token).is_err() {
-        return unusable(
-            stored_base_url,
-            "The saved management token is unusable".into(),
-        );
+        return unusable(stored_base_url, "The saved OCX API key is unusable".into());
     }
     Connection::Remote(Profile { endpoint, token })
 }
@@ -559,7 +556,7 @@ mod tests {
         match missing_token {
             Connection::Unavailable { base_url, reason } => {
                 assert_eq!(base_url.as_deref(), Some("http://100.120.114.62:10100"));
-                assert!(reason.contains("token"), "unexpected reason: {reason}");
+                assert!(reason.contains("API key"), "unexpected reason: {reason}");
             }
             _ => panic!("a stored entry without a token must not become local mode"),
         }

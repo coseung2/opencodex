@@ -11,10 +11,20 @@ const BEGIN: &str = "# BEGIN OCX NOTCH PROVIDER";
 const END: &str = "# END OCX NOTCH PROVIDER";
 const PROVIDER: &str = "ocx-notch";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DataKey {
     pub id: String,
     pub key: String,
+    /// True only when Notch created this key through POST /api/keys. A key the
+    /// user pasted into Connection Settings belongs to the server operator and
+    /// must never be revoked when this client disconnects.
+    #[serde(default = "server_issued_default")]
+    pub server_issued: bool,
+}
+
+fn server_issued_default() -> bool {
+    // Credentials saved by older Notch builds were always created by Notch.
+    true
 }
 
 pub fn state_dir() -> PathBuf {
@@ -257,6 +267,21 @@ pub fn configure(origin: Option<&str>, catalog: Option<&Value>) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_data_keys_remain_server_issued_but_direct_keys_keep_ownership() {
+        let legacy: DataKey = serde_json::from_str(r#"{"id":"old","key":"ocx_data_old"}"#).unwrap();
+        assert!(legacy.server_issued);
+
+        let direct = DataKey {
+            id: String::new(),
+            key: "ocx_viewer_friend".into(),
+            server_issued: false,
+        };
+        let restored: DataKey =
+            serde_json::from_str(&serde_json::to_string(&direct).unwrap()).unwrap();
+        assert!(!restored.server_issued);
+        assert!(restored.id.is_empty());
+    }
     #[test]
     fn routing_stays_at_root_and_preserves_other_settings() {
         let source = "model = \"test\"\n# Auto-injected by opencodex\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n[plugins.example]\nenabled = true\n";
