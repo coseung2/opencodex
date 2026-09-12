@@ -13,6 +13,7 @@ export interface ApiKeyEntry {
   id: string;
   name: string;
   prefix: string;
+  role?: "user" | "viewer" | "operator" | "admin";
   createdAt: string;
   /** Always present from the server; zeroes are a real answer. Whether anything
    *  is attributable at all is the response-level `attributionSince`. */

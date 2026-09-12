@@ -40,6 +40,7 @@ export interface ApiKeysWorkspaceProps {
   claudeCodeEnabled: boolean;
   localeTag?: string;
   newName: string;
+  newRole: "user" | "viewer" | "operator" | "admin";
   creating: boolean;
   newKey: string | null;
   copied: boolean;
@@ -55,6 +56,7 @@ export interface ApiKeysWorkspaceProps {
   modelTests: ModelTests;
   canTestModels: boolean;
   onNewNameChange: (value: string) => void;
+  onNewRoleChange: (value: "user" | "viewer" | "operator" | "admin") => void;
   onCreate: () => void;
   onDismissNewKey: () => void;
   onCopyKey: () => void;
@@ -368,6 +370,8 @@ export default function ApiKeysWorkspace({
                     keysLoading={keysLoading}
                     keysLoadFailed={keysLoadFailed}
                     newName={newName}
+                    newRole={newRole}
+                    onNewRoleChange={onNewRoleChange}
                     creating={creating}
                     newKey={newKey}
                     copied={copied}
