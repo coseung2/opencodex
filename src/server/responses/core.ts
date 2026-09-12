@@ -182,6 +182,11 @@ import {
   restoreXaiNamespaceCallsInJson,
   xaiResponsesNamespaceToolAliases,
 } from "../../responses/xai-namespace-tool-compat";
+import {
+  createXaiToolSearchPayloadRewrite,
+  restoreXaiToolSearchCallsInJson,
+  xaiToolSearchAlias,
+} from "../../responses/xai-tool-search-compat";
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
@@ -1715,6 +1720,9 @@ async function handleResponsesInner(
     const xaiNamespaceToolAliases = isXaiResponsesDestination(route.provider)
       ? xaiResponsesNamespaceToolAliases(parsed._rawBody)
       : new Map<string, { namespace: string; name: string }>();
+    const xaiSearchAlias = isXaiResponsesDestination(route.provider)
+      ? xaiToolSearchAlias(parsed._rawBody)
+      : undefined;
     // Reuse the existing client-only namespace rewrite and its bounded SSE relay. The
     // inspection/cache branch retains raw names for continuation replay. Resolve all
     // declaration ownership before admitting a Muse dotted alias.
@@ -2067,6 +2075,7 @@ async function handleResponsesInner(
       const repairConfig = route.provider.responsesItemIdRepair;
       const xaiCustomToolRewrite = createXaiCustomToolPayloadRewrite(xaiCustomToolNames);
       const xaiNamespaceToolRewrite = createXaiNamespaceToolPayloadRewrite(xaiNamespaceToolAliases);
+      const xaiToolSearchRewrite = createXaiToolSearchPayloadRewrite(xaiSearchAlias);
       const grokSparseTerminalRewrite = logCtx.surface === "grok"
         ? createGrokResponsesSparseTerminalPayloadRewrite(translatorBudget)
         : undefined;
@@ -2075,6 +2084,7 @@ async function handleResponsesInner(
         || hasResponsesItemIdRepair(repairConfig)
         || xaiCustomToolRewrite !== undefined
         || xaiNamespaceToolRewrite !== undefined
+        || xaiToolSearchRewrite !== undefined
         || grokSparseTerminalRewrite !== undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass. Provider-shape restoration
       // runs before generic item-id repair so the client sees the correct custom-tool identity.
@@ -2083,6 +2093,7 @@ async function handleResponsesInner(
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         xaiCustomToolRewrite,
         xaiNamespaceToolRewrite,
+        xaiToolSearchRewrite,
         grokSparseTerminalRewrite,
         hasResponsesItemIdRepair(repairConfig)
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
@@ -2248,7 +2259,8 @@ async function handleResponsesInner(
       }
       const restoredCustomTools = restoreXaiCustomCallsInJson(text, xaiCustomToolNames);
       const restoredNamespaceTools = restoreXaiNamespaceCallsInJson(restoredCustomTools, xaiNamespaceToolAliases);
-      const restoredMuseTools = museToolSearchRewrite?.(restoredNamespaceTools) ?? restoredNamespaceTools;
+      const restoredSearchTools = restoreXaiToolSearchCallsInJson(restoredNamespaceTools, xaiSearchAlias);
+      const restoredMuseTools = museToolSearchRewrite?.(restoredSearchTools) ?? restoredSearchTools;
       return new Response(restoreImageGenCallsInJson(restoredMuseTools, imageGenCallAliases), {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,

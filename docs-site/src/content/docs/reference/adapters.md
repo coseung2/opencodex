@@ -54,7 +54,9 @@ streams the response back **untranslated**.
   Responses wire. The adapter removes xAI-rejected OpenAI-only controls, normalizes hosted search,
   applies bounded/lossless root-schema flattening only on the Grok CLI proxy, lowers client custom
   tools such as `apply_patch` to functions, and flattens Codex `namespace` tool groups to safe xAI
-  function aliases before restoring both custom-call and namespace identity for the client. The same
+  function aliases before restoring both custom-call and namespace identity for the client. Native
+  `tool_search` declarations also omit Codex's client-only `execution` marker on the xAI wire while
+  retaining client-side discovery and execution in the returned Responses items. The same
   request-shape compatibility applies to the public xAI Responses endpoint; translated Chat/Anthropic
   requests keep their existing wire.
 

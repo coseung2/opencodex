@@ -60,3 +60,10 @@
 - Prevention: include native tool-search parameter schemas and a search/result
   round trip in compatibility checks, rather than inferring conversation recovery
   from ordinary-function probes alone.
+
+## Recurrence: Grok client-executed tool search (2026-09-12, Asia/Seoul)
+
+- Impact: a Grok worker failed before research began with `tool_search execution must be 'server' or not set; client-executed tool search is not supported`.
+- Confirmed cause: the xAI namespace compatibility pass returned early when a request had no namespace declarations, so a top-level native `tool_search` retained Codex's `execution: "client"` marker on the xAI request wire.
+- Response: remove only that marker at the xAI Responses adapter boundary, including dynamically supplied tool groups, while preserving the original client request and client-side search call/result semantics.
+- Prevention: cover the exact native declaration on both Grok OAuth and public API destinations, assert the source body is immutable, and verify a live search call plus result follow-up before release.

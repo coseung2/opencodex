@@ -12,6 +12,11 @@ import {
   restoreXaiNamespaceCallsInJson,
   xaiResponsesNamespaceToolAliases,
 } from "../src/responses/xai-namespace-tool-compat";
+import {
+  createXaiToolSearchPayloadRewrite,
+  lowerXaiToolSearch,
+  restoreXaiToolSearchCallsInJson,
+} from "../src/responses/xai-tool-search-compat";
 import { withTestTranslatorBudget } from "./helpers/translator-budget";
 
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
@@ -137,6 +142,77 @@ describe("xAI Responses custom-tool compatibility", () => {
 });
 
 describe("xAI Responses namespace-tool compatibility", () => {
+  test("lowers client tool search to a function and restores JSON/SSE calls", () => {
+    const raw = {
+      model: "grok-4.6",
+      input: [],
+      tools: [{
+        type: "tool_search",
+        execution: "client",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" }, limit: { type: "integer" } },
+          required: ["query"],
+        },
+      }],
+    };
+
+    const lowered = lowerXaiToolSearch(raw);
+    const body = lowered.body as any;
+    expect(body.tools[0]).toMatchObject({ type: "function", name: lowered.alias, parameters: raw.tools[0].parameters });
+    expect(body.tools[0]).not.toHaveProperty("execution");
+    expect(raw.tools[0].execution).toBe("client");
+
+    const upstreamItem = {
+      type: "function_call", id: "fc_search", call_id: "call_search",
+      name: lowered.alias, arguments: JSON.stringify({ query: "repo tools", limit: 3 }), status: "completed",
+    };
+    const restoredJson = JSON.parse(restoreXaiToolSearchCallsInJson(JSON.stringify({ output: [upstreamItem] }), lowered.alias));
+    expect(restoredJson.output[0]).toEqual({
+      type: "tool_search_call", id: "tsc_search", call_id: "call_search",
+      execution: "client", arguments: { query: "repo tools", limit: 3 }, status: "completed",
+    });
+    const rewrite = createXaiToolSearchPayloadRewrite(lowered.alias)!;
+    const restoredEvent = JSON.parse(rewrite(JSON.stringify({ type: "response.output_item.done", item: upstreamItem })));
+    expect(restoredEvent.item).toEqual(restoredJson.output[0]);
+
+    for (const provider of [cliProvider, apiProvider]) {
+      const request = createResponsesPassthroughAdapter(provider).buildRequest({
+        modelId: raw.model,
+        context: { messages: [] },
+        stream: true,
+        options: {},
+        _rawBody: raw,
+      }, { headers: new Headers() });
+      const wire = JSON.parse(request.body) as typeof raw;
+      expect(wire.tools[0]).toMatchObject({ type: "function", name: lowered.alias });
+      expect(wire.tools[0]).not.toHaveProperty("execution");
+      expect(wire.tools[0].parameters).toEqual(raw.tools[0].parameters);
+    }
+  });
+
+  test("replays a search result as function history and promotes loaded tools", () => {
+    const search = {
+      type: "tool_search", execution: "client",
+      parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    };
+    const loaded = { type: "function", name: "repo_read", description: "Read a repository file", parameters: { type: "object" } };
+    const raw = {
+      tools: [search],
+      input: [
+        { type: "tool_search_call", id: "tsc_1", call_id: "call_1", execution: "client", arguments: { query: "repo read" } },
+        { type: "tool_search_output", call_id: "call_1", execution: "client", status: "completed", tools: [loaded] },
+      ],
+    };
+    const lowered = lowerXaiToolSearch(raw);
+    const body = lowered.body as any;
+    expect(body.input[0]).toMatchObject({ type: "function_call", name: lowered.alias, call_id: "call_1", arguments: JSON.stringify({ query: "repo read" }) });
+    expect(body.input[1]).toMatchObject({ type: "function_call_output", call_id: "call_1" });
+    expect(JSON.parse(body.input[1].output)).toEqual({ status: "completed", loaded_tools: [loaded] });
+    expect(body.tools).toContainEqual(loaded);
+    expect(raw.input[0].type).toBe("tool_search_call");
+  });
+
   test("flattens Codex namespaces, preserves the synthetic functions group, and avoids flat-name collisions", () => {
     const raw = {
       tools: [

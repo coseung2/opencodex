@@ -188,6 +188,12 @@ function flattenNamespaceTool(tool: Record<string, unknown>, plan: NamespaceAlia
   return flattened;
 }
 
+function normalizeXaiToolSearch(tool: Record<string, unknown>): Record<string, unknown> {
+  if (tool.type !== "tool_search" || tool.execution !== "client") return tool;
+  const { execution: _execution, ...rest } = tool;
+  return rest;
+}
+
 function rewriteToolGroup(group: unknown[], plan: NamespaceAliasPlan): { group: unknown[]; changed: boolean } {
   let changed = false;
   const next: unknown[] = [];
@@ -199,10 +205,12 @@ function rewriteToolGroup(group: unknown[], plan: NamespaceAliasPlan): { group: 
     const flattened = flattenNamespaceTool(tool, plan);
     if (flattened) {
       changed = true;
-      next.push(...flattened);
+      next.push(...flattened.map(entry => isPlainObject(entry) ? normalizeXaiToolSearch(entry) : entry));
       continue;
     }
-    next.push(tool);
+    const normalized = normalizeXaiToolSearch(tool);
+    changed ||= normalized !== tool;
+    next.push(normalized);
   }
   return changed ? { group: next, changed: true } : { group, changed: false };
 }
@@ -259,7 +267,8 @@ export function xaiResponsesNamespaceToolAliases(body: unknown): Map<string, Nam
 }
 
 /**
- * Lower Codex private `namespace` tool declarations to xAI-compatible flat function declarations.
+ * Lower Codex private `namespace` tool declarations to xAI-compatible flat function declarations
+ * and remove the client-only execution marker from native tool-search declarations.
  * Ordinary built-ins grouped under the synthetic `functions` namespace remain bare. Real namespaces
  * use their canonical `<namespace>__<name>` spelling when it is safe and collision-free, otherwise
  * a deterministic opaque alias. Replayed function calls and explicit tool selectors follow the same
@@ -268,9 +277,11 @@ export function xaiResponsesNamespaceToolAliases(body: unknown): Map<string, Nam
 export function lowerXaiResponsesNamespaceTools(body: unknown): { body: unknown; aliases: Map<string, NamespacedToolIdentity> } {
   if (!isPlainObject(body)) return { body, aliases: new Map() };
   const plan = buildAliasPlan(body);
-  const hasNamespace = plan.byIdentity.size > 0
-    || toolContainers(body).some(group => group.some(tool => isPlainObject(tool) && tool.type === "namespace"));
-  if (!hasNamespace) return { body, aliases: plan.responseAliases };
+  const needsCompatibility = plan.byIdentity.size > 0
+    || toolContainers(body).some(group => group.some(tool => isPlainObject(tool) && (
+      tool.type === "namespace" || (tool.type === "tool_search" && tool.execution === "client")
+    )));
+  if (!needsCompatibility) return { body, aliases: plan.responseAliases };
 
   let changed = false;
   let tools = body.tools;
