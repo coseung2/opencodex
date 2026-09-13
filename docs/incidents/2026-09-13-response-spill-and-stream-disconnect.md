@@ -1,7 +1,15 @@
 # Response snapshot duplication and upstream stream disconnects
 
 - Date/timezone: 2026-09-13, Asia/Seoul (UTC+09:00).
-- Status: investigated; no runtime remediation or restart performed.
+- Status: remediation released and VM restarted; original long-session symptom recovery still requires observation.
+
+## Deployment update (19:11 KST)
+
+- Release `2.8.0-cs.25`, commit `6b59e71718b461c484556936c5f0080d48c20752`, passed local tests, Cross-platform CI and Service lifecycle. Release run `34749063664` completed successfully and the npm version was independently queried.
+- GitHub dispatch initially returned HTTP 500; no run had been created, and one retry succeeded. The first deployment script invocation failed on Windows CRLF before service mutation; sending UTF-8 bytes with LF corrected the transport.
+- Previous VM package retained at `/home/ubuntu/.local/lib/node_modules/@coseung2/opencodex-pre-cs25-1789294241`. Exact npm version installed; user service restarted at 19:10:51 KST with PID 3931734.
+- Both VM-local and Tailscale health probes returned `status: ok`, version `2.8.0-cs.25`. Startup briefly reset the first health probe before the next succeeded. Core changed file hashes were checked against source.
+- Release adds same-account SSE retry only before any Responses event, bounded close diagnostics, full-history Kiro image retirement, and shared image storage with admission limits. Health/version checks do not establish that every original model repetition or connection failure is eliminated.
 - Impact: excessive continuation snapshot storage; reported repeated commentary and interrupted Responses streams.
 
 ## Evidence and timeline
