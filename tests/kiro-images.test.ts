@@ -48,6 +48,26 @@ function resumedParsedWith(messages: unknown[], replayMessagePrefixLength: numbe
 }
 
 describe("kiro adapter — native images", () => {
+  test("full-history tool continuation retires seen pixels without a replay marker", async () => {
+    const request = parsedWith([
+      { role: "user", content: [{ type: "text", text: "inspect" }, { type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` }] },
+      { role: "assistant", content: [{ type: "text", text: "already inspected" }, { type: "toolCall", id: "call_read", name: "read", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call_read", toolName: "read", content: "file contents", timestamp: 0 },
+    ]);
+    const { body } = await createKiroAdapter(provider).buildRequest(request);
+    expect(body).not.toContain(ONE_PX_PNG);
+    expect(body).toContain("already inspected");
+    expect(body).toContain("file contents");
+  });
+
+  test("full-history user reinspection keeps the latest reference image", async () => {
+    const { body } = await createKiroAdapter(provider).buildRequest(parsedWith([
+      { role: "user", content: [{ type: "image", imageUrl: `data:image/png;base64,${ONE_PX_PNG}` }] },
+      { role: "assistant", content: [{ type: "text", text: "inspected" }] },
+      { role: "user", content: "Look at that image again" },
+    ]));
+    expect(body).toContain(ONE_PX_PNG);
+  });
   test("data URL image attaches to userInputMessage.images", async () => {
     const messages = [{
       role: "user",

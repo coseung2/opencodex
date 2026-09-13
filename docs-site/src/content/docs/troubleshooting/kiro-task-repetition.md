@@ -27,6 +27,8 @@ Below the budget, declaration order is unchanged. Namespaced MCP shell tools do 
 
 ## Completion and conversation state
 
+Full-history tool continuations retire image bytes that precede the latest assistant response, even without a `previous_response_id` replay marker. New tool-result images remain available. A fresh user turn may still reference the most recent image-bearing message; assistant text and tool results are preserved. This prevents repeated delivery of old screenshots during tool work without treating progress text as a reason to terminate the task.
+
 Kiro's existing private completion channel still ends the turn. Progress text is not a final answer, and a delivered final answer must not reopen the task. Real user follow-ups continue normally. This correction does not discard tool history, change reasoning-blob replay, remove repeated calls solely because their arguments match, or introduce automatic command retries.
 
 Assistant messages marked `phase: "commentary"` are preserved in the Kiro history. They can contain decisions, completed steps, rejected hypotheses, and the next unfinished action, so dropping them can make a later tool-result round look as if the task state was lost. The same history is used when a routed compaction turn creates its checkpoint summary, so preserving commentary also prevents those decisions from disappearing at compaction. Historical commentary is input context only; OpenCodex does not automatically stream it to the UI again, and Kiro is explicitly instructed not to repeat or paraphrase earlier progress updates.

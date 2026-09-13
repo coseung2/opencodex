@@ -497,6 +497,23 @@ describe("codexWsUpstreamFetch", () => {
     await expect(response.text()).rejects.toThrow("closed before a Responses terminal event");
   });
 
+  test("an empty post-upgrade close retries once over SSE with the same request", async () => {
+    installFake(ws => { ws.emit("open"); ws.close(); });
+    const init = streamingInit();
+    let calls = 0;
+    const fallback = (async (url: unknown, request: unknown) => {
+      calls++;
+      expect(url).toBe(CODEX_URL);
+      expect(request).toBe(init);
+      return new Response("retry status preserved", { status: 429 });
+    }) as typeof fetch;
+    const response = await codexWsUpstreamFetch(CODEX_URL, init, fallback);
+    expect(response.status).toBe(429);
+    expect(await response.text()).toBe("retry status preserved");
+    expect(calls).toBe(1);
+    expect(isCodexWsUpstreamResponse(response)).toBe(false);
+  });
+
   test("rejects an oversized upstream frame before parsing or enqueueing it", async () => {
     installFake(ws => {
       ws.emit("open", {});
@@ -613,15 +630,15 @@ describe("codexWsUpstreamFetch", () => {
   test("aborting after open preserves the caller's abort reason", async () => {
     installFake(ws => ws.emit("open", {}));
     const controller = new AbortController();
-    const response = await codexWsUpstreamFetch(
+    const pending = codexWsUpstreamFetch(
       CODEX_URL,
       { ...streamingInit(), signal: controller.signal },
       (() => { throw new Error("fallback must not run"); }) as unknown as typeof fetch,
     );
 
+    await Promise.resolve();
     controller.abort(new Error("turn cancelled"));
-
-    await expect(response.text()).rejects.toThrow("turn cancelled");
+    await expect(pending).rejects.toThrow("turn cancelled");
     expect(FakeWebSocket.instances[0].closed).toBe(true);
   });
 });

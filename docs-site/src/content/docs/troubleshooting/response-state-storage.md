@@ -21,6 +21,12 @@ A skipped replacement does not bypass file-protection requirements. Symlink leav
 
 ## Troubleshooting
 
+Large image data URLs in new spill snapshots share a content-addressed SQLite image store rather than being copied into every response file. Keep `responses-state-spill/images.sqlite` with the spill files when backing up continuation state. Older inline snapshots remain readable and expire normally; they are not rewritten during an active session. Removing a snapshot releases only its own image references.
+
+Spill admission has a 2 GiB directory budget; the shared image database is separately capped at 512 MiB. Existing referenced snapshots are not deleted to make room. An admission failure remains an explicit unavailable-continuation error rather than silently dropping part of the conversation. SQLite can retain freed pages for reuse, so deleting expired references need not immediately shrink its file.
+
+For native Codex WebSocket connections, an empty disconnect before any Responses event retries once using HTTP/SSE with the same account and request. Once any Responses event arrives, including `response.created`, there is no automatic replay. Diagnostics include the close code and last event type, without logging arbitrary upstream close-reason text.
+
 Do not edit or remove continuation snapshots or spill files while a proxy is serving a task. A missing or unreadable continuation may require the client to resend its full input. Use the dashboard memory diagnostics for retained-state observations, and allow an ordinary stop to finish when preserving recent continuation state matters.
 
 The snapshot, spill files and usage logs serve different purposes. Removing a snapshot is not a general-purpose fix for high process memory or large usage logs.

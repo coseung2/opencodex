@@ -508,9 +508,24 @@ export function buildKiroPayload(
     Math.max(0, parsed._replayMessagePrefixLen ?? 0),
     payloadMessages.length,
   );
+  // Full-history clients need no previous_response_id and consequently have no
+  // parser replay marker. An assistant reply still proves earlier pixels were
+  // already presented. Keep new images; on a fresh user turn allow the most
+  // recent image-bearing message as reference context (e.g. "look again").
+  let lastAssistantIndex = -1;
+  let latestImageIndex = -1;
+  for (let i = 0; i < payloadMessages.length; i++) {
+    const message = payloadMessages[i];
+    if (message.role === "assistant") lastAssistantIndex = i;
+    if (Array.isArray(message.content) && message.content.some(part => part.type === "image")) latestImageIndex = i;
+  }
+  const freshUserReference = !replayMessagePrefixLength
+    && payloadMessages.at(-1)?.role === "user";
   for (let messageIndex = 0; messageIndex < payloadMessages.length; messageIndex++) {
     const msg = payloadMessages[messageIndex];
-    const isReplayedMessage = messageIndex < replayMessagePrefixLength;
+    const isReplayedMessage = replayMessagePrefixLength > 0
+      ? messageIndex < replayMessagePrefixLength
+      : messageIndex < lastAssistantIndex && !(freshUserReference && messageIndex === latestImageIndex);
     // Preserve source-message adjacency even when the turn normalization below would collapse or
     // skip a structural message.
     if (msg.role !== "toolResult") finishAdjacentResult();

@@ -157,12 +157,16 @@ export function codexWsUpstreamFetch(
     let opened = false;
     let settledPreOpen = false;
     let terminal = false;
+    let response: Response | undefined;
+    let responsePublished = false;
+    let lastEvent = "none";
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
 
     const failStream = (message: string) => {
       if (terminal) return;
       terminal = true;
+      if (response && !responsePublished) { responsePublished = true; resolve(response); }
       try { controller?.error(new Error(message)); } catch { /* stream already done */ }
       try { ws.close(); } catch { /* already closing */ }
     };
@@ -188,6 +192,7 @@ export function codexWsUpstreamFetch(
       }
       if (controller && !terminal) {
         terminal = true;
+        if (!responsePublished) reject(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
         // Mirror an aborted fetch: the body read rejects with the abort reason.
         try { controller.error(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError")); } catch { /* stream already done */ }
       }
@@ -217,14 +222,15 @@ export function codexWsUpstreamFetch(
         start(c) { controller = c; },
         cancel() { try { ws.close(); } catch { /* already closing */ } },
       }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_CODEX_WS_QUEUE_BYTES }));
-      const response = new Response(stream, {
+      response = new Response(stream, {
         status: 200,
         // The 101 response headers (x-codex-*-reset-at quota hints) are not
         // exposed by Bun's WebSocket; the periodic quota poller covers those.
         headers: { "content-type": "text/event-stream; charset=utf-8" },
       });
       codexWsUpstreamResponses.add(response);
-      resolve(response);
+      // Keep the HTTP status undecided until upstream acknowledges the turn.
+      // An empty post-upgrade disconnect can then use the same-account SSE path.
     });
 
     ws.addEventListener("message", (event) => {
@@ -250,6 +256,10 @@ export function codexWsUpstreamFetch(
       // frames (codex.rate_limits, responsesapi.websocket_timing) are dropped
       // so downstream clients see exactly the stream shape they always got.
       if (!type.startsWith("response.") && type !== "error") return;
+      // Never replay after ANY Responses event, including response.created:
+      // upstream may already be executing hosted tools before visible text.
+      lastEvent = /^[a-z._]{1,80}$/.test(type) ? type : "other";
+      if (response && !responsePublished) { responsePublished = true; resolve(response); }
       const prefix = encoder.encode(`event: ${type}\ndata: `);
       const suffix = encoder.encode("\n\n");
       const isTerminal = type === "response.completed" || type === "response.failed"
@@ -289,7 +299,7 @@ export function codexWsUpstreamFetch(
       }
     });
 
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (event) => {
       signal?.removeEventListener("abort", onAbort);
       if (!opened) {
         if (settledPreOpen) return;
@@ -303,11 +313,19 @@ export function codexWsUpstreamFetch(
       }
       if (controller && !terminal) {
         terminal = true;
+        const code = Number.isInteger(event.code) ? event.code : 0;
+        // Do not log arbitrary upstream reason text: it can contain request data.
+        console.warn(`[codex-ws] premature_close code=${code} last_event=${lastEvent} reason_present=${Boolean(event.reason)} fallback=${!responsePublished}`);
+        if (!responsePublished && !signal?.aborted) {
+          try { controller.close(); } catch { /* already closed */ }
+          resolve(sseFallback(url, init));
+          return;
+        }
         // Connection dropped before a Responses terminal event. A clean EOF
         // here would reach clients with no response.completed/failed at all —
         // relaySseWithFailedTail() only synthesizes a failed terminal when the
         // body read THROWS. Error the stream like a reset TCP socket.
-        try { controller.error(new Error("codex websocket closed before a Responses terminal event")); } catch { /* stream already done */ }
+        try { controller.error(new Error(`codex websocket closed before a Responses terminal event (code=${code}, last_event=${lastEvent})`)); } catch { /* stream already done */ }
       }
     });
 

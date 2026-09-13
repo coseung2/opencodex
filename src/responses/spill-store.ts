@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { forgetHardenedSecretPath, hardenSecretDir, hardenSecretPath } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
+import { encodeSpillImages, decodeSpillImages, releaseSpillImages } from "./spill-images";
 
 export const RESPONSE_SPILL_VERSION = 1;
 export const RESPONSE_SPILL_DIR_NAME = "responses-state-spill";
@@ -27,6 +28,20 @@ export const RESPONSE_SPILL_SCAN_MAX = 4_096;
 export const RESPONSE_SPILL_CLEANUP_MAX = 512;
 
 const RESPONSE_SPILL_PUBLISH_RETRIES = 64;
+export const MAX_RESPONSE_SPILL_DISK_BYTES = 2 * 1024 * 1024 * 1024;
+
+function checkDiskBudget(dir: string, additionalBytes: number): void {
+  const handle = opendirSync(dir);
+  let bytes = additionalBytes;
+  let count = 0;
+  try {
+    for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+      if (++count > RESPONSE_SPILL_SCAN_MAX) throw new Error("Response spill inventory exceeds limit");
+      if (entry.isFile()) bytes += lstatSync(join(dir, entry.name)).size;
+      if (bytes > MAX_RESPONSE_SPILL_DISK_BYTES) throw new Error("Response spill disk budget exceeded");
+    }
+  } finally { handle.closeSync(); }
+}
 const OWNED_SPILL_NAME = /^([A-Za-z0-9._-]{1,80})\.([0-9a-f]{12})\.([0-9a-f]{24})\.(\d+)\.(\d+)\.spill\.json$/;
 const OWNED_SPILL_TEMP_NAME = /^\.response-spill\.[0-9]+\.[0-9a-f]{16}\.tmp$/;
 
@@ -260,6 +275,8 @@ export function writeResponseSpillDurably(
 ): ResponseSpillRef {
   let tempPath: string | null = null;
   let fd: number | null = null;
+  let encoded: string | undefined;
+  const dir = responseSpillDirectory();
   try {
     const payload: ResponseSpillPayload = {
       version: 1,
@@ -270,13 +287,14 @@ export function writeResponseSpillDurably(
     };
     const serialized = JSON.stringify(payload);
     if (serialized === undefined) throw new Error("Response spill serialization failed");
-    const bytes = Buffer.from(serialized, "utf8");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    harden(dir, 0o700);
+    encoded = encodeSpillImages(serialized, randomBytes(16).toString("hex"), dir);
+    const bytes = Buffer.from(encoded, "utf8");
+    checkDiskBudget(dir, bytes.byteLength);
     const digest = sha256(bytes);
     const idDigest = sha256(responseId).slice(0, 12);
     const contentDigest = digest.slice(0, 24);
-    const dir = responseSpillDirectory();
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    harden(dir, 0o700);
 
     tempPath = join(dir, `.response-spill.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
     fd = openSync(tempPath, "wx", 0o600);
@@ -312,6 +330,7 @@ export function writeResponseSpillDurably(
     if (tempPath) {
       try { unlink(tempPath); } catch { /* best effort */ }
     }
+    if (encoded) { try { releaseSpillImages(encoded, dir); } catch { /* retain on cleanup failure */ } }
     throw new Error("Response spill write failed");
   }
 }
@@ -338,7 +357,7 @@ export function readResponseSpill(responseId: string, ref: ResponseSpillRef): Re
   }
   if (bytes.byteLength !== ref.payloadBytes || sha256(bytes) !== ref.digest) return { ok: false, reason: "corrupt" };
   try {
-    const payload = JSON.parse(bytes.toString("utf8")) as unknown;
+    const payload = JSON.parse(decodeSpillImages(bytes.toString("utf8"), responseSpillDirectory(), responseSpillPayloadCap())) as unknown;
     return validPayload(payload, responseId) ? { ok: true, payload } : { ok: false, reason: "corrupt" };
   } catch {
     return { ok: false, reason: "corrupt" };
@@ -349,8 +368,13 @@ export function deleteResponseSpill(ref: ResponseSpillRef): void {
   if (!validSpillRef(ref)) return;
   const dir = responseSpillDirectory();
   try {
+    const path = join(dir, ref.fileName);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > responseSpillPayloadCap()) return;
+    const serialized = readFileSync(path, "utf8");
     unlink(join(dir, ref.fileName));
     fsyncDirectoryBestEffort(dir);
+    releaseSpillImages(serialized, dir);
   } catch { /* best effort */ }
 }
 
@@ -389,7 +413,9 @@ export function recoverOrphanedResponseSpills(
       try { stat = lstatSync(path); } catch { continue; }
       if (!stat.isFile() || stat.isSymbolicLink() || Date.now() - stat.mtimeMs < graceMs) continue;
       try {
+        const serialized = spillMatch && stat.size <= responseSpillPayloadCap() ? readFileSync(path, "utf8") : undefined;
         unlink(path);
+        if (serialized) { try { releaseSpillImages(serialized, dir); } catch { /* preserve potentially shared images */ } }
         result.removed += 1;
         result.bytesRemoved += stat.size;
       } catch {

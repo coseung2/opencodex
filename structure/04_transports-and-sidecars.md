@@ -29,6 +29,8 @@ changes before committing the replacement. Already-delivered streaming output is
 
 ## Responses HTTP/SSE
 
+September 2026 incident follow-up: native Codex WS keeps response publication pending until its first Responses event. An empty post-upgrade close uses one same-account HTTP fallback; any Responses event commits the stream and forbids replay. Close diagnostics contain numeric code and bounded event type, never raw reason text. Full-history Kiro tool continuations retire pixels before their last assistant reply, while fresh user turns retain the newest image-bearing reference. Spill snapshots externalize large JSON image-string tokens into a transactional shared image store, preserving legacy inline reads and per-snapshot ownership. Admission is capped without evicting live references. This separates repeat-image prevention from conversation termination and disk deduplication from model context policy.
+
 `/v1/responses` is the main Codex-facing endpoint. The server parses Responses input, routes to a
 provider, lets the selected adapter speak the upstream protocol, then bridges adapter events back to
 Responses-compatible streaming output.
