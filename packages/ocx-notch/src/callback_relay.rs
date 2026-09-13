@@ -2,7 +2,11 @@
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
-const MAX_HEAD: usize = 8 * 1024;
+// Chrome includes every cookie scoped to `localhost`, including cookies created
+// by unrelated local development servers. 8 KiB is routinely too small for
+// that shared cookie jar and closing while Chrome is still writing the header
+// surfaces as ERR_CONNECTION_RESET instead of an HTTP error page.
+const MAX_HEAD: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(1);
 pub struct CallbackRelay {
@@ -211,7 +215,9 @@ fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, ReadFailure> {
                 }
             }
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                return Err(ReadFailure::Timeout)
+                if Instant::now() >= deadline {
+                    return Err(ReadFailure::Timeout);
+                }
             }
             Err(_) => return Err(ReadFailure::Invalid),
         }
@@ -310,7 +316,8 @@ mod tests {
             .unwrap()
             .split('/')
             .next()
-            .unwrap();
+            .unwrap()
+            .to_string();
         let mut relay = CallbackRelay::bind(&uri).unwrap();
         let raw =
             format!("GET /oauth/callback?code=a&state=b HTTP/1.1\r\nHost: {authority}\r\n\r\n");
@@ -320,6 +327,68 @@ mod tests {
             Some(format!("{uri}?code=a&state=b").as_str())
         );
         assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+    #[test]
+    fn accepts_chrome_callback_with_large_localhost_cookie_header() {
+        let uri = uri();
+        let authority = uri
+            .strip_prefix("http://")
+            .unwrap()
+            .split('/')
+            .next()
+            .unwrap();
+        let mut relay = CallbackRelay::bind(&uri).unwrap();
+        let cookies = "local-dev-cookie=x; ".repeat(900);
+        let raw = format!(
+            "GET /oauth/callback?code=a&state=b HTTP/1.1\r\nHost: {authority}\r\nCookie: {cookies}\r\n\r\n"
+        );
+
+        assert!(raw.len() > 8 * 1024);
+        let (value, response) = request(&mut relay, raw.as_bytes());
+
+        assert_eq!(
+            value.as_deref(),
+            Some(format!("{uri}?code=a&state=b").as_str())
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+    #[test]
+    fn accepts_callback_when_chrome_sends_headers_in_delayed_chunks() {
+        let uri = uri();
+        let authority = uri
+            .strip_prefix("http://")
+            .unwrap()
+            .split('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let mut relay = CallbackRelay::bind(&uri).unwrap();
+        let address = relay.listeners[0].local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(b"GET /oauth/callback?code=a&state=b HTTP/1.1\r\n")
+                .unwrap();
+            thread::sleep(IO_TIMEOUT + Duration::from_millis(100));
+            stream
+                .write_all(format!("Host: {authority}\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+
+        let started = Instant::now();
+        let value = loop {
+            if let Some(value) = relay.try_callback().unwrap() {
+                break value;
+            }
+            assert!(started.elapsed() < Duration::from_secs(2));
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        assert_eq!(value, format!("{uri}?code=a&state=b"));
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK"));
     }
     #[test]
     fn rejects_wrong_path_method_and_host() {

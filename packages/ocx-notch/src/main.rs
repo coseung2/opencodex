@@ -1419,8 +1419,12 @@ fn account_identity_right(width: i32, action_left: Option<i32>, reauth_left: Opt
         .unwrap_or_else(|| account_health_rect(width, 0, false).left - ACCOUNT_ACTION_GAP)
 }
 
-fn reauth_action_rect(width: i32, top: i32) -> RECT {
-    let right = (width - 18).max(ACCOUNT_IDENTITY_LEFT + 84 + REAUTH_ACTION_WIDTH);
+fn reauth_action_rect(width: i32, top: i32, can_delete: bool) -> RECT {
+    let right = if can_delete {
+        account_delete_rect(width, top).left - ACCOUNT_ACTION_GAP
+    } else {
+        (width - 18).max(ACCOUNT_IDENTITY_LEFT + 84 + REAUTH_ACTION_WIDTH)
+    };
     RECT {
         left: right - REAUTH_ACTION_WIDTH,
         top,
@@ -4841,8 +4845,8 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                 for account in provider.accounts {
                     let account_height = account_height(&account);
                     let reauth = reauth_eligible(&provider.name, &account);
-                    let reauth_rect = reauth_action_rect(width, y);
                     let can_delete = !account.is_main && account.id != "__main__";
+                    let reauth_rect = reauth_action_rect(width, y, can_delete);
                     if can_delete {
                         let rect = account_delete_rect(width, y);
                         let control = AccountSwitchControl {
@@ -8105,7 +8109,7 @@ mod account_control_tests {
     #[test]
     fn reauth_text_shares_the_account_name_row_without_extra_height() {
         let top = 120;
-        let rect = reauth_action_rect(DEFAULT_WIDTH, top);
+        let rect = reauth_action_rect(DEFAULT_WIDTH, top, false);
         assert_eq!(rect.top, top);
         assert_eq!(rect.bottom, top + 30);
         assert_eq!(
@@ -8488,6 +8492,25 @@ mod account_control_tests {
             assert_eq!(health.top, delete.top);
             assert_eq!(health.bottom, delete.bottom);
         }
+    }
+
+    #[test]
+    fn deletable_account_reauth_stays_clear_of_delete_action() {
+        for width in [MIN_WIDTH, DEFAULT_WIDTH] {
+            let reauth = reauth_action_rect(width, 120, true);
+            let delete = account_delete_rect(width, 120);
+
+            assert_eq!(delete.left - reauth.right, ACCOUNT_ACTION_GAP);
+            assert_eq!(reauth.top, delete.top);
+            assert_eq!(reauth.bottom, delete.bottom);
+        }
+    }
+
+    #[test]
+    fn main_account_reauth_keeps_the_full_right_edge() {
+        let reauth = reauth_action_rect(DEFAULT_WIDTH, 120, false);
+        assert_eq!(reauth.right, DEFAULT_WIDTH - 18);
+        assert_eq!(reauth.right - reauth.left, REAUTH_ACTION_WIDTH);
     }
 
     #[test]
