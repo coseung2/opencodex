@@ -217,6 +217,48 @@ pub fn validate_catalog(catalog: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn configured_catalog_path(dir: &Path) -> Result<PathBuf, String> {
+    let config_path = dir.join("config.toml");
+    let config = match fs::read_to_string(&config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(dir.join("ocx-notch-catalog.json"));
+        }
+        Err(_) => return Err("Could not read Codex config.toml".into()),
+    };
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            break;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().trim_matches(['\'', '"']) != "model_catalog_json" {
+            continue;
+        }
+        let value = value.trim();
+        let decoded = if value.starts_with('"') {
+            serde_json::from_str::<String>(value)
+                .map_err(|_| "Invalid model_catalog_json in Codex config.toml")?
+        } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+            value[1..value.len() - 1].to_string()
+        } else {
+            return Err("Invalid model_catalog_json in Codex config.toml".into());
+        };
+        if decoded.is_empty() {
+            return Err("Invalid model_catalog_json in Codex config.toml".into());
+        }
+        let path = PathBuf::from(decoded);
+        return Ok(if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        });
+    }
+    Ok(dir.join("ocx-notch-catalog.json"))
+}
+
 pub fn sync_catalog(profile: &Profile, catalog: &Value) -> Result<(), String> {
     validate_catalog(catalog)?;
     if read_mode() != "remote" {
@@ -225,8 +267,9 @@ pub fn sync_catalog(profile: &Profile, catalog: &Value) -> Result<(), String> {
     if connection::saved_profile()?.is_none_or(|p| p.endpoint != profile.endpoint) {
         return Ok(());
     }
+    let dir = codex_dir()?;
     atomic_write(
-        &codex_dir()?.join("ocx-notch-catalog.json"),
+        &configured_catalog_path(&dir)?,
         &serde_json::to_vec(catalog).map_err(|_| "Invalid catalog")?,
     )
 }
@@ -332,6 +375,45 @@ mod tests {
             .is_err());
         }
         assert!(validate_catalog(&serde_json::json!({"models":[]})).is_err());
+    }
+    #[test]
+    fn catalog_sync_uses_the_configured_root_path() {
+        let root = std::env::temp_dir().join(format!(
+            "ocx-notch-catalog-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        fs::write(
+            root.join("config.toml"),
+            "model_catalog_json = \"nested/catalog.json\"\n[model_providers.ocx-vm]\nmodel_catalog_json = \"ignored.json\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_catalog_path(&root).unwrap(),
+            root.join("nested/catalog.json")
+        );
+
+        fs::write(
+            root.join("config.toml"),
+            "model_provider = 'ocx-vm'\nmodel_catalog_json = 'legacy.json'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured_catalog_path(&root).unwrap(),
+            root.join("legacy.json")
+        );
+
+        fs::write(root.join("config.toml"), "model_provider = \"ocx-notch\"\n").unwrap();
+        assert_eq!(
+            configured_catalog_path(&root).unwrap(),
+            root.join("ocx-notch-catalog.json")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn cpu_uses_interval_and_rejects_restart_or_invalid_counters() {

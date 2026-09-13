@@ -154,6 +154,8 @@ Notch's credential command; no token is written into `config.toml`.
 
 Notch updates `CODEX_HOME/config.toml` (normally `%USERPROFILE%\.codex\config.toml`)
 and uses the `ocx-notch` provider with the downloaded `ocx-notch-catalog.json`.
+Later model visibility changes refresh the root `model_catalog_json` path currently configured
+in Codex, including compatible pre-existing remote provider configurations.
 It preserves unrelated settings and saves `config.toml.before-notch` before the
 first change. Active Codex profiles and multiline TOML strings require manual
 configuration; Notch reports these instead of rewriting them. Conversation history
