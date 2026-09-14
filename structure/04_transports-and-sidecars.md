@@ -151,6 +151,12 @@ unrelated models.
 
 ### Passthrough SSE stream shapes (#314)
 
+Native Responses relays treat `response.completed`, `response.failed`, and
+`response.incomplete` as the authoritative stream boundary. The client receives
+the complete terminal block plus one `[DONE]` sentinel, and the upstream reader
+is cancelled without waiting for HTTP EOF. This covers compatible gateways such
+as xAI that may keep the response body open after delivering the model terminal.
+
 Native passthrough SSE has TWO shapes, selected per request in
 `src/server/responses/core.ts`:
 

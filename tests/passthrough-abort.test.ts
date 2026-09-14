@@ -47,15 +47,13 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     );
 
     expect(sseBranch).toContain("upstreamResponse.body.tee()");
-    // win32 must receive the tee'd body untouched when no client rewrite is required — no JS pull
-    // wrapper on the default path (Bun#32111 segfault).
+    // Every tee path uses the terminal-aware relay; Windows rewrite traffic
+    // continues to use the eager single-reader path.
     expect(sseBranch).toContain("const repairConfig = route.provider.responsesItemIdRepair;");
     expect(sseBranch).toContain("const needsClientRewrite = imageGenCallAliases.size > 0");
     expect(sseBranch).toContain("new Response(eagerBody");
     expect(sseBranch).toContain("const rewrittenBody = payloadRewrites.length > 0");
-    expect(sseBranch).toContain('process.platform === "win32"');
-    expect(sseBranch).toContain("&& !needsClientRewrite");
-    expect(sseBranch).toContain("? nativeBody");
+    expect(sseBranch).toContain("eagerPath?.useEagerRelay || win32EagerRewrite");
     // #864: win32 traffic that DOES need a client rewrite takes the eager single
     // reader with the payload rewrite applied inline — never the tee()+JS-pull
     // chain that loses the terminal block on Windows (Bun#32111).

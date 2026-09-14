@@ -131,8 +131,8 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
     expect(text).toContain("RESTORED");
     expect(text).not.toContain("image_gen__gen");
     expect(text).toContain("response.completed");
-    // A partial trailing block reaches the client verbatim at EOF.
-    expect(text).toContain("trailing-partial");
+    expect(text).not.toContain("trailing-partial");
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
   });
 
   test("identity rewrite preserves framing byte-for-byte", async () => {
@@ -153,7 +153,9 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
     up.close();
 
     const text = await reading;
-    expect(text).toBe(new TextDecoder().decode(joinBytes([first, enc.encode(second)])));
+    expect(text).toBe(
+      new TextDecoder().decode(joinBytes([first, enc.encode(second)])) + "data: [DONE]\n\n",
+    );
     // The rewrite actually ran — this is what makes the test red pre-fix.
     expect(rewriteCalls).toBeGreaterThan(0);
   });
@@ -193,7 +195,7 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
     expect(text).toBe("data: �");
   });
 
-  test("retained rewrite-budget bytes are released on upstream abort", async () => {
+  test("terminal framing keeps partial blocks out of the rewrite budget", async () => {
     const budget = createTranslatorBudget();
     const up = controlledUpstream();
     const ac = new AbortController();
@@ -203,13 +205,13 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
 
     up.push(enc.encode(`data: {"type":"unterminated"`));
     await settle();
-    expect(budget.snapshot().currentBytes).toBeGreaterThan(0);
+    expect(budget.snapshot().currentBytes).toBe(0);
     ac.abort(new Error("test abort"));
     await settle();
     expect(budget.snapshot().currentBytes).toBe(0);
   });
 
-  test("blocks without a data field pass through untouched", async () => {
+  test("blocks without a data field pass through untouched before the terminal", async () => {
     const up = controlledUpstream();
     const { hooks } = makeHooks();
     let rewriteCalls = 0;
@@ -220,8 +222,8 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
     const relayed = relaySseEagerBounded(up.stream, new AbortController(), hooks);
     const reading = readAll(relayed);
 
-    up.push(enc.encode(`event: response.completed\ndata: ${COMPLETED}\n\n`));
     up.push(enc.encode(`: keepalive comment\n\n`));
+    up.push(enc.encode(`event: response.completed\ndata: ${COMPLETED}\n\n`));
     up.close();
 
     const text = await reading;
@@ -317,7 +319,7 @@ describe("relaySseEagerBounded — side-effect parity", () => {
 
     const clientBytes = await readAllBytes(relayed);
     await settle();
-    expect(clientBytes).toEqual(joinBytes(frames));
+    expect(clientBytes).toEqual(joinBytes([...frames, enc.encode("data: [DONE]\n\n")]));
     const wireText = new TextDecoder().decode(clientBytes);
     expect(wireText).not.toContain('"output":');
     expect(rec.completed).toHaveLength(1);
@@ -464,6 +466,25 @@ describe("relaySseEagerBounded — #44 cancel semantics", () => {
 });
 
 describe("relaySseEagerBounded — error paths", () => {
+  test("terminal closes the client and lifecycle while upstream remains open", async () => {
+    const { hooks, rec } = makeHooks();
+    const up = controlledUpstream();
+    const relayed = relaySseEagerBounded(up.stream, new AbortController(), hooks);
+    const reading = readAll(relayed);
+    up.push(sse(COMPLETED));
+
+    const out = await Promise.race([
+      reading,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("eager relay did not close at terminal")), 200)),
+    ]);
+    await settle();
+
+    expect(out).toContain("response.completed");
+    expect(out.endsWith("data: [DONE]\n\n")).toBe(true);
+    expect(rec.terminals).toEqual([{ status: "completed", httpStatus: undefined }]);
+    expect(rec.dones).toBe(1);
+  });
+
   test("(e/090-1) mid-stream upstream error → clean failed tail + onSynthetic/onDone once", async () => {
     const { hooks, rec } = makeHooks();
     const inspectChunk = hooks.inspectChunk;

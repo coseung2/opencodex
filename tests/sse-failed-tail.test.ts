@@ -59,6 +59,42 @@ describe("relaySseWithFailedTail", () => {
     expect(upstream.signal.aborted).toBe(false);
   });
 
+  test("closes at a fragmented terminal while upstream remains open", async () => {
+    const upstream = new AbortController();
+    let sourceCancelled = false;
+    let sent = 0;
+    const chunks = [
+      "event: response.completed\n",
+      'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+    ];
+    const src = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent < chunks.length) controller.enqueue(encoder.encode(chunks[sent++]!));
+      },
+      cancel() { sourceCancelled = true; },
+    });
+
+    const out = await Promise.race([
+      drain(relaySseWithFailedTail(src, upstream)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("relay did not close at terminal")), 200)),
+    ]);
+
+    expect(out).toContain("response.completed");
+    expect(out.endsWith("data: [DONE]\n\n")).toBe(true);
+    expect(sourceCancelled).toBe(true);
+    expect(upstream.signal.aborted).toBe(false);
+  });
+
+  test("drops coalesced frames after the terminal and emits DONE once", async () => {
+    const terminal = 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","note":"data: [DONE]"}}\n\n';
+    const trailing = 'data: {"type":"response.output_text.delta","delta":"must not leak"}\n\n';
+    const out = await drain(relaySseWithFailedTail(sourceStream([terminal + trailing]), new AbortController()));
+
+    expect(out).not.toContain("must not leak");
+    expect(out.split("data: [DONE]").length - 1).toBe(2); // one JSON string plus one real SSE sentinel
+    expect(out.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
   test("mid-stream error keeps prior bytes and appends a clean failed terminal", async () => {
     const upstream = new AbortController();
     const src = sourceStream(['data: {"type":"response.output_text.delta","delta":"hel', ""], { failAfter: true });
