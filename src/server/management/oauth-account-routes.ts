@@ -25,6 +25,8 @@ import {
 } from "../../oauth";
 import { OAuthMutationBusyError, removeCredential } from "../../oauth/store";
 import { isOauthAccountPaused, setOauthAccountPaused } from "../../oauth/account-pause";
+import { anthropicPoolDefaultCooldownMs, anthropicPoolMaxFailoversPerRequest } from "../../oauth/anthropic-routing";
+import { clearKiroAccountCooldown, kiroPoolDefaultCooldownMs, kiroPoolMaxFailoversPerRequest, resetKiroRoutingForManualSelection } from "../../oauth/kiro-routing";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
@@ -351,6 +353,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (provider === "anthropic") {
       const { resetAnthropicRoutingForManualSelection } = await import("../../oauth/anthropic-routing");
       resetAnthropicRoutingForManualSelection(body.accountId);
+    } else if (provider === "kiro") {
+      resetKiroRoutingForManualSelection(body.accountId);
     }
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
@@ -388,10 +392,20 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     return jsonResponse({ ok: true, provider, accountId: body.accountId, paused: body.paused });
   }
 
-  // Opt-in Anthropic OAuth account pool (#294): enable/threshold/strategy + clear cooldown.
+  // Opt-in OAuth account pools. Kiro is deliberately error-driven because it has no
+  // reliable per-account quota endpoint; Anthropic additionally exposes usage strategy controls.
   if (url.pathname === "/api/oauth/accounts/pool" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
-    if (provider !== "anthropic") return jsonResponse({ error: "pool config is only supported for anthropic" }, 400);
+    if (provider === "kiro") {
+      return jsonResponse({
+        provider,
+        enabled: config.kiroAccountPool?.enabled === true,
+        maxFailoversPerRequest: kiroPoolMaxFailoversPerRequest(config),
+        defaultCooldownSeconds: kiroPoolDefaultCooldownMs(config) / 1_000,
+        errorDriven: true,
+      });
+    }
+    if (provider !== "anthropic") return jsonResponse({ error: "pool config is only supported for anthropic and kiro" }, 400);
     const pool = config.anthropicAccountPool ?? {};
     return jsonResponse({
       provider,
@@ -399,6 +413,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold: typeof pool.autoSwitchThreshold === "number" ? pool.autoSwitchThreshold : 80,
       strategy: normalizeAccountPoolStrategy(pool.strategy),
       stickyLimit: normalizeAccountPoolStickyLimit(pool.stickyLimit),
+      maxFailoversPerRequest: anthropicPoolMaxFailoversPerRequest(config),
+      defaultCooldownSeconds: anthropicPoolDefaultCooldownMs(config) / 1_000,
       experimental: true,
     });
   }
@@ -413,9 +429,43 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold?: unknown;
       strategy?: unknown;
       stickyLimit?: unknown;
+      maxFailoversPerRequest?: unknown;
+      defaultCooldownSeconds?: unknown;
     };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
-    if (provider !== "anthropic") return jsonResponse({ error: "pool config is only supported for anthropic" }, 400);
+    if (provider === "kiro") {
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+        return jsonResponse({ error: "enabled must be a boolean" }, 400);
+      }
+      if (
+        body.maxFailoversPerRequest !== undefined
+        && (typeof body.maxFailoversPerRequest !== "number"
+          || !Number.isInteger(body.maxFailoversPerRequest)
+          || body.maxFailoversPerRequest < 0
+          || body.maxFailoversPerRequest > 20)
+      ) return jsonResponse({ error: "maxFailoversPerRequest must be an integer 0-20" }, 400);
+      if (
+        body.defaultCooldownSeconds !== undefined
+        && (typeof body.defaultCooldownSeconds !== "number"
+          || !Number.isInteger(body.defaultCooldownSeconds)
+          || body.defaultCooldownSeconds < 1
+          || body.defaultCooldownSeconds > 900)
+      ) return jsonResponse({ error: "defaultCooldownSeconds must be an integer 1-900" }, 400);
+      const enabled = body.enabled === undefined ? config.kiroAccountPool?.enabled === true : body.enabled;
+      config.kiroAccountPool = {
+        enabled,
+        maxFailoversPerRequest: body.maxFailoversPerRequest === undefined
+          ? kiroPoolMaxFailoversPerRequest(config)
+          : body.maxFailoversPerRequest,
+        defaultCooldownSeconds: body.defaultCooldownSeconds === undefined
+          ? kiroPoolDefaultCooldownMs(config) / 1_000
+          : body.defaultCooldownSeconds,
+      };
+      saveConfigPreservingClaudeCode(config);
+      reconcileLiveStateStores();
+      return jsonResponse({ ok: true, provider, ...config.kiroAccountPool, errorDriven: true });
+    }
+    if (provider !== "anthropic") return jsonResponse({ error: "pool config is only supported for anthropic and kiro" }, 400);
     let enabled = config.anthropicAccountPool?.enabled === true;
     if (body.enabled !== undefined) {
       if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
@@ -449,11 +499,33 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       }
       stickyLimit = parsed;
     }
+    let maxFailoversPerRequest = anthropicPoolMaxFailoversPerRequest(config);
+    if (body.maxFailoversPerRequest !== undefined) {
+      if (
+        typeof body.maxFailoversPerRequest !== "number"
+        || !Number.isInteger(body.maxFailoversPerRequest)
+        || body.maxFailoversPerRequest < 0
+        || body.maxFailoversPerRequest > 20
+      ) return jsonResponse({ error: "maxFailoversPerRequest must be an integer 0-20" }, 400);
+      maxFailoversPerRequest = body.maxFailoversPerRequest;
+    }
+    let defaultCooldownSeconds = anthropicPoolDefaultCooldownMs(config) / 1_000;
+    if (body.defaultCooldownSeconds !== undefined) {
+      if (
+        typeof body.defaultCooldownSeconds !== "number"
+        || !Number.isInteger(body.defaultCooldownSeconds)
+        || body.defaultCooldownSeconds < 1
+        || body.defaultCooldownSeconds > 900
+      ) return jsonResponse({ error: "defaultCooldownSeconds must be an integer 1-900" }, 400);
+      defaultCooldownSeconds = body.defaultCooldownSeconds;
+    }
     config.anthropicAccountPool = {
       enabled,
       autoSwitchThreshold: threshold,
       ...(strategy !== undefined ? { strategy } : {}),
       ...(stickyLimit !== undefined ? { stickyLimit } : {}),
+      maxFailoversPerRequest,
+      defaultCooldownSeconds,
     };
     saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
@@ -464,6 +536,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold: threshold,
       strategy: normalizeAccountPoolStrategy(strategy),
       stickyLimit: normalizeAccountPoolStickyLimit(stickyLimit),
+      maxFailoversPerRequest,
+      defaultCooldownSeconds,
       experimental: true,
     });
   }
@@ -471,7 +545,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: unknown; accountId?: unknown };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-    if (provider !== "anthropic") return jsonResponse({ error: "clear-cooldown is only supported for anthropic" }, 400);
+    if (provider === "kiro") {
+      if (!accountId) return jsonResponse({ error: "missing accountId" }, 400);
+      return jsonResponse({ ok: true, cleared: clearKiroAccountCooldown(accountId) });
+    }
+    if (provider !== "anthropic") return jsonResponse({ error: "clear-cooldown is only supported for anthropic and kiro" }, 400);
     if (!accountId) return jsonResponse({ error: "missing accountId" }, 400);
     const { clearAnthropicAccountCooldown } = await import("../../oauth/anthropic-routing");
     const cleared = clearAnthropicAccountCooldown(accountId);

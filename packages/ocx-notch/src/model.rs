@@ -271,6 +271,47 @@ impl UsageResponse {
 pub struct AutoSwitchState {
     pub auto_switch_threshold: u32,
     pub active_codex_account_id: Option<String>,
+    #[serde(default = "default_pool_strategy")]
+    pub account_pool_strategy: String,
+    #[serde(default = "default_sticky_limit")]
+    pub account_pool_sticky_limit: u32,
+    #[serde(default = "default_failover_limit")]
+    pub upstream_failover_threshold: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthPoolConfig {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_auto_switch_threshold")]
+    pub auto_switch_threshold: u32,
+    #[serde(default = "default_pool_strategy")]
+    pub strategy: String,
+    #[serde(default = "default_sticky_limit")]
+    pub sticky_limit: u32,
+    #[serde(default = "default_failover_limit")]
+    pub max_failovers_per_request: u32,
+    #[serde(default = "default_cooldown_seconds")]
+    pub default_cooldown_seconds: u32,
+}
+
+fn default_auto_switch_threshold() -> u32 {
+    80
+}
+fn default_pool_strategy() -> String {
+    "quota".into()
+}
+fn default_sticky_limit() -> u32 {
+    1
+}
+fn default_failover_limit() -> u32 {
+    3
+}
+fn default_cooldown_seconds() -> u32 {
+    60
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -340,6 +381,7 @@ pub struct AccountView {
     pub quota: Option<Quota>,
     pub paused: bool,
     pub needs_reauth: bool,
+    pub cooldown: bool,
     pub is_main: bool,
 }
 
@@ -743,6 +785,7 @@ pub fn codex_account_views(response: CodexAccountsResponse) -> Vec<AccountView> 
                 quota,
                 paused: account.paused,
                 needs_reauth: account.needs_reauth,
+                cooldown: false,
                 is_main,
             }
         })

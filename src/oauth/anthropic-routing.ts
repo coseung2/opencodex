@@ -32,7 +32,7 @@ import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 import { retainedUtf8Bytes } from "../lib/admission";
 
 const PROVIDER = "anthropic";
-const DEFAULT_COOLDOWN_MS = 60_000;
+const DEFAULT_COOLDOWN_SECONDS = 60;
 const MAX_COOLDOWN_MS = 15 * 60_000;
 const AFFINITY_IDLE_TTL_MS = 24 * 60 * 60_000;
 const MAX_AFFINITY_ENTRIES = 2_000;
@@ -40,7 +40,7 @@ const MAX_AFFINITY_COMPONENT_BYTES = 512;
 const UNKNOWN_USAGE_SCORE = 100;
 const DEFAULT_AUTO_SWITCH_THRESHOLD = 80;
 /** Cap same-request 429 rotations so short Retry-After cannot infinite-loop. */
-export const ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST = 3;
+const DEFAULT_MAX_FAILOVERS_PER_REQUEST = 3;
 
 export interface AnthropicAccountPoolConfig {
   enabled?: boolean;
@@ -50,6 +50,8 @@ export interface AnthropicAccountPoolConfig {
   strategy?: OcxAccountPoolRotationStrategy;
   /** Successful new-session binds retained on one round-robin selection. Default 1; range 1..100. */
   stickyLimit?: number;
+  maxFailoversPerRequest?: number;
+  defaultCooldownSeconds?: number;
 }
 
 interface AccountHealth {
@@ -84,6 +86,21 @@ export function anthropicAutoSwitchThreshold(config: OcxConfig): number {
   const value = anthropicAccountPoolConfig(config).autoSwitchThreshold;
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100) return value;
   return DEFAULT_AUTO_SWITCH_THRESHOLD;
+}
+
+export function anthropicPoolMaxFailoversPerRequest(config: OcxConfig): number {
+  const value = anthropicAccountPoolConfig(config).maxFailoversPerRequest;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 20
+    ? value
+    : DEFAULT_MAX_FAILOVERS_PER_REQUEST;
+}
+
+export function anthropicPoolDefaultCooldownMs(config: OcxConfig): number {
+  const value = anthropicAccountPoolConfig(config).defaultCooldownSeconds;
+  const seconds = typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 900
+    ? value
+    : DEFAULT_COOLDOWN_SECONDS;
+  return seconds * 1_000;
 }
 
 function parseRetryAfterMs(value: string | null | undefined, now: number): number | undefined {
@@ -481,7 +498,7 @@ export function rotateAnthropicAccountOn429(
   if (!isAnthropicAccountPoolEnabled(config)) return null;
 
   const parsedRetry = parseRetryAfterMs(retryAfterHeader, now);
-  const cooldownMs = parsedRetry ?? DEFAULT_COOLDOWN_MS;
+  const cooldownMs = parsedRetry ?? anthropicPoolDefaultCooldownMs(config);
   upstreamHealth.set(failedAccountId, {
     cooldownUntil: now + cooldownMs,
     cooldownSource: parsedRetry ? "retry-after" : "default",

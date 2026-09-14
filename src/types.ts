@@ -779,6 +779,18 @@ export interface OcxConfig {
     strategy?: OcxAccountPoolRotationStrategy;
     /** Successful new-session binds retained on one round-robin selection. Default 1; range 1..100. */
     stickyLimit?: number;
+    /** Maximum account changes attempted inside one request. Default 3; range 0..20. */
+    maxFailoversPerRequest?: number;
+    /** Cooldown used when a 429 omits Retry-After. Default 60 seconds; range 1..900. */
+    defaultCooldownSeconds?: number;
+  };
+  /** Opt-in Kiro OAuth account pool. Keeps session affinity and fails over on 429 or terminal 401. */
+  kiroAccountPool?: {
+    enabled?: boolean;
+    /** Maximum account changes attempted inside one request. Default 3; range 0..20. */
+    maxFailoversPerRequest?: number;
+    /** Cooldown used when a 429 omits Retry-After. Default 60 seconds; range 1..900. */
+    defaultCooldownSeconds?: number;
   };
   /** Virtual `combo/<id>` models spanning concrete provider/model targets (issue #133). */
   combos?: Record<string, OcxComboConfig>;

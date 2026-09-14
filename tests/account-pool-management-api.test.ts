@@ -186,7 +186,83 @@ describe("Anthropic account pool strategy management API", () => {
       expect(await res.json()).toMatchObject({
         strategy: "quota",
         stickyLimit: 1,
+        maxFailoversPerRequest: 3,
+        defaultCooldownSeconds: 60,
       });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("Kiro pool defaults off and persists enabled state", async () => {
+    const server = startServer(0);
+    try {
+      const initial = await fetch(new URL("/api/oauth/accounts/pool?provider=kiro", server.url));
+      expect(initial.status).toBe(200);
+      expect(await initial.json()).toMatchObject({
+        provider: "kiro",
+        enabled: false,
+        maxFailoversPerRequest: 3,
+        defaultCooldownSeconds: 60,
+        errorDriven: true,
+      });
+
+      const put = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "kiro",
+          enabled: true,
+          maxFailoversPerRequest: 5,
+          defaultCooldownSeconds: 120,
+        }),
+      });
+      expect(put.status).toBe(200);
+      expect(await put.json()).toMatchObject({ ok: true, provider: "kiro", enabled: true, errorDriven: true });
+
+      const get = await fetch(new URL("/api/oauth/accounts/pool?provider=kiro", server.url));
+      expect(await get.json()).toMatchObject({
+        enabled: true,
+        maxFailoversPerRequest: 5,
+        defaultCooldownSeconds: 120,
+        errorDriven: true,
+      });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("Kiro pool rejects a non-boolean enabled value", async () => {
+    const server = startServer(0);
+    try {
+      const response = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "kiro", enabled: "yes" }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "enabled must be a boolean" });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("OAuth pools reject invalid failover and cooldown criteria", async () => {
+    const server = startServer(0);
+    try {
+      for (const provider of ["anthropic", "kiro"]) {
+        for (const body of [
+          { maxFailoversPerRequest: 21 },
+          { defaultCooldownSeconds: 0 },
+        ]) {
+          const response = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider, ...body }),
+          });
+          expect(response.status).toBe(400);
+        }
+      }
     } finally {
       await server.stop(true);
     }
@@ -259,6 +335,8 @@ describe("Anthropic account pool strategy management API", () => {
           autoSwitchThreshold: 70,
           strategy: "round-robin",
           stickyLimit: 4,
+          maxFailoversPerRequest: 5,
+          defaultCooldownSeconds: 120,
         }),
       });
       expect(put.status).toBe(200);
@@ -268,6 +346,8 @@ describe("Anthropic account pool strategy management API", () => {
         autoSwitchThreshold: 70,
         strategy: "round-robin",
         stickyLimit: 4,
+        maxFailoversPerRequest: 5,
+        defaultCooldownSeconds: 120,
       });
 
       const get = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
@@ -276,6 +356,8 @@ describe("Anthropic account pool strategy management API", () => {
         autoSwitchThreshold: 70,
         strategy: "round-robin",
         stickyLimit: 4,
+        maxFailoversPerRequest: 5,
+        defaultCooldownSeconds: 120,
       });
     } finally {
       await server.stop(true);

@@ -638,6 +638,63 @@ pub fn set_oauth_account_paused(provider: &str, id: &str, paused: bool) -> Resul
     Ok(())
 }
 
+pub fn fetch_oauth_pool_config(provider: &str) -> Result<OAuthPoolConfig, String> {
+    if !matches!(provider, "anthropic" | "kiro") {
+        return Err("Unsupported OAuth pool provider".into());
+    }
+    get_json(
+        &format!("/api/oauth/accounts/pool?provider={provider}"),
+        10_000,
+    )
+}
+
+pub fn set_oauth_pool_config(config: &OAuthPoolConfig) -> Result<OAuthPoolConfig, String> {
+    let body = if config.provider == "kiro" {
+        serde_json::json!({
+            "provider": "kiro",
+            "enabled": config.enabled,
+            "maxFailoversPerRequest": config.max_failovers_per_request,
+            "defaultCooldownSeconds": config.default_cooldown_seconds,
+        })
+    } else if config.provider == "anthropic" {
+        serde_json::json!({
+            "provider": "anthropic",
+            "enabled": config.enabled,
+            "autoSwitchThreshold": config.auto_switch_threshold,
+            "strategy": config.strategy,
+            "stickyLimit": config.sticky_limit,
+            "maxFailoversPerRequest": config.max_failovers_per_request,
+            "defaultCooldownSeconds": config.default_cooldown_seconds,
+        })
+    } else {
+        return Err("Unsupported OAuth pool provider".into());
+    };
+    put_json("/api/oauth/accounts/pool", &body)
+}
+
+pub fn set_codex_pool_strategy(strategy: &str, sticky_limit: u32) -> Result<(), String> {
+    let _: serde_json::Value = put_json(
+        "/api/codex-auth/pool-strategy",
+        &serde_json::json!({ "strategy": strategy, "stickyLimit": sticky_limit }),
+    )?;
+    Ok(())
+}
+
+pub fn set_codex_failover_threshold(threshold: u32) -> Result<(), String> {
+    let _: serde_json::Value = put_json(
+        "/api/codex-auth/failover",
+        &serde_json::json!({ "threshold": threshold }),
+    )?;
+    Ok(())
+}
+
+pub fn clear_oauth_account_cooldown(provider: &str, id: &str) -> Result<(), String> {
+    post_empty(
+        "/api/oauth/accounts/clear-cooldown",
+        &serde_json::json!({ "provider": provider, "accountId": id }),
+    )
+}
+
 pub fn run_ocx_command(action: &str) -> Result<(), String> {
     // Remote mode owns no process on this machine. Start/Stop/Restart must not
     // silently act on a local OCX while the UI is pointed at the VM.
@@ -985,6 +1042,11 @@ fn parse_account_pool_value(provider: String, kind: &str, value: &Value) -> Acco
             let quota = account
                 .get("quota")
                 .and_then(|value| serde_json::from_value::<Quota>(value.clone()).ok());
+            let cooldown = account
+                .get("health")
+                .and_then(|health| health.get("status"))
+                .and_then(Value::as_str)
+                == Some("cooldown");
             Some(AccountView {
                 id,
                 identity,
@@ -1000,6 +1062,7 @@ fn parse_account_pool_value(provider: String, kind: &str, value: &Value) -> Acco
                     .get("needsReauth")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                cooldown,
                 is_main: false,
             })
         })
@@ -1326,7 +1389,8 @@ mod tests {
                     "id": "second",
                     "label": "work",
                     "needsReauth": true,
-                    "healthLabel": "Reauth required"
+                    "healthLabel": "Reauth required",
+                    "health": { "status": "cooldown" }
                 }
             ]
         });
@@ -1343,7 +1407,24 @@ mod tests {
         assert_eq!(pool.accounts[1].identity, "work");
         assert!(pool.accounts[1].active);
         assert!(pool.accounts[1].needs_reauth);
+        assert!(pool.accounts[1].cooldown);
         assert_eq!(pool.accounts[1].health, "Reauth required");
+    }
+
+    #[test]
+    fn kiro_pool_config_accepts_the_management_api_shape() {
+        let config: OAuthPoolConfig = serde_json::from_value(serde_json::json!({
+            "provider": "kiro",
+            "enabled": true,
+            "maxFailoversPerRequest": 5,
+            "defaultCooldownSeconds": 120,
+            "errorDriven": true
+        }))
+        .expect("Kiro pool config parses");
+
+        assert!(config.enabled);
+        assert_eq!(config.max_failovers_per_request, 5);
+        assert_eq!(config.default_cooldown_seconds, 120);
     }
 
     #[test]

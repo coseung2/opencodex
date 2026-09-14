@@ -801,6 +801,19 @@ const configSchema = z.object({
   // hashes, UUIDs), so validate only length, never charset: a foreign id must not
   // drop the whole paused set on config load.
   pausedOauthAccountIds: z.record(z.string(), z.array(z.string().min(1).max(128))).optional(),
+  kiroAccountPool: z.object({
+    enabled: z.boolean().optional(),
+    maxFailoversPerRequest: z.number().int().min(0).max(20).optional(),
+    defaultCooldownSeconds: z.number().int().min(1).max(900).optional(),
+  }).optional().catch(undefined),
+  anthropicAccountPool: z.object({
+    enabled: z.boolean().optional(),
+    autoSwitchThreshold: z.number().int().min(0).max(100).optional(),
+    strategy: z.enum(["quota", "round-robin", "fill-first"]).optional(),
+    stickyLimit: z.number().int().min(1).max(100).optional(),
+    maxFailoversPerRequest: z.number().int().min(0).max(20).optional(),
+    defaultCooldownSeconds: z.number().int().min(1).max(900).optional(),
+  }).optional().catch(undefined),
   codexAccountPriorities: codexAccountPrioritiesSchema.optional().catch(undefined),
   activeCodexAccountPinned: z.string().regex(CODEX_ACCOUNT_PIN_PATTERN).optional().catch(undefined),
   codexAccountNamespaces: codexAccountNamespacesSchema.optional(),

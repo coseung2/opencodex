@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { KIRO_COMPLETION_TOOL_NAME } from "../src/adapters/kiro-constants";
 import { encodeMessage } from "../src/lib/eventstream-decoder";
 import { saveConfig } from "../src/config";
-import { saveCredential } from "../src/oauth/store";
+import { clearKiroAccountPoolState } from "../src/oauth/kiro-routing";
+import { getAccountSet, saveCredential, setActiveAccount } from "../src/oauth/store";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
@@ -33,9 +34,11 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = testDir;
   process.env.HOME = emptyHome;
   process.env.KIRO_REGION = "us-east-1";
+  clearKiroAccountPoolState();
 });
 
 afterEach(() => {
+  clearKiroAccountPoolState();
   globalThis.fetch = originalFetch;
   if (previousOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpenCodexHome;
@@ -141,6 +144,104 @@ function installFetch(chatStatuses: number[]): { chatAuth: string[]; refreshCall
 }
 
 describe("Kiro OAuth upstream 401 replay", () => {
+  test("pool retries a terminal 429 with the next Kiro account", async () => {
+    await saveCredential("kiro", {
+      access: "account-a-access", refresh: "account-a-refresh", expires: Date.now() + 3_600_000,
+      email: "account-a@example.com", source: "oauth",
+    });
+    const accountA = getAccountSet("kiro")!.activeAccountId;
+    await saveCredential("kiro", {
+      access: "account-b-access", refresh: "account-b-refresh", expires: Date.now() + 3_600_000,
+      email: "account-b@example.com", source: "oauth",
+    });
+    await setActiveAccount("kiro", accountA);
+    saveConfig({ ...config(), kiroAccountPool: { enabled: true } });
+    const observedAuth: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === CHAT_ENDPOINT) {
+        const auth = new Headers(init?.headers).get("authorization") ?? "";
+        observedAuth.push(auth);
+        if (auth === "Bearer account-a-access") {
+          return new Response(JSON.stringify({ message: "insufficient_quota" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "120" },
+          });
+        }
+        return new Response(eventStream("account b"), {
+          headers: { "content-type": "application/vnd.amazon.eventstream" },
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const server = startServer(0);
+    try {
+      const response = await post(server);
+      expect(response.status).toBe(200);
+      const json = await response.json() as { output?: Array<{ type: string; content?: Array<{ text?: string }> }> };
+      expect(json.output?.find(item => item.type === "message")?.content?.[0]?.text).toBe("account b");
+      expect(observedAuth).toEqual(["Bearer account-a-access", "Bearer account-b-access"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("pool marks a twice-rejected account for reauth and retries the next account", async () => {
+    await saveCredential("kiro", {
+      access: "account-a-rejected", refresh: "account-a-refresh", expires: Date.now() + 3_600_000,
+      email: "terminal-401-a@example.com", source: "oauth",
+    });
+    const accountA = getAccountSet("kiro")!.activeAccountId;
+    await saveCredential("kiro", {
+      access: "account-b-access", refresh: "account-b-refresh", expires: Date.now() + 3_600_000,
+      email: "terminal-401-b@example.com", source: "oauth",
+    });
+    await setActiveAccount("kiro", accountA);
+    saveConfig({ ...config(), kiroAccountPool: { enabled: true } });
+    const observedAuth: string[] = [];
+    let refreshCalls = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === REFRESH_ENDPOINT) {
+        refreshCalls += 1;
+        return new Response(JSON.stringify({
+          accessToken: "account-a-refreshed",
+          refreshToken: "account-a-refresh-next",
+          expiresIn: 3600,
+        }), { headers: { "content-type": "application/json" } });
+      }
+      if (url === CHAT_ENDPOINT) {
+        const auth = new Headers(init?.headers).get("authorization") ?? "";
+        observedAuth.push(auth);
+        if (auth === "Bearer account-a-rejected" || auth === "Bearer account-a-refreshed") {
+          return new Response("rejected", { status: 401 });
+        }
+        return new Response(eventStream("account b after terminal 401"), {
+          headers: { "content-type": "application/vnd.amazon.eventstream" },
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const server = startServer(0);
+    try {
+      const response = await post(server);
+      expect(response.status).toBe(200);
+      const json = await response.json() as { output?: Array<{ type: string; content?: Array<{ text?: string }> }> };
+      expect(json.output?.find(item => item.type === "message")?.content?.[0]?.text).toBe("account b after terminal 401");
+      expect(refreshCalls).toBe(1);
+      expect(observedAuth).toEqual([
+        "Bearer account-a-rejected",
+        "Bearer account-a-refreshed",
+        "Bearer account-b-access",
+      ]);
+      expect(getAccountSet("kiro")!.accounts.find(account => account.id === accountA)?.needsReauth).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("selected OAuth account supplies its own Kiro runtime region and profile", async () => {
     const profileArn = "arn:aws:codewhisperer:eu-west-1:123456789012:profile/account-b";
     await saveCredential("kiro", {

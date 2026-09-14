@@ -106,6 +106,20 @@ Each remote login has a flow identifier. Status, callback submission and cancell
 apply to that flow. A second login for a busy provider may be refused until the first
 finishes. Accounts become visible to other connected Notch clients after refresh.
 
+## Configure account-pool switching
+
+Expand OpenAI, Anthropic, or Kiro and select **풀 설정**. Notch shows only the
+criteria supported by that provider. OpenAI exposes its usage threshold, selection
+strategy, sticky count, and upstream-error threshold. Anthropic also exposes pool
+enablement and the fallback cooldown. Kiro has no reliable per-account quota endpoint,
+so it exposes pool enablement, same-request failover count, and fallback cooldown only.
+
+The summary row and checked menu values come from the connected OCX server. In Remote
+mode every change is written to the VM Management API and becomes visible to the other
+Notch clients on their next refresh. Expanded account rows still support active-account
+selection, pause/resume, reauthentication, and Kiro cooldown clearing. No pool policy or
+account state is stored on the PC.
+
 ## Move existing accounts
 
 Back up both OCX configurations and merge existing provider credentials and account

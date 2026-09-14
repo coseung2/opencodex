@@ -406,6 +406,14 @@ export async function getValidAccessTokenSnapshot(provider: string): Promise<OAu
   return resolveAccessSnapshotForAccount(provider, set.activeAccountId);
 }
 
+/** Resolve and refresh one stored OAuth account without changing the provider's active account. */
+export async function getValidAccessTokenSnapshotForAccount(
+  provider: string,
+  accountId: string,
+): Promise<OAuthAccessSnapshot> {
+  return resolveAccessSnapshotForAccount(provider, accountId);
+}
+
 /** Providers whose upstream-401 replay path may force a snapshot refresh. */
 const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro"]);
 

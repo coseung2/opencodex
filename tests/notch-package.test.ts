@@ -100,7 +100,9 @@ describe("ocx-notch package staging", () => {
     expect(source).toContain("context_menu_open: bool");
     expect(source).toContain("if !context_menu_open");
     expect(source).toContain("with_app(|app| app.context_menu_open = true)");
-    expect(source).toContain('w!("자동 전환 기준")');
+    expect(source).toContain('w!("사용량 전환 기준")');
+    expect(source).toContain('w!("요청 내 오류 전환")');
+    expect(source).toContain('w!("기본 쿨다운")');
     expect(source).toContain('w!("프로바이더 추가...")');
     expect(source).toContain('w!("새로고침")');
     expect(source).toContain('w!("종료")');

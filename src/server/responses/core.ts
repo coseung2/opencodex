@@ -48,7 +48,7 @@ import {
   UnsupportedOAuthProviderError,
 } from "../../oauth";
 import {
-  ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
+  anthropicPoolMaxFailoversPerRequest,
   anthropicSessionKeyFromParts,
   bindAnthropicSessionAffinity,
   formatAnthropicProviderForLog,
@@ -59,6 +59,17 @@ import {
   resolveAnthropicAccountForSession,
   rotateAnthropicAccountOn429,
 } from "../../oauth/anthropic-routing";
+import {
+  kiroPoolMaxFailoversPerRequest,
+  formatKiroProviderForLog,
+  getKiroPoolAccessSnapshot,
+  isKiroAccountPoolEnabled,
+  kiroSessionKeyFromParts,
+  promoteKiroActiveAccount,
+  resolveKiroAccountForSession,
+  rotateKiroAccountOn429,
+  rotateKiroAccountOnAuthenticationFailure,
+} from "../../oauth/kiro-routing";
 import { buildWebSearchTool, planWebSearch, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
 import { buildImageTool, buildVideoTool, planImageBridge, planVideoBridge, runWithImageBridge, clampImageMaxRounds, IMAGE_GEN_TOOL_NAME, VIDEO_GEN_TOOL_NAME } from "../../images";
 import { describeImagesInPlace, planVisionSidecar, shouldResolveOpenAiVisionSidecar, stripImagesInPlace } from "../../vision";
@@ -1503,6 +1514,8 @@ async function handleResponsesInner(
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let anthropicPoolAccountId: string | null = null;
   let anthropicPoolFailovers = 0;
+  let kiroPoolAccountId: string | null = null;
+  let kiroPoolFailovers = 0;
   const anthropicSessionKey = route.providerName === "anthropic" && route.provider.authMode === "oauth"
     ? anthropicSessionKeyFromParts({
       sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
@@ -1512,9 +1525,27 @@ async function handleResponsesInner(
       promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort === true,
     })
     : null;
+  const kiroSessionKey = route.providerName === "kiro" && route.provider.authMode === "oauth"
+    ? kiroSessionKeyFromParts([
+        typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
+        sessionIdHeaderFromRequest(req.headers),
+        req.headers.get("thread-id"),
+        typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
+      ])
+    : null;
   if (route.provider.authMode === "oauth") {
     try {
-      if (route.providerName === "anthropic" && isAnthropicAccountPoolEnabled(config)) {
+      if (route.providerName === "kiro" && isKiroAccountPoolEnabled(config)) {
+        const accountId = resolveKiroAccountForSession(kiroSessionKey, config);
+        if (!accountId) return formatErrorResponse(429, "rate_limit_error", "No eligible Kiro OAuth account available");
+        const resolved = await getKiroPoolAccessSnapshot(accountId);
+        sentOAuthSnapshot = resolved;
+        kiroPoolAccountId = accountId;
+        route.provider = { ...route.provider, apiKey: resolved.accessToken };
+        parsed._kiroAuthContext = { ...(resolved.kiro ?? {}) };
+        promoteKiroActiveAccount(accountId);
+        logCtx.provider = formatKiroProviderForLog(accountId);
+      } else if (route.providerName === "anthropic" && isAnthropicAccountPoolEnabled(config)) {
         const selection = resolveAnthropicAccountForSession(anthropicSessionKey, config);
         if (!selection.accountId) {
           if (selection.reason === "all-cooled") {
@@ -2818,6 +2849,45 @@ async function handleResponsesInner(
         continue recovery;
       }
 
+      // A Kiro token gets its normal one-shot refresh first. If the refreshed credential is
+      // still rejected, mark only that account for reauthentication and move the sticky session
+      // to another eligible account.
+      if (
+        upstreamResponse.status === 401
+        && route.providerName === "kiro"
+        && kiroPoolAccountId
+        && isKiroAccountPoolEnabled(config)
+        && oauth401ReplayAttempted
+        && kiroPoolFailovers < kiroPoolMaxFailoversPerRequest(config)
+      ) {
+        const nextAccountId = await rotateKiroAccountOnAuthenticationFailure(config, kiroPoolAccountId, kiroSessionKey);
+        if (nextAccountId) {
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+          const resolved = await getKiroPoolAccessSnapshot(nextAccountId);
+          sentOAuthSnapshot = resolved;
+          kiroPoolAccountId = nextAccountId;
+          kiroPoolFailovers += 1;
+          parsed._kiroAuthContext = { ...(resolved.kiro ?? {}) };
+          route.provider = resolveProviderTransport(
+            route.providerName,
+            { ...route.provider, apiKey: resolved.accessToken },
+            parsed.options.promptCacheKey,
+          );
+          invalidateSameTargetRequest();
+          promoteKiroActiveAccount(nextAccountId);
+          logCtx.provider = formatKiroProviderForLog(nextAccountId);
+          activeAdapter = resolveAdapter(
+            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+            config.cacheRetention,
+          );
+          oauth401ReplayAttempted = false;
+          const result = await rebuildAndRefetch("kiro-oauth-failover");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+          continue recovery;
+        }
+      }
+
       // Multi-key 429 failover: rotate to the next pool key (cooldown-aware) and retry the
       // SAME request once per remaining key. OAuth/forward providers and single-key pools
       // return null immediately, so this stays a no-op for them (src/providers/key-failover.ts).
@@ -2843,13 +2913,55 @@ async function handleResponsesInner(
         upstreamResponse = result;
       }
 
+
+      while (
+        upstreamResponse.status === 429
+        && route.providerName === "kiro"
+        && kiroPoolAccountId
+        && isKiroAccountPoolEnabled(config)
+        && kiroPoolFailovers < kiroPoolMaxFailoversPerRequest(config)
+      ) {
+        const nextAccountId = rotateKiroAccountOn429(
+          config,
+          kiroPoolAccountId,
+          upstreamResponse.headers.get("retry-after"),
+          kiroSessionKey,
+        );
+        if (!nextAccountId) break;
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+        try {
+          const resolved = await getKiroPoolAccessSnapshot(nextAccountId);
+          sentOAuthSnapshot = resolved;
+          kiroPoolAccountId = nextAccountId;
+          kiroPoolFailovers += 1;
+          parsed._kiroAuthContext = { ...(resolved.kiro ?? {}) };
+          route.provider = resolveProviderTransport(
+            route.providerName,
+            { ...route.provider, apiKey: resolved.accessToken },
+            parsed.options.promptCacheKey,
+          );
+          invalidateSameTargetRequest();
+          promoteKiroActiveAccount(nextAccountId);
+          logCtx.provider = formatKiroProviderForLog(nextAccountId);
+          activeAdapter = resolveAdapter(
+            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+            config.cacheRetention,
+          );
+          const result = await rebuildAndRefetch("kiro-oauth-failover");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+        } catch {
+          break;
+        }
+      }
+
       // Opt-in Anthropic OAuth account pool (#294): cool the failed account and retry
       // with another eligible OAuth account (bounded per request). Disabled by default.
       while (
         upstreamResponse.status === 429
         && anthropicPoolAccountId
         && isAnthropicAccountPoolEnabled(config)
-        && anthropicPoolFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST
+        && anthropicPoolFailovers < anthropicPoolMaxFailoversPerRequest(config)
       ) {
         const nextAccountId = rotateAnthropicAccountOn429(
           config,
@@ -3033,7 +3145,7 @@ async function handleResponsesInner(
         response.status === 429
         && anthropicPoolAccountId
         && isAnthropicAccountPoolEnabled(config)
-        && anthropicPoolFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST
+        && anthropicPoolFailovers < anthropicPoolMaxFailoversPerRequest(config)
       ) {
         const nextAccountId = rotateAnthropicAccountOn429(
           config,

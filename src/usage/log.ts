@@ -21,6 +21,7 @@ export type AttemptRecoveryKind =
   | "oauth-401"
   | "key-429"
   | "anthropic-oauth-429"
+  | "kiro-oauth-failover"
   | "image-413";
 
 export interface PersistedUsageAttempt {
@@ -188,6 +189,7 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "oauth-401",
   "key-429",
   "anthropic-oauth-429",
+  "kiro-oauth-failover",
   "image-413",
 ]);
 const USAGE_STATUSES = new Set<UsageStatus>([

@@ -51,11 +51,17 @@ const CLASS_NAME: PCWSTR = w!("OCXNotchWindow");
 const WM_DATA: u32 = WM_APP + 1;
 const MENU_REFRESH: usize = 1;
 const MENU_EXIT: usize = 2;
-const MENU_THRESHOLD_DOWN: usize = 3;
-const MENU_THRESHOLD_UP: usize = 4;
 const MENU_PROVIDER_ADD: usize = 5;
 const MENU_CONNECTION: usize = 6;
-const MENU_THRESHOLD_BASE: usize = 1_000;
+const MENU_OPENAI_POLICY_BASE: usize = 2_000;
+const MENU_ANTHROPIC_POLICY_BASE: usize = 3_000;
+const MENU_KIRO_POLICY_BASE: usize = 4_000;
+const POLICY_ENABLED: usize = 1;
+const POLICY_THRESHOLD: usize = 100;
+const POLICY_STRATEGY: usize = 300;
+const POLICY_STICKY: usize = 400;
+const POLICY_FAILOVER: usize = 500;
+const POLICY_COOLDOWN: usize = 700;
 const API_KEY_EDIT_ID: i32 = 30_001;
 const ACCOUNT_ID_EDIT_ID: i32 = 30_002;
 const KIRO_START_URL_EDIT_ID: i32 = 30_003;
@@ -155,6 +161,7 @@ struct AccountSwitchControl {
 struct ReauthControl {
     provider: String,
     id: String,
+    clear_cooldown: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -162,6 +169,57 @@ struct ResetCreditControl {
     id: String,
     identity: String,
     available: u32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PoolPolicyControl {
+    provider: String,
+}
+
+fn supports_pool_policy(provider: &str) -> bool {
+    matches!(provider, "openai" | "anthropic" | "kiro")
+}
+
+fn pool_policy_summary(state: &ViewState, provider: &str) -> String {
+    if provider == "openai" {
+        let threshold = if state.auto_switch_threshold == 0 {
+            "자동 전환 꺼짐".into()
+        } else {
+            format!("자동 전환 {}%", state.auto_switch_threshold)
+        };
+        return format!(
+            "{threshold} · {} · 고정 {}회 · 오류 {}회",
+            state.account_pool_strategy,
+            state.account_pool_sticky_limit,
+            state.upstream_failover_threshold
+        );
+    }
+    let config = state
+        .oauth_pool_configs
+        .get(provider)
+        .cloned()
+        .unwrap_or_else(|| OAuthPoolConfig {
+            provider: provider.into(),
+            ..Default::default()
+        });
+    if provider == "anthropic" {
+        format!(
+            "{} · {}% · {} · 고정 {}회 · 오류 {}회 · {}초",
+            if config.enabled { "켜짐" } else { "꺼짐" },
+            config.auto_switch_threshold,
+            config.strategy,
+            config.sticky_limit,
+            config.max_failovers_per_request,
+            config.default_cooldown_seconds
+        )
+    } else {
+        format!(
+            "{} · 오류 {}회 · {}초",
+            if config.enabled { "켜짐" } else { "꺼짐" },
+            config.max_failovers_per_request,
+            config.default_cooldown_seconds
+        )
+    }
 }
 
 #[derive(Default)]
@@ -314,6 +372,7 @@ enum Update {
     Providers(Result<Vec<ProviderConfig>, String>),
     Quotas(Result<QuotaResponse, String>),
     AutoSwitch(Result<AutoSwitchState, String>),
+    OAuthPool(String, Result<OAuthPoolConfig, String>),
     Pools(Vec<AccountPool>),
     OpenAiPool(Result<AccountPool, String>),
     Models(Result<(Vec<ModelRow>, SelectedModelsResponse), String>),
@@ -354,6 +413,10 @@ struct ViewState {
     pools: Vec<AccountPool>,
     providers: Vec<ProviderView>,
     auto_switch_threshold: u32,
+    account_pool_strategy: String,
+    account_pool_sticky_limit: u32,
+    upstream_failover_threshold: u32,
+    oauth_pool_configs: HashMap<String, OAuthPoolConfig>,
     active_codex_account_id: Option<String>,
     models: ModelsState,
     subagents: SubagentState,
@@ -369,6 +432,7 @@ struct App {
     expanded_providers: HashSet<String>,
     expanded_model_providers: HashSet<String>,
     provider_hits: Vec<(RECT, String)>,
+    pool_policy_hits: Vec<(RECT, PoolPolicyControl)>,
     account_pause_hits: Vec<(RECT, AccountControl)>,
     account_switch_hits: Vec<(RECT, AccountSwitchControl)>,
     account_delete_hits: Vec<(RECT, AccountSwitchControl)>,
@@ -387,6 +451,7 @@ struct App {
     pressed_account_delete: Option<AccountSwitchControl>,
     pressed_reauth_control: Option<ReauthControl>,
     pressed_reset_credit_control: Option<ResetCreditControl>,
+    pressed_pool_policy_control: Option<PoolPolicyControl>,
     pressed_model_hit: Option<ModelHit>,
     pressed_subagent_hit: Option<SubagentHit>,
     pressed_modal_hit: Option<ModalHit>,
@@ -486,6 +551,15 @@ impl App {
                     Ok(value) => {
                         self.state.auto_switch_threshold = value.auto_switch_threshold.min(100);
                         self.state.active_codex_account_id = value.active_codex_account_id;
+                        self.state.account_pool_strategy = value.account_pool_strategy;
+                        self.state.account_pool_sticky_limit = value.account_pool_sticky_limit;
+                        self.state.upstream_failover_threshold = value.upstream_failover_threshold;
+                    }
+                    Err(error) => self.state.status = error,
+                },
+                Update::OAuthPool(provider, result) => match result {
+                    Ok(value) => {
+                        self.state.oauth_pool_configs.insert(provider, value);
                     }
                     Err(error) => self.state.status = error,
                 },
@@ -604,6 +678,9 @@ impl App {
         for provider in &self.state.providers {
             height += provider_height(provider);
             if self.expanded_providers.contains(&provider.name) {
+                if supports_pool_policy(&provider.name) {
+                    height += 34;
+                }
                 height += provider.accounts.iter().map(account_height).sum::<i32>();
             }
         }
@@ -1011,6 +1088,9 @@ fn run() -> windows::core::Result<()> {
             state: ViewState {
                 status: "Loading OCX…".into(),
                 auto_switch_threshold: 80,
+                account_pool_strategy: "quota".into(),
+                account_pool_sticky_limit: 1,
+                upstream_failover_threshold: 3,
                 remote: api::is_remote(),
                 connection_error: api::connection_error(),
                 ..Default::default()
@@ -1022,6 +1102,7 @@ fn run() -> windows::core::Result<()> {
             expanded_providers: HashSet::new(),
             expanded_model_providers: HashSet::new(),
             provider_hits: Vec::new(),
+            pool_policy_hits: Vec::new(),
             account_pause_hits: Vec::new(),
             account_switch_hits: Vec::new(),
             account_delete_hits: Vec::new(),
@@ -1040,6 +1121,7 @@ fn run() -> windows::core::Result<()> {
             pressed_account_delete: None,
             pressed_reauth_control: None,
             pressed_reset_credit_control: None,
+            pressed_pool_policy_control: None,
             pressed_model_hit: None,
             pressed_subagent_hit: None,
             pressed_modal_hit: None,
@@ -1110,6 +1192,7 @@ fn start_workers(
         let mut last_usage = refresh_seed(now, Duration::from_secs(60));
         let mut last_openai_pool = refresh_seed(now, Duration::from_secs(60));
         let mut last_active = refresh_seed(now, Duration::from_secs(60));
+        let mut last_kiro_pool = refresh_seed(now, Duration::from_secs(60));
         let mut last_slow = refresh_seed(now, Duration::from_secs(600));
         let mut last_details = refresh_seed(now, Duration::from_secs(60));
         let mut last_logs = refresh_seed(now, Duration::from_secs(60));
@@ -1169,6 +1252,16 @@ fn start_workers(
                 );
                 last_slow = Instant::now();
                 slow_interval = provider_refresh_interval(configs_ok);
+            }
+            if forced || last_kiro_pool.elapsed() >= Duration::from_secs(5) {
+                for provider in ["anthropic", "kiro"] {
+                    send_update(
+                        hwnd,
+                        &api_tx,
+                        Update::OAuthPool(provider.into(), api::fetch_oauth_pool_config(provider)),
+                    );
+                }
+                last_kiro_pool = Instant::now();
             }
             if forced || last_active.elapsed() >= Duration::from_secs(5) {
                 send_update(
@@ -1965,6 +2058,30 @@ fn auth_failed(status: &AuthStatusResponse) -> Option<String> {
 fn launch_reauth(hwnd: HWND, control: ReauthControl) {
     if !api::valid_provider_name(&control.provider) {
         with_app(|app| app.state.status = "올바르지 않은 프로바이더 이름입니다".into());
+        return;
+    }
+    if control.clear_cooldown {
+        let hwnd_value = hwnd.0 as isize;
+        with_app(|app| {
+            app.account_mutations.insert(control.id.clone());
+            app.state.status = "Kiro cooldown clearing…".into();
+        });
+        thread::spawn(move || {
+            let result = api::clear_oauth_account_cooldown(&control.provider, &control.id);
+            with_app(|app| {
+                app.account_mutations.remove(&control.id);
+                app.state.status = match result {
+                    Ok(()) => {
+                        app.force_refresh.store(true, Ordering::Release);
+                        "Kiro cooldown cleared".into()
+                    }
+                    Err(error) => error,
+                };
+            });
+            unsafe {
+                let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+            }
+        });
         return;
     }
     let key = reauth_mutation_key(&control);
@@ -3619,6 +3736,10 @@ unsafe extern "system" fn window_proc(
                         .iter()
                         .any(|(hit, _)| point_in(hit, point.x, point.y))
                         || app
+                            .pool_policy_hits
+                            .iter()
+                            .any(|(hit, _)| point_in(hit, point.x, point.y))
+                        || app
                             .account_reset_credit_hits
                             .iter()
                             .any(|(hit, _)| point_in(hit, point.x, point.y))
@@ -3660,6 +3781,11 @@ unsafe extern "system" fn window_proc(
                 app.minimize_hot = app.expanded && point_in(&minimize_hit_rect(app.width), x, y);
                 let account_control = app
                     .account_pause_hits
+                    .iter()
+                    .find(|(rect, _)| point_in(rect, x, y))
+                    .map(|(_, control)| control.clone());
+                let pool_policy_control = app
+                    .pool_policy_hits
                     .iter()
                     .find(|(rect, _)| point_in(rect, x, y))
                     .map(|(_, control)| control.clone());
@@ -3708,6 +3834,13 @@ unsafe extern "system" fn window_proc(
                     app.drag_moved = false;
                     app.pressed_account_control = None;
                     app.pressed_account_switch = None;
+                } else if let Some(control) = pool_policy_control {
+                    app.resize_origin = None;
+                    app.pressed_button = None;
+                    app.pressed_pool_policy_control = Some(control);
+                    app.drag_origin = None;
+                    app.drag_moved = false;
+                    button_down = true;
                 } else if let Some(control) = account_delete {
                     app.resize_origin = None;
                     app.pressed_button = None;
@@ -3880,6 +4013,7 @@ unsafe extern "system" fn window_proc(
                     || app.pressed_account_delete.is_some()
                     || app.pressed_reauth_control.is_some()
                     || app.pressed_reset_credit_control.is_some()
+                    || app.pressed_pool_policy_control.is_some()
                     || app.pressed_model_hit.is_some()
                     || app.pressed_subagent_hit.is_some()
                 {
@@ -3937,6 +4071,7 @@ unsafe extern "system" fn window_proc(
             let mut model_action = None;
             let mut subagent_action = None;
             let mut modal_action = None;
+            let mut pool_policy_action = None;
             with_app(|app| {
                 was_drag = app.drag_moved;
                 let pressed_button = app.pressed_button.take();
@@ -3945,6 +4080,7 @@ unsafe extern "system" fn window_proc(
                 let pressed_account_delete = app.pressed_account_delete.take();
                 let pressed_reauth_control = app.pressed_reauth_control.take();
                 let pressed_reset_credit_control = app.pressed_reset_credit_control.take();
+                let pressed_pool_policy_control = app.pressed_pool_policy_control.take();
                 let pressed_model_hit = app.pressed_model_hit.take();
                 let pressed_subagent_hit = app.pressed_subagent_hit.take();
                 let pressed_modal_hit = app.pressed_modal_hit.take();
@@ -3984,6 +4120,17 @@ unsafe extern "system" fn window_proc(
                         .any(|(rect, candidate)| *candidate == hit && point_in(rect, x, y))
                     {
                         subagent_action = Some(hit);
+                    }
+                    handled_button = true;
+                    return;
+                }
+                if let Some(control) = pressed_pool_policy_control {
+                    if app
+                        .pool_policy_hits
+                        .iter()
+                        .any(|(rect, hit)| *hit == control && point_in(rect, x, y))
+                    {
+                        pool_policy_action = Some(control.provider);
                     }
                     handled_button = true;
                     return;
@@ -4279,6 +4426,9 @@ unsafe extern "system" fn window_proc(
                 resize_for_state(hwnd);
                 let _ = InvalidateRect(hwnd, None, false);
             }
+            if let Some(provider) = pool_policy_action {
+                show_pool_policy_menu(hwnd, &provider);
+            }
             if handled_button {
                 if changed {
                     resize_for_state(hwnd);
@@ -4306,6 +4456,7 @@ unsafe extern "system" fn window_proc(
                 app.pressed_account_delete = None;
                 app.pressed_reauth_control = None;
                 app.pressed_reset_credit_control = None;
+                app.pressed_pool_policy_control = None;
                 app.pressed_model_hit = None;
                 app.pressed_subagent_hit = None;
                 app.pressed_modal_hit = None;
@@ -4342,46 +4493,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_COMMAND => {
             let command = wparam.0 & 0xffff;
-            let mut requested_threshold = None;
-            if (MENU_THRESHOLD_BASE..=MENU_THRESHOLD_BASE + 100).contains(&command) {
-                requested_threshold = Some((command - MENU_THRESHOLD_BASE) as u32);
-            } else if command == MENU_PROVIDER_ADD {
+            if command == MENU_PROVIDER_ADD {
                 open_provider_modal(hwnd);
             } else if command == MENU_CONNECTION {
                 show_connection_modal(hwnd);
-            } else if command == MENU_THRESHOLD_DOWN || command == MENU_THRESHOLD_UP {
-                with_app(|app| {
-                    requested_threshold = Some(if command == MENU_THRESHOLD_DOWN {
-                        app.state.auto_switch_threshold.saturating_sub(1)
-                    } else {
-                        (app.state.auto_switch_threshold + 1).min(100)
-                    });
-                });
-            }
-            if let Some(threshold) = requested_threshold {
-                with_app(|app| {
-                    app.state.auto_switch_threshold = threshold;
-                    app.state.status = if threshold == 0 {
-                        "Account rotation disabled".into()
-                    } else {
-                        format!("Account rotation at {threshold}%")
-                    };
-                });
-                let hwnd_value = hwnd.0 as isize;
-                thread::spawn(move || {
-                    let result = api::set_auto_switch_threshold(threshold);
-                    with_app(|app| {
-                        if let Err(error) = result {
-                            app.state.status = error;
-                        } else {
-                            app.force_refresh.store(true, Ordering::Relaxed);
-                        }
-                    });
-                    unsafe {
-                        let _ =
-                            PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
-                    }
-                });
             } else {
                 match command {
                     MENU_REFRESH => {
@@ -4477,6 +4592,7 @@ unsafe fn draw_frame(dc: HDC, width: i32, height: i32) {
 
 unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
     app.provider_hits.clear();
+    app.pool_policy_hits.clear();
     app.account_pause_hits.clear();
     app.account_switch_hits.clear();
     app.account_delete_hits.clear();
@@ -4841,10 +4957,49 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
             }
             y += provider_height;
             if app.expanded_providers.contains(&provider.name) {
+                if supports_pool_policy(&provider.name) {
+                    let policy_row = RECT {
+                        left: 26,
+                        top: y,
+                        right: width - 18,
+                        bottom: y + 34,
+                    };
+                    let action_rect = RECT {
+                        left: (width - 102).max(160),
+                        top: y + 2,
+                        right: width - 18,
+                        bottom: y + 32,
+                    };
+                    let control = PoolPolicyControl {
+                        provider: provider.name.clone(),
+                    };
+                    set_text_color(dc, 0x008e949e);
+                    draw_text(
+                        dc,
+                        &pool_policy_summary(&app.state, &provider.name),
+                        RECT {
+                            right: action_rect.left - 10,
+                            ..policy_row
+                        },
+                        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                    );
+                    set_text_color(dc, 0x0024bffb);
+                    draw_text(
+                        dc,
+                        "풀 설정",
+                        action_rect,
+                        DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+                    );
+                    if policy_row.bottom > CONTENT_TOP && policy_row.top < height {
+                        app.pool_policy_hits.push((policy_row, control));
+                    }
+                    y += 34;
+                }
                 let pool_size = provider.accounts.len();
                 for account in provider.accounts {
                     let account_height = account_height(&account);
                     let reauth = reauth_eligible(&provider.name, &account);
+                    let clear_cooldown = provider.name == "kiro" && account.cooldown;
                     let can_delete = !account.is_main && account.id != "__main__";
                     let reauth_rect = reauth_action_rect(width, y, can_delete);
                     if can_delete {
@@ -4888,7 +5043,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     let identity_right = account_identity_right(
                         width,
                         show_action_control.then_some(action_rect.left),
-                        reauth.then_some(reauth_rect.left),
+                        (reauth || clear_cooldown).then_some(reauth_rect.left),
                     );
                     draw_text(
                         dc,
@@ -4967,28 +5122,29 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                                 .push((reset_credit_rect, control));
                         }
                     }
-                    if provider.name == "openai" {
-                        if reauth {
-                            let control = ReauthControl {
-                                provider: provider.name.clone(),
-                                id: account.id.clone(),
-                            };
-                            let waiting = app
-                                .reauth_mutations
-                                .contains_key(&reauth_mutation_key(&control));
-                            set_text_color(dc, reauth_text_color(waiting));
-                            draw_text(
-                                dc,
-                                if waiting {
-                                    "인증 대기 중 · 취소"
-                                } else {
-                                    "재인증"
-                                },
-                                reauth_rect,
-                                DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-                            );
-                            app.account_reauth_hits.push((reauth_rect, control));
-                        }
+                    if reauth || clear_cooldown {
+                        let control = ReauthControl {
+                            provider: provider.name.clone(),
+                            id: account.id.clone(),
+                            clear_cooldown,
+                        };
+                        let waiting = app
+                            .reauth_mutations
+                            .contains_key(&reauth_mutation_key(&control));
+                        set_text_color(dc, reauth_text_color(waiting));
+                        draw_text(
+                            dc,
+                            if clear_cooldown {
+                                "쿨다운 해제"
+                            } else if waiting {
+                                "인증 대기 중 · 취소"
+                            } else {
+                                "재인증"
+                            },
+                            reauth_rect,
+                            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                        );
+                        app.account_reauth_hits.push((reauth_rect, control));
                     }
                     set_text_color(
                         dc,
@@ -5007,7 +5163,7 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
                     } else {
                         ""
                     };
-                    let health = if reauth {
+                    let health = if reauth || clear_cooldown {
                         suffix.to_string()
                     } else {
                         format!("{}{}", account.health, suffix)
@@ -8440,14 +8596,17 @@ mod account_control_tests {
         let first = ReauthControl {
             provider: "kiro".into(),
             id: "a".into(),
+            clear_cooldown: false,
         };
         let second = ReauthControl {
             provider: "kiro".into(),
             id: "b".into(),
+            clear_cooldown: false,
         };
         let codex = ReauthControl {
             provider: "openai".into(),
             id: "a".into(),
+            clear_cooldown: false,
         };
         assert_eq!(reauth_mutation_key(&first), reauth_mutation_key(&second));
         assert_ne!(reauth_mutation_key(&first), reauth_mutation_key(&codex));
@@ -8923,41 +9082,376 @@ unsafe fn apply_round_region(hwnd: HWND, width: i32, height: i32) {
     let _ = SetWindowRgn(hwnd, region, true);
 }
 
-unsafe fn show_context_menu(hwnd: HWND) {
-    let menu = CreatePopupMenu().unwrap_or_default();
-    let threshold_menu = CreatePopupMenu().unwrap_or_default();
-    let current = APP
-        .get()
-        .and_then(|app| app.lock().ok().map(|app| app.state.auto_switch_threshold))
-        .unwrap_or(80);
-    for threshold in [0_u32, 50, 60, 70, 75, 80, 85, 90, 95, 100] {
-        let flags = if threshold == current {
+#[derive(Clone)]
+enum PoolPolicyChange {
+    Enabled(bool),
+    Threshold(u32),
+    Strategy(String),
+    Sticky(u32),
+    Failover(u32),
+    Cooldown(u32),
+}
+
+unsafe fn append_choice_menu(
+    parent: HMENU,
+    label: PCWSTR,
+    base: usize,
+    offset: usize,
+    choices: &[(u32, String)],
+    current: u32,
+) {
+    let submenu = CreatePopupMenu().unwrap_or_default();
+    for (value, text) in choices {
+        let flags = if *value == current {
             MF_STRING | MF_CHECKED
         } else {
             MF_STRING
         };
-        let label = if threshold == 0 {
-            "사용 안 함".to_string()
-        } else {
-            format!("{threshold}%")
-        };
-        let label: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let _ = AppendMenuW(
-            threshold_menu,
+            submenu,
             flags,
-            MENU_THRESHOLD_BASE + threshold as usize,
-            PCWSTR(label.as_ptr()),
+            base + offset + *value as usize,
+            PCWSTR(wide.as_ptr()),
         );
     }
-    let _ = AppendMenuW(
+    let _ = AppendMenuW(parent, MF_POPUP, submenu.0 as usize, label);
+}
+
+fn apply_oauth_policy_change(config: &mut OAuthPoolConfig, change: &PoolPolicyChange) {
+    match change {
+        PoolPolicyChange::Enabled(value) => config.enabled = *value,
+        PoolPolicyChange::Threshold(value) => config.auto_switch_threshold = *value,
+        PoolPolicyChange::Strategy(value) => config.strategy = value.clone(),
+        PoolPolicyChange::Sticky(value) => config.sticky_limit = *value,
+        PoolPolicyChange::Failover(value) => config.max_failovers_per_request = *value,
+        PoolPolicyChange::Cooldown(value) => config.default_cooldown_seconds = *value,
+    }
+}
+
+fn launch_pool_policy_change(hwnd: HWND, provider: String, change: PoolPolicyChange) {
+    if provider == "openai" {
+        let previous = APP.get().and_then(|app| {
+            app.lock().ok().map(|app| {
+                (
+                    app.state.auto_switch_threshold,
+                    app.state.account_pool_strategy.clone(),
+                    app.state.account_pool_sticky_limit,
+                    app.state.upstream_failover_threshold,
+                )
+            })
+        });
+        with_app(|app| {
+            match &change {
+                PoolPolicyChange::Threshold(value) => app.state.auto_switch_threshold = *value,
+                PoolPolicyChange::Strategy(value) => {
+                    app.state.account_pool_strategy = value.clone()
+                }
+                PoolPolicyChange::Sticky(value) => app.state.account_pool_sticky_limit = *value,
+                PoolPolicyChange::Failover(value) => app.state.upstream_failover_threshold = *value,
+                _ => {}
+            }
+            app.state.status = "OpenAI 풀 설정 저장 중…".into();
+        });
+        let hwnd_value = hwnd.0 as isize;
+        thread::spawn(move || {
+            let result = match &change {
+                PoolPolicyChange::Threshold(value) => api::set_auto_switch_threshold(*value),
+                PoolPolicyChange::Strategy(value) => APP
+                    .get()
+                    .and_then(|app| {
+                        app.lock()
+                            .ok()
+                            .map(|app| app.state.account_pool_sticky_limit)
+                    })
+                    .ok_or_else(|| "Notch state unavailable".to_string())
+                    .and_then(|sticky| api::set_codex_pool_strategy(value, sticky)),
+                PoolPolicyChange::Sticky(value) => APP
+                    .get()
+                    .and_then(|app| {
+                        app.lock()
+                            .ok()
+                            .map(|app| app.state.account_pool_strategy.clone())
+                    })
+                    .ok_or_else(|| "Notch state unavailable".to_string())
+                    .and_then(|strategy| api::set_codex_pool_strategy(&strategy, *value)),
+                PoolPolicyChange::Failover(value) => api::set_codex_failover_threshold(*value),
+                _ => Ok(()),
+            };
+            with_app(|app| match result {
+                Ok(()) => {
+                    app.state.status = "OpenAI 풀 설정을 저장했습니다".into();
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => {
+                    if let Some((threshold, strategy, sticky, failover)) = previous {
+                        app.state.auto_switch_threshold = threshold;
+                        app.state.account_pool_strategy = strategy;
+                        app.state.account_pool_sticky_limit = sticky;
+                        app.state.upstream_failover_threshold = failover;
+                    }
+                    app.state.status = error;
+                }
+            });
+            unsafe {
+                let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+            }
+        });
+        return;
+    }
+
+    let mut previous = OAuthPoolConfig {
+        provider: provider.clone(),
+        ..Default::default()
+    };
+    let mut next = previous.clone();
+    with_app(|app| {
+        previous = app
+            .state
+            .oauth_pool_configs
+            .get(&provider)
+            .cloned()
+            .unwrap_or_else(|| OAuthPoolConfig {
+                provider: provider.clone(),
+                ..Default::default()
+            });
+        next = previous.clone();
+        apply_oauth_policy_change(&mut next, &change);
+        app.state
+            .oauth_pool_configs
+            .insert(provider.clone(), next.clone());
+        app.state.status = format!("{provider} 풀 설정 저장 중…");
+    });
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::set_oauth_pool_config(&next);
+        with_app(|app| match result {
+            Ok(saved) => {
+                app.state.oauth_pool_configs.insert(provider.clone(), saved);
+                app.state.status = format!("{provider} 풀 설정을 저장했습니다");
+                app.force_refresh.store(true, Ordering::Release);
+            }
+            Err(error) => {
+                app.state
+                    .oauth_pool_configs
+                    .insert(provider.clone(), previous);
+                app.state.status = error;
+            }
+        });
+        unsafe {
+            let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+unsafe fn show_pool_policy_menu(hwnd: HWND, provider: &str) {
+    let base = match provider {
+        "openai" => MENU_OPENAI_POLICY_BASE,
+        "anthropic" => MENU_ANTHROPIC_POLICY_BASE,
+        "kiro" => MENU_KIRO_POLICY_BASE,
+        _ => return,
+    };
+    let menu = CreatePopupMenu().unwrap_or_default();
+    let (enabled, threshold, strategy, sticky, failover, cooldown) = APP
+        .get()
+        .and_then(|app| {
+            app.lock().ok().map(|app| {
+                if provider == "openai" {
+                    (
+                        true,
+                        app.state.auto_switch_threshold,
+                        app.state.account_pool_strategy.clone(),
+                        app.state.account_pool_sticky_limit,
+                        app.state.upstream_failover_threshold,
+                        60,
+                    )
+                } else {
+                    let config = app
+                        .state
+                        .oauth_pool_configs
+                        .get(provider)
+                        .cloned()
+                        .unwrap_or_else(|| OAuthPoolConfig {
+                            provider: provider.into(),
+                            ..Default::default()
+                        });
+                    (
+                        config.enabled,
+                        config.auto_switch_threshold,
+                        config.strategy,
+                        config.sticky_limit,
+                        config.max_failovers_per_request,
+                        config.default_cooldown_seconds,
+                    )
+                }
+            })
+        })
+        .unwrap_or((false, 80, "quota".into(), 1, 3, 60));
+
+    if provider != "openai" {
+        let _ = AppendMenuW(
+            menu,
+            if enabled {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            },
+            base + POLICY_ENABLED,
+            w!("계정 풀 사용"),
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    }
+    let thresholds = [0, 50, 60, 70, 75, 80, 85, 90, 95, 100]
+        .into_iter()
+        .map(|value| {
+            (
+                value,
+                if value == 0 {
+                    "사용 안 함".into()
+                } else {
+                    format!("{value}%")
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let stickies = [1, 2, 3, 5, 10]
+        .into_iter()
+        .map(|value| (value, format!("{value}회")))
+        .collect::<Vec<_>>();
+    let failovers = [0, 1, 2, 3, 5, 10]
+        .into_iter()
+        .map(|value| {
+            (
+                value,
+                if value == 0 {
+                    "사용 안 함".into()
+                } else {
+                    format!("{value}회")
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    if provider != "kiro" {
+        append_choice_menu(
+            menu,
+            w!("사용량 전환 기준"),
+            base,
+            POLICY_THRESHOLD,
+            &thresholds,
+            threshold,
+        );
+        let strategy_menu = CreatePopupMenu().unwrap_or_default();
+        for (index, (value, label)) in [
+            ("quota", "할당량 우선"),
+            ("round-robin", "순차 순환"),
+            ("fill-first", "한 계정 우선"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let flags = if *value == strategy {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            let wide: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+            let _ = AppendMenuW(
+                strategy_menu,
+                flags,
+                base + POLICY_STRATEGY + index,
+                PCWSTR(wide.as_ptr()),
+            );
+        }
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP,
+            strategy_menu.0 as usize,
+            w!("계정 선택 방식"),
+        );
+        append_choice_menu(
+            menu,
+            w!("선택 유지"),
+            base,
+            POLICY_STICKY,
+            &stickies,
+            sticky,
+        );
+    }
+    append_choice_menu(
         menu,
-        MF_POPUP,
-        threshold_menu.0 as usize,
-        w!("자동 전환 기준"),
+        w!("요청 내 오류 전환"),
+        base,
+        POLICY_FAILOVER,
+        &failovers,
+        failover,
     );
-    let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_DOWN, w!("기준값 -1%"));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_THRESHOLD_UP, w!("기준값 +1%"));
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    if provider != "openai" {
+        let cooldowns = [15, 30, 60, 120, 300, 600, 900]
+            .into_iter()
+            .map(|value| (value, format!("{value}초")))
+            .collect::<Vec<_>>();
+        append_choice_menu(
+            menu,
+            w!("기본 쿨다운"),
+            base,
+            POLICY_COOLDOWN,
+            &cooldowns,
+            cooldown,
+        );
+    }
+    let mut point = POINT::default();
+    let _ = GetCursorPos(&mut point);
+    let _ = SetForegroundWindow(hwnd);
+    with_app(|app| app.context_menu_open = true);
+    let command = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        point.x,
+        point.y,
+        0,
+        hwnd,
+        None,
+    )
+    .0 as usize;
+    with_app(|app| app.context_menu_open = false);
+    let _ = DestroyMenu(menu);
+    if command == 0 {
+        return;
+    }
+    let relative = command.saturating_sub(base);
+    let change = if relative == POLICY_ENABLED {
+        PoolPolicyChange::Enabled(!enabled)
+    } else if [0, 50, 60, 70, 75, 80, 85, 90, 95, 100]
+        .contains(&(relative.saturating_sub(POLICY_THRESHOLD) as u32))
+        && relative >= POLICY_THRESHOLD
+    {
+        PoolPolicyChange::Threshold((relative - POLICY_THRESHOLD) as u32)
+    } else if (POLICY_STRATEGY..POLICY_STRATEGY + 3).contains(&relative) {
+        PoolPolicyChange::Strategy(
+            ["quota", "round-robin", "fill-first"][relative - POLICY_STRATEGY].into(),
+        )
+    } else if [1, 2, 3, 5, 10].contains(&(relative.saturating_sub(POLICY_STICKY) as u32))
+        && relative >= POLICY_STICKY
+    {
+        PoolPolicyChange::Sticky((relative - POLICY_STICKY) as u32)
+    } else if [0, 1, 2, 3, 5, 10].contains(&(relative.saturating_sub(POLICY_FAILOVER) as u32))
+        && relative >= POLICY_FAILOVER
+    {
+        PoolPolicyChange::Failover((relative - POLICY_FAILOVER) as u32)
+    } else if [15, 30, 60, 120, 300, 600, 900]
+        .contains(&(relative.saturating_sub(POLICY_COOLDOWN) as u32))
+        && relative >= POLICY_COOLDOWN
+    {
+        PoolPolicyChange::Cooldown((relative - POLICY_COOLDOWN) as u32)
+    } else {
+        return;
+    };
+    launch_pool_policy_change(hwnd, provider.into(), change);
+    let _ = InvalidateRect(hwnd, None, false);
+}
+
+unsafe fn show_context_menu(hwnd: HWND) {
+    let menu = CreatePopupMenu().unwrap_or_default();
     let _ = AppendMenuW(menu, MF_STRING, MENU_PROVIDER_ADD, w!("프로바이더 추가..."));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, MENU_CONNECTION, w!("연결 설정..."));
