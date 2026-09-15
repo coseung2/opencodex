@@ -31,6 +31,17 @@ xAI requires an item ID on custom-tool calls in conversation history, including 
 missing, preserving the call ID that pairs the tool result with its call. Other destinations
 keep their existing item-ID behavior.
 
+## Grok conversation replies
+
+Grok replies continue streaming when a response event arrives in multiple network
+chunks. On later turns, the proxy removes Codex's empty `content: null` reasoning
+field and the output-only reasoning status before sending history to xAI. The
+encrypted reasoning value stays unchanged. This prevents xAI's misleading
+`Could not decode the compaction blob` error on otherwise valid conversation history.
+
+The upstream serving label `grok-4.6-build` is displayed as the selected `grok-4.6`;
+it does not mean the request selected the separate `grok-build-0.1` model.
+
 ## Scope
 
 This fork retains its current runtime, management UI, Notch companion and release identity. Provider compatibility patches do not imply that the entire upstream release was merged. No live provider credential is required for the regression suite; live account availability and vendor-side behavior may still differ from the pinned, fixture-tested contract.

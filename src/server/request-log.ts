@@ -524,7 +524,13 @@ export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unk
     : payload;
   if (!source || typeof source !== "object") return;
   const model = (source as { model?: unknown }).model;
-  if (typeof model === "string" && model.trim()) logCtx.resolvedModel = model;
+  if (typeof model === "string" && model.trim()) {
+    // xAI's serving suffix is not a route to the separate Grok Build model.
+    // Normalize only that exact alias; retain other providers' resolved metadata.
+    logCtx.resolvedModel = logCtx.provider === "xai" && model === `${logCtx.model}-build`
+      ? logCtx.model
+      : model;
+  }
   const serviceTier = (source as { service_tier?: unknown }).service_tier;
   if (typeof serviceTier === "string" && serviceTier.trim()) logCtx.responseServiceTier = serviceTier;
   const usage = usageFromResponsesPayload((source as { usage?: unknown }).usage);

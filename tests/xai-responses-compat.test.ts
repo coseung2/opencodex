@@ -3,6 +3,7 @@ import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterP
 import { normalizeXaiResponsesWebSearch } from "../src/adapters/xai-web-search";
 import {
   createXaiCustomToolPayloadRewrite,
+  createXaiResponseModelRewrite,
   lowerXaiResponsesCustomTools,
   restoreXaiCustomCallsInJson,
 } from "../src/responses/xai-custom-tool-compat";
@@ -37,6 +38,36 @@ const apiProvider = {
 };
 
 describe("xAI Responses custom-tool compatibility", () => {
+  test("restores requested model metadata without changing encrypted reasoning", () => {
+    const rewrite = createXaiResponseModelRewrite("grok-4.6");
+    const event = { type: "response.completed", response: {
+      model: "grok-4.6-build", output: [{ type: "reasoning", encrypted_content: "opaque-test" }],
+    } };
+    expect(JSON.parse(rewrite(JSON.stringify(event)))).toEqual({
+      ...event, response: { ...event.response, model: "grok-4.6" },
+    });
+    expect(rewrite("[DONE]")).toBe("[DONE]");
+  });
+
+  test("replays native Grok reasoning without Codex's null content channel or output status", () => {
+    const raw = { model: "grok-4.6", store: false, input: [{
+      type: "reasoning", id: "rs_history", summary: [], content: null,
+      status: "completed", encrypted_content: "synthetic-native-blob",
+    }] };
+    const build = (provider: typeof apiProvider) => JSON.parse(createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: raw.model, context: { messages: [] }, stream: false, options: {}, _rawBody: raw,
+    }, { headers: new Headers() }).body);
+    for (const provider of [apiProvider, cliProvider]) {
+      expect(build(provider).input[0]).toEqual({
+        type: "reasoning", summary: [], encrypted_content: "synthetic-native-blob",
+      });
+    }
+    // The destination gate preserves the OpenAI encrypted-reasoning wire contract.
+    expect(build({ ...apiProvider, baseUrl: "https://api.openai.com/v1" }).input[0]).toHaveProperty("content", null);
+    expect(raw.input[0]).toHaveProperty("content", null);
+    expect(raw.input[0]).toHaveProperty("status", "completed");
+  });
+
   test("undeclared custom history retains required item identity with store:false", () => {
     const raw = { model: "grok-4.6", store: false, input: [
       { type: "custom_tool_call", call_id: "call_history", name: "old_tool", input: "synthetic" },

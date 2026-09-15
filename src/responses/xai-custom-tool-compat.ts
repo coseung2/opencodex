@@ -235,3 +235,27 @@ export function createXaiCustomToolPayloadRewrite(names: ReadonlySet<string>): S
     return restored === value ? payload : JSON.stringify(restored);
   };
 }
+
+/** Restore the client-selected model when xAI returns its internal serving slug. */
+export function createXaiResponseModelRewrite(model: string): SsePayloadRewrite {
+  return (payload: string): string => {
+    try {
+      const value = JSON.parse(payload) as unknown;
+      if (!isPlainObject(value)) return payload;
+      let changed = false;
+      const next: Record<string, unknown> = { ...value };
+      const rewrite = (entry: unknown): unknown => {
+        if (!isPlainObject(entry)) return entry;
+        if (typeof entry.model === "string" && entry.model !== model) {
+          changed = true;
+          return { ...entry, model };
+        }
+        return entry;
+      };
+      if (typeof next.model === "string" && next.model !== model) { next.model = model; changed = true; }
+      if (isPlainObject(next.response)) next.response = rewrite(next.response);
+      if (isPlainObject(next.item)) next.item = rewrite(next.item);
+      return changed ? JSON.stringify(next) : payload;
+    } catch { return payload; }
+  };
+}

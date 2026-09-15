@@ -237,7 +237,7 @@ describe("xAI OAuth native Responses streaming", () => {
     }
   }, 10_000);
 
-  test("Grok-tagged Responses reconstruct a sparse terminal snapshot and required annotations", async () => {
+  test.each([true, false])("Grok Responses reconstruct sparse snapshots with Grok client marker=%s", async (grokMarker) => {
     globalThis.fetch = (async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url !== RESPONSES_ENDPOINT) return originalFetch(input, init);
@@ -258,7 +258,7 @@ describe("xAI OAuth native Responses streaming", () => {
     try {
       const response = await originalFetch(new URL("/v1/responses", server.url), {
         method: "POST",
-        headers: { "content-type": "application/json", "x-opencodex-grok": "1" },
+        headers: { "content-type": "application/json", ...(grokMarker ? { "x-opencodex-grok": "1" } : {}) },
         body: JSON.stringify({ model: "xai/grok-4.6", input: "hello", stream: true, store: false }),
       });
       const text = await response.text();

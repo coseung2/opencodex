@@ -185,6 +185,7 @@ import {
 import { composeSsePayloadRewrites, relaySseWithPayloadRewrite } from "../sse-payload-rewrite";
 import {
   createXaiCustomToolPayloadRewrite,
+  createXaiResponseModelRewrite,
   restoreXaiCustomCallsInJson,
   xaiResponsesCustomToolNames,
 } from "../../responses/xai-custom-tool-compat";
@@ -1778,6 +1779,9 @@ async function handleResponsesInner(
     const xaiCustomToolNames = isXaiResponsesDestination(route.provider)
       ? xaiResponsesCustomToolNames(parsed._rawBody)
       : new Set<string>();
+    const museCustomToolNames = isOpenCodeMuseResponses(parsed.modelId, request.url)
+      ? xaiResponsesCustomToolNames(parsed._rawBody)
+      : new Set<string>();
     const xaiNamespaceToolAliases = isXaiResponsesDestination(route.provider)
       ? xaiResponsesNamespaceToolAliases(parsed._rawBody)
       : new Map<string, { namespace: string; name: string }>();
@@ -1794,6 +1798,8 @@ async function handleResponsesInner(
         : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
     const museToolSearchRewrite = isOpenCodeMuseResponses(parsed.modelId, request.url)
       ? createMuseToolSearchRestoreRewrite(parsed._rawBody) : undefined;
+    const museCustomToolRewrite = museCustomToolNames.size > 0
+      ? createXaiCustomToolPayloadRewrite(museCustomToolNames) : undefined;
     recordAdapterReasoning(logCtx, request);
     const passthroughEstimate = typeof request.usageLog?.inputTokens === "number"
       ? request.usageLog.inputTokens
@@ -2171,24 +2177,34 @@ async function handleResponsesInner(
       const xaiCustomToolRewrite = createXaiCustomToolPayloadRewrite(xaiCustomToolNames);
       const xaiNamespaceToolRewrite = createXaiNamespaceToolPayloadRewrite(xaiNamespaceToolAliases);
       const xaiToolSearchRewrite = createXaiToolSearchPayloadRewrite(xaiSearchAlias);
-      const grokSparseTerminalRewrite = logCtx.surface === "grok"
+      const xaiResponseModelRewrite = isXaiResponsesDestination(route.provider)
+        ? createXaiResponseModelRewrite(route.modelId)
+        : undefined;
+      // Codex can select xai/grok-4.6 directly without the Grok Build client
+      // attribution header. The upstream sparse-terminal contract is destination
+      // based, so surface-only gating drops the final assistant item in that path.
+      const grokSparseTerminalRewrite = (logCtx.surface === "grok" || isXaiResponsesDestination(route.provider))
         ? createGrokResponsesSparseTerminalPayloadRewrite(translatorBudget)
         : undefined;
       const needsClientRewrite = imageGenCallAliases.size > 0
         || museToolSearchRewrite !== undefined
+        || museCustomToolRewrite !== undefined
         || hasResponsesItemIdRepair(repairConfig)
         || xaiCustomToolRewrite !== undefined
         || xaiNamespaceToolRewrite !== undefined
         || xaiToolSearchRewrite !== undefined
+        || xaiResponseModelRewrite !== undefined
         || grokSparseTerminalRewrite !== undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass. Provider-shape restoration
       // runs before generic item-id repair so the client sees the correct custom-tool identity.
       const payloadRewrites = [
         museToolSearchRewrite,
+        museCustomToolRewrite,
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         xaiCustomToolRewrite,
         xaiNamespaceToolRewrite,
         xaiToolSearchRewrite,
+        xaiResponseModelRewrite,
         grokSparseTerminalRewrite,
         hasResponsesItemIdRepair(repairConfig)
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
@@ -2350,7 +2366,10 @@ async function handleResponsesInner(
           rememberPassthroughResponse(JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown });
         } catch { /* non-JSON despite content-type; recording is best-effort */ }
       }
-      const restoredCustomTools = restoreXaiCustomCallsInJson(text, xaiCustomToolNames);
+      const restoredCustomTools = restoreXaiCustomCallsInJson(
+        text,
+        xaiCustomToolNames.size > 0 ? xaiCustomToolNames : museCustomToolNames,
+      );
       const restoredNamespaceTools = restoreXaiNamespaceCallsInJson(restoredCustomTools, xaiNamespaceToolAliases);
       const restoredSearchTools = restoreXaiToolSearchCallsInJson(restoredNamespaceTools, xaiSearchAlias);
       const restoredMuseTools = museToolSearchRewrite?.(restoredSearchTools) ?? restoredSearchTools;

@@ -11,6 +11,7 @@ import {
 } from "../src/server";
 import {
   aggregateAttemptUsage,
+  applyResponseLogMetadata,
   beginRequestAttempt,
   clearRequestLogsForTests,
   finishRequestAttempt,
@@ -53,6 +54,17 @@ function log(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("request log metadata", () => {
+  test("normalizes xAI's serving suffix without hiding actual model changes", () => {
+    const ctx: RequestLogContext = { model: "grok-4.6", provider: "xai" };
+    applyResponseLogMetadata(ctx, { model: "grok-4.6-build" });
+    expect(ctx.resolvedModel).toBe("grok-4.6");
+    applyResponseLogMetadata(ctx, { model: "grok-build-0.1" });
+    expect(ctx.resolvedModel).toBe("grok-build-0.1");
+    const other: RequestLogContext = { model: "model", provider: "other", resolvedModel: "old" };
+    applyResponseLogMetadata(other, { model: "model-build" });
+    expect(other.resolvedModel).toBe("model-build");
+  });
+
   test("records the adapter's exact outbound reasoning parameter", () => {
     const attempt = beginRequestAttempt(1, "xai", "grok-4.5", "openai-chat");
     const logCtx: RequestLogContext = {

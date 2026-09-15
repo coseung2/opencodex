@@ -40,6 +40,40 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<string> {
 }
 
 describe("SSE payload rewrite composition", () => {
+  test("reads fragmented events until a complete block is available before upstream EOF", async () => {
+    const encoder = new TextEncoder();
+    const fragments = ['data: {"type":', '"response.output_text.delta",', '"delta":"hello"}', '\n', '\n'];
+    let reads = 0;
+    let sourceCancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (reads < fragments.length) controller.enqueue(encoder.encode(fragments[reads++]!));
+        // Keep the upstream open: a complete event must reach Codex before EOF.
+      },
+      cancel() { sourceCancelled = true; },
+    });
+    const budget = createTestTranslatorBudget();
+    const reader = relaySseWithPayloadRewrite(source, payload => payload.replace("hello", "world"), budget).getReader();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("fragmented SSE event stalled")), 1_000);
+        }),
+      ]);
+      expect(result.done).toBe(false);
+      expect(new TextDecoder().decode(result.value)).toBe('data: {"type":"response.output_text.delta","delta":"world"}\n\n');
+      expect(reads).toBe(fragments.length);
+    } finally {
+      clearTimeout(timer);
+      await reader.cancel();
+      expect(sourceCancelled).toBe(true);
+      expect(budget.snapshot().currentBytes).toBe(0);
+      budget.dispose();
+    }
+  });
+
   test("applies image-gen restore and item-id repair in one relay pass", async () => {
     const upstream = [
       'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant"}}\n\n',
@@ -102,6 +136,45 @@ describe("SSE payload rewrite composition", () => {
 
   test("compose with no rewrites is identity", () => {
     expect(composeSsePayloadRewrites()('{"a":1}')).toBe('{"a":1}');
+  });
+
+  test("cancellation during a pending read never invokes the disposed rewrite", async () => {
+    const source = new ReadableStream<Uint8Array>({ pull() {} });
+    let calls = 0;
+    let disposals = 0;
+    const rewrite = ((payload: string) => { calls += 1; return payload; }) as SsePayloadRewrite;
+    rewrite.dispose = () => { disposals += 1; };
+    const budget = createTestTranslatorBudget();
+    const reader = relaySseWithPayloadRewrite(source, rewrite, budget).getReader();
+    const pending = reader.read();
+    await Promise.resolve();
+    await reader.cancel();
+    expect((await pending).done).toBe(true);
+    expect(calls).toBe(0);
+    expect(disposals).toBe(1);
+    expect(budget.snapshot().currentBytes).toBe(0);
+    budget.dispose();
+  });
+
+  test("rewrite failures reach the client without waiting for the inspection tee", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: {}\n\n')); },
+    });
+    const [client, inspection] = source.tee();
+    const budget = createTestTranslatorBudget();
+    const reader = relaySseWithPayloadRewrite(client, () => { throw new Error("rewrite failed"); }, budget).getReader();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(Promise.race([
+        reader.read(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("tee cancellation stalled")), 1_000); }),
+      ])).rejects.toThrow("rewrite failed");
+    } finally {
+      clearTimeout(timer);
+      await inspection.cancel();
+      expect(budget.snapshot().currentBytes).toBe(0);
+      budget.dispose();
+    }
   });
 
   test("relay disposes stateful payload rewrites exactly once at EOF", async () => {

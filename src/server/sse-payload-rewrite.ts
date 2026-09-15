@@ -83,6 +83,7 @@ export function relaySseWithPayloadRewrite(
   const encoder = new TextEncoder();
   let buffer = "";
   let bufferBytes = 0;
+  let cancelled = false;
 
   const appendBuffer = (fragment: string): void => {
     if (!fragment) return;
@@ -140,50 +141,67 @@ export function relaySseWithPayloadRewrite(
   const emitProcessedBlocks = (
     controller: ReadableStreamDefaultController<Uint8Array>,
     flushFinal = false,
-  ): void => {
+  ): number => {
+    let emitted = 0;
     let next: { block: string; delimiter: string; rest: string } | null;
-    while ((next = nextSseBlock(buffer))) {
+    while (!cancelled && (next = nextSseBlock(buffer))) {
       replaceBuffer(next.rest);
       const payload = sseDataPayload(next.block);
       const rewrittenPayload = payload ? rewrite(payload) : undefined;
+      if (cancelled) return emitted;
       const block = payload && rewrittenPayload !== undefined && rewrittenPayload !== payload
         ? replaceSseDataPayload(next.block, rewrittenPayload)
         : next.block;
       enqueueText(controller, block + next.delimiter);
+      emitted += 1;
     }
     if (flushFinal && buffer.length > 0) {
       const payload = sseDataPayload(buffer);
       const rewrittenPayload = payload ? rewrite(payload) : undefined;
+      if (cancelled) return emitted;
       const block = payload && rewrittenPayload !== undefined && rewrittenPayload !== payload
         ? replaceSseDataPayload(buffer, rewrittenPayload)
         : buffer;
       enqueueText(controller, block);
+      emitted += 1;
       releaseBuffer();
     }
+    return emitted;
   };
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
-        const { done, value } = await reader.read();
-        if (done) {
-          appendBuffer(decoder.decode());
-          emitProcessedBlocks(controller, true);
-          releaseBuffer();
-          disposeRewrite();
-          controller.close();
-          return;
+        // A network chunk may contain only part of an SSE event. Bun need not
+        // pull again when a fulfilled pull enqueues nothing, so read until a
+        // complete block or EOF instead of parking the downstream reader.
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (cancelled) return;
+          if (done) {
+            appendBuffer(decoder.decode());
+            emitProcessedBlocks(controller, true);
+            if (cancelled) return;
+            releaseBuffer();
+            disposeRewrite();
+            controller.close();
+            return;
+          }
+          appendBuffer(decoder.decode(value, { stream: true }));
+          const emitted = emitProcessedBlocks(controller);
+          if (cancelled || emitted > 0) return;
         }
-        appendBuffer(decoder.decode(value, { stream: true }));
-        emitProcessedBlocks(controller);
       } catch (error) {
         releaseBuffer();
         disposeRewrite();
-        try { await reader.cancel(error); } catch { /* already closed */ }
+        // A tee branch's cancellation waits for its sibling. Publish the error
+        // immediately so the downstream can abort upstream and release both.
+        void reader.cancel(error).catch(() => {});
         controller.error(error);
       }
     },
     cancel(reason) {
+      cancelled = true;
       releaseBuffer();
       disposeRewrite();
       reader.cancel(reason).catch(() => {});

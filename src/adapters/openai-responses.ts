@@ -45,7 +45,7 @@ export const FORWARD_HEADERS = [
 
 export function sanitizeReasoningInputContent(
   body: unknown,
-  opts?: { stripEncryptedContent?: boolean },
+  opts?: { stripEncryptedContent?: boolean; dropNullContentChannel?: boolean },
 ): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const raw = body as Record<string, unknown>;
@@ -63,12 +63,23 @@ export function sanitizeReasoningInputContent(
     const hasEncryptedContent = typeof rec.encrypted_content === "string";
     const stripEncryptedContent = hasOcxEnvelope
       || (opts?.stripEncryptedContent === true && hasEncryptedContent);
-    if (!hasRawContent && !stripEncryptedContent) return item;
+    // Codex replays an absent channel as content:null. xAI rejects that shape
+    // with "Could not decode the compaction blob" even when the blob is intact.
+    // Keep this destination-gated: OpenAI can require the null channel alongside
+    // its encrypted reasoning. Status is output-only on reasoning input.
+    const dropNullContentChannel = opts?.dropNullContentChannel === true
+      && "content" in rec && !Array.isArray(rec.content);
+    const hasOutputStatus = Object.hasOwn(rec, "status");
+    if (!hasRawContent && !hasOcxEnvelope && !stripEncryptedContent
+      && !dropNullContentChannel && !hasOutputStatus) return item;
     changed = true;
     // Routed models can produce raw `reasoning_text` output items. Codex echoes those in later
     // native GPT requests, but ChatGPT's Responses backend accepts reasoning input only with empty
     // `content`; keep summaries/ids and drop the raw content so native passthrough does not 400.
-    const next: Record<string, unknown> = { ...rec, content: [] };
+    const next: Record<string, unknown> = { ...rec };
+    if (dropNullContentChannel) delete next.content;
+    else if (hasRawContent || hasOcxEnvelope) next.content = [];
+    if (hasOutputStatus) delete next.status;
     if (stripEncryptedContent) delete next.encrypted_content;
     return next;
   });
@@ -1145,12 +1156,24 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = lowerXaiResponsesNamespaceTools(outBody).body;
         outBody = lowerXaiResponsesCustomTools(outBody).body;
       }
+      // Console Go's Muse contributor endpoint accepts function tools only. The
+      // Codex client can still send freeform `custom` tools, so lower them at
+      // the wire boundary just like xAI does.
+      if (isOpenCodeMuseResponses(parsed.modelId, url)) {
+        outBody = lowerXaiResponsesCustomTools(outBody).body;
+      }
+      outBody = sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody), {
+        dropNullContentChannel: isXaiResponsesDestination(provider),
+      });
       let sanitizedBody = stripXaiOAuthOnlyParams(
         normalizeXaiResponsesWebSearch(
           normalizeToolSchemas(
             stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(
               scrubOcxCompactionItems(outBody),
-              { stripEncryptedContent: parsed._stripReasoningEncryptedContent === true },
+              {
+                stripEncryptedContent: parsed._stripReasoningEncryptedContent === true,
+                dropNullContentChannel: isXaiResponsesDestination(provider),
+              },
             )))))), parsed.modelId, url),
             isXaiSchemaTarget(provider),
           ),
