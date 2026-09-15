@@ -394,6 +394,36 @@ function shouldDeferCodexResetDerivedCooldown(response: Response, enabled?: bool
     && computeQuotaCooldown(codexQuotaOutcomeMeta(response)).source === "reset-derived";
 }
 
+function outboundResponsesBodyCarriesReasoningCiphertext(bodyText: string | undefined): boolean {
+  if (!bodyText) return false;
+  try {
+    const body = JSON.parse(bodyText) as { input?: unknown };
+    return Array.isArray(body.input) && body.input.some(item => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const candidate = item as { type?: unknown; encrypted_content?: unknown };
+      return candidate.type === "reasoning"
+        && typeof candidate.encrypted_content === "string"
+        && candidate.encrypted_content.length > 0;
+    });
+  } catch {
+    return false;
+  }
+}
+
+function isOpaqueReasoningCiphertextRejection(bodyText: string): boolean {
+  try {
+    const payload = JSON.parse(bodyText) as { code?: unknown; error?: unknown };
+    if (payload.code === "invalid-argument" && typeof payload.error === "string") {
+      return payload.error.startsWith("Could not decrypt the provided encrypted_content");
+    }
+    if (!payload.error || typeof payload.error !== "object" || Array.isArray(payload.error)) return false;
+    const error = payload.error as { type?: unknown; code?: unknown };
+    return error.type === "invalid_request_error" && error.code === "invalid_encrypted_content";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * One bounded alternate-account retry for Codex pool auth. Used for allow-listed
  * model-400 and for pre-stream 429/402 quota failures (#584).
@@ -2000,6 +2030,40 @@ async function handleResponsesInner(
         return transportFailureResponse(error);
       } finally {
         request.releaseBodyObservation?.();
+      }
+    }
+    // Opaque reasoning is bound to the backend that minted it. A resumed session can reach this
+    // process without local route provenance, so trust only the decoder's typed 4xx and retry once.
+    if (
+      upstreamResponse.status >= 400
+      && upstreamResponse.status < 500
+      && adapter.name === "openai-responses"
+      && outboundResponsesBodyCarriesReasoningCiphertext(request.body)
+    ) {
+      let rejectionBody: string | undefined;
+      try {
+        const bounded = await readBoundedResponseBody(upstreamResponse.clone(), { signal: upstream.signal });
+        if (bounded.displaySafe && !bounded.truncated) rejectionBody = bounded.text;
+      } catch {
+        // Preserve the original response when the bounded diagnostic copy cannot be read.
+      }
+      if (rejectionBody !== undefined && isOpaqueReasoningCiphertextRejection(rejectionBody)) {
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+        parsed._stripReasoningEncryptedContent = true;
+        try {
+          request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+          recordAdapterReasoning(logCtx, request);
+          noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, "opaque-blob-rejection");
+          upstreamResponse = await fetchWithHeaderTimeout(request.url, {
+            method: request.method,
+            headers: request.headers,
+            body: request.body,
+          }, upstream.signal, connectMs, parsed.stream, providerFetch(route.provider, options.codexWsRuntimeIdentity));
+        } catch (error) {
+          return transportFailureResponse(error);
+        } finally {
+          request.releaseBodyObservation?.();
+        }
       }
     }
     const headers = sanitizePassthroughHeaders(upstreamResponse.headers);

@@ -343,6 +343,23 @@ describe("OpenAI Responses passthrough sanitization", () => {
     expect(body.input[5]).toEqual(input[5]);
   });
 
+  test("strips replayed reasoning ciphertext only when decoder recovery is armed", () => {
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const reasoning = { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "gAAAAA-foreign" };
+    const build = (strip: boolean) => JSON.parse(adapter.buildRequest({
+      modelId: "gpt-5.5",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: { model: "gpt-5.5", input: [reasoning] },
+      ...(strip ? { _stripReasoningEncryptedContent: true } : {}),
+    }, { headers: new Headers({ authorization: "Bearer token" }) }).body) as { input: Record<string, unknown>[] };
+
+    expect(build(false).input[0].encrypted_content).toBe("gAAAAA-foreign");
+    expect(build(true).input[0]).not.toHaveProperty("encrypted_content");
+    expect(build(true).input[0]).toMatchObject({ type: "reasoning", summary: [] });
+  });
+
   test("strips all item ids when store is false and preserves them otherwise", () => {
     const adapter = createResponsesPassthroughAdapter(provider);
     const input = [

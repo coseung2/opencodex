@@ -63,6 +63,57 @@ function sse(payload: unknown): Uint8Array {
 }
 
 describe("xAI OAuth native Responses streaming", () => {
+  test("retries a foreign reasoning ciphertext once without the rejected blob", async () => {
+    const outboundBodies: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url !== RESPONSES_ENDPOINT) return originalFetch(input, init);
+      outboundBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (outboundBodies.length === 1) {
+        return Response.json({
+          code: "invalid-argument",
+          error: "Could not decrypt the provided encrypted_content. Ensure the value is the unmodified encrypted_content from a previous response.",
+        }, { status: 400 });
+      }
+      const message = {
+        id: "msg_recovered", type: "message", status: "completed", role: "assistant",
+        content: [{ type: "output_text", text: "recovered", annotations: [] }],
+      };
+      return new Response([
+        `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: message })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_recovered", status: "completed", model: "grok-4.6", output: [message] } })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const response = await originalFetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "xai/grok-4.6",
+          stream: true,
+          input: [
+            { type: "reasoning", id: "rs_foreign", summary: [], encrypted_content: "gAAAAA-foreign-backend" },
+            { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+          ],
+        }),
+      });
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      expect(text).toContain("recovered");
+      expect(outboundBodies).toHaveLength(2);
+      const firstInput = outboundBodies[0].input as Array<Record<string, unknown>>;
+      const retryInput = outboundBodies[1].input as Array<Record<string, unknown>>;
+      expect(firstInput[0].encrypted_content).toBe("gAAAAA-foreign-backend");
+      expect(retryInput[0]).not.toHaveProperty("encrypted_content");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("relays the first Grok delta before upstream completion and strips OpenAI-only controls", async () => {
     let releaseCompletion!: () => void;
     const completionGate = new Promise<void>(resolve => { releaseCompletion = resolve; });

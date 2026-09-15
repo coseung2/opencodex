@@ -17,6 +17,8 @@ export interface OcxParsedRequest {
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */
   _clientThreadId?: string;
+  /** Strip provider-private reasoning ciphertext after its decoder rejects replayed history. */
+  _stripReasoningEncryptedContent?: boolean;
   /**
    * Optional authenticated tenant/operator namespace for Cursor thread→conversation derivation.
    * When absent (single-operator local proxy), derivation stays local-scoped.

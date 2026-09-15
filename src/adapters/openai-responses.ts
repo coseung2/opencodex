@@ -43,7 +43,10 @@ export const FORWARD_HEADERS = [
   "x-responsesapi-include-timing-metrics",
 ];
 
-export function sanitizeReasoningInputContent(body: unknown): unknown {
+export function sanitizeReasoningInputContent(
+  body: unknown,
+  opts?: { stripEncryptedContent?: boolean },
+): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const raw = body as Record<string, unknown>;
   if (!Array.isArray(raw.input)) return body;
@@ -57,13 +60,16 @@ export function sanitizeReasoningInputContent(body: unknown): unknown {
     // ocxr1 envelopes are proxy-minted (Anthropic signatures), not OpenAI encryption — the native
     // backend cannot decrypt them and would reject the request. Strip regardless of content shape.
     const hasOcxEnvelope = typeof rec.encrypted_content === "string" && rec.encrypted_content.startsWith(OCX_REASONING_PREFIX);
-    if (!hasRawContent && !hasOcxEnvelope) return item;
+    const hasEncryptedContent = typeof rec.encrypted_content === "string";
+    const stripEncryptedContent = hasOcxEnvelope
+      || (opts?.stripEncryptedContent === true && hasEncryptedContent);
+    if (!hasRawContent && !stripEncryptedContent) return item;
     changed = true;
     // Routed models can produce raw `reasoning_text` output items. Codex echoes those in later
     // native GPT requests, but ChatGPT's Responses backend accepts reasoning input only with empty
     // `content`; keep summaries/ids and drop the raw content so native passthrough does not 400.
     const next: Record<string, unknown> = { ...rec, content: [] };
-    if (hasOcxEnvelope) delete next.encrypted_content;
+    if (stripEncryptedContent) delete next.encrypted_content;
     return next;
   });
 
@@ -1142,7 +1148,10 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let sanitizedBody = stripXaiOAuthOnlyParams(
         normalizeXaiResponsesWebSearch(
           normalizeToolSchemas(
-            stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))), parsed.modelId, url),
+            stripMuseSparkUnsupportedWebSearchFields(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(
+              scrubOcxCompactionItems(outBody),
+              { stripEncryptedContent: parsed._stripReasoningEncryptedContent === true },
+            )))))), parsed.modelId, url),
             isXaiSchemaTarget(provider),
           ),
           provider,
