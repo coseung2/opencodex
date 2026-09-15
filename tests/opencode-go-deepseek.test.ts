@@ -99,7 +99,7 @@ describe("opencode-go DeepSeek V4 thinking mode", () => {
     });
   });
 
-  test.each(["deepseek-v4-flash", "deepseek-v4-pro"])(
+  test.each(["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash"])(
     "%s replays tool-call reasoning and maps Codex efforts",
     modelId => {
       const xhighBody = buildToolCallBody(modelId, "xhigh");

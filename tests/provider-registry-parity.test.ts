@@ -60,7 +60,7 @@ describe("provider registry parity", () => {
     // Zen Go text-only models are vision-sidecar covered; Kimi K2.7 Code is multimodal and must NOT be listed.
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].noVisionModels).toEqual([
       "glm-5.3", "glm-5.2", "glm-5", "glm-5.1",
-      "deepseek-v4-flash", "deepseek-v4-pro",
+      "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash",
       "mimo-v2-pro", "mimo-v2.5-pro",
       "minimax-m2.5", "minimax-m2.7",
       "qwen3.7-max",
@@ -79,6 +79,10 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].noTopPModels).toContain("kimi-k3");
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].noPenaltyModels).toContain("kimi-k3");
     expect(KEY_LOGIN_PROVIDERS["opencode-go"].preserveReasoningContentModels).toContain("kimi-k3");
+    expect(KEY_LOGIN_PROVIDERS["opencode-go"].modelContextWindows?.["deepseek-v4.1-flash"]).toBe(1_048_576);
+    expect(KEY_LOGIN_PROVIDERS["opencode-go"].modelReasoningEfforts?.["deepseek-v4.1-flash"]).toEqual(["high", "xhigh", "max"]);
+    expect(KEY_LOGIN_PROVIDERS["opencode-go"].modelReasoningEffortMap?.["deepseek-v4.1-flash"]?.xhigh).toBe("max");
+    expect(KEY_LOGIN_PROVIDERS["opencode-go"].preserveReasoningContentModels).toContain("deepseek-v4.1-flash");
     expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-coder"]).toBe(262_144);
     expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-glm-5.3"]).toBe(405_504);
     expect(KEY_LOGIN_PROVIDERS.umans.modelContextWindows?.["umans-glm-5.2"]).toBe(405_504);

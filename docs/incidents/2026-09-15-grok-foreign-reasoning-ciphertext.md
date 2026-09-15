@@ -1,7 +1,7 @@
 # Grok foreign reasoning ciphertext rejection
 
 - Date/timezone: 2026-09-15, Asia/Seoul (UTC+09:00).
-- Status: remediation validated locally; production deployment in progress.
+- Status: remediation released as `2.8.0-cs.29`; production deployment in progress.
 
 ## Symptoms and impact
 
