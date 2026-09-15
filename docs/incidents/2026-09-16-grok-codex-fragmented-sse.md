@@ -68,3 +68,10 @@
   batches: 7,425 passed, 11 skipped, zero failed. Both new defect regressions were
   included. Final typecheck, privacy scan, documentation build, and diff whitespace
   check passed. No npm publication or repository commit was performed.
+
+## Follow-up: install replaced with a consistent tree
+
+- The cs.26-based hotfix install described above stopped starting the proxy at
+  02:55 KST the same day, and it was replaced with the published `2.8.0-cs.30`
+  base plus this change's five runtime files. Details:
+  [`2026-09-16-vm-hotfix-missing-module-outage.md`](./2026-09-16-vm-hotfix-missing-module-outage.md).
