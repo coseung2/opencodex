@@ -1,7 +1,7 @@
 # Grok foreign reasoning ciphertext rejection
 
 - Date/timezone: 2026-09-15, Asia/Seoul (UTC+09:00).
-- Status: remediation released as `2.8.0-cs.29`; production deployment in progress.
+- Status: recovered in production on `2.8.0-cs.30`.
 
 ## Symptoms and impact
 
@@ -17,7 +17,7 @@ Production `2.8.0-cs.28` remained healthy. Five nearby Grok requests completed n
 
 The Responses passthrough now preserves reasoning ciphertext on the first attempt. If the outbound request carried reasoning ciphertext and the upstream decoder returns the specific xAI or OpenAI invalid-encrypted-content error, the proxy removes only reasoning `encrypted_content` and retries once. Unrelated 4xx responses are not retried, and normal same-provider continuation remains unchanged.
 
-Focused adapter tests (47), xAI streaming tests (5), type checking, privacy scanning, `git diff --check`, and the full 511-file test suite passed with no failures. Production recovery will be verified after deployment with the health/version endpoint and a real Grok request that reaches an upstream terminal.
+Focused adapter tests (47), xAI streaming tests (5), type checking, privacy scanning, `git diff --check`, and the full 511-file test suite passed with no failures. Release `2.8.0-cs.30` passed cross-platform CI and was deployed to production. Both the loopback and public health endpoints reported `status: ok` and version `2.8.0-cs.30`. A fresh `xai/grok-4.6` request and a request carrying synthetic foreign reasoning ciphertext both returned HTTP 200 with `completed` terminals, confirming the bounded recovery path works in production.
 
 ## Follow-up
 

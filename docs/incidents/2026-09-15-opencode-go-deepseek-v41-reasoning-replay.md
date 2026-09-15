@@ -1,7 +1,7 @@
 # OpenCode Go DeepSeek V4.1 reasoning replay failure
 
 - Date/timezone: 2026-09-15, Asia/Seoul (UTC+09:00).
-- Status: remediation validated locally; production deployment in progress.
+- Status: recovered in production on `2.8.0-cs.30`.
 
 ## Symptoms and impact
 
@@ -15,7 +15,7 @@ OpenCode Go exposes the model as `deepseek-v4.1-flash`. The provider registry pr
 
 The OpenCode Go registry now applies the DeepSeek thinking contract to `deepseek-v4.1-flash`: reasoning-content replay, supported effort mapping, text-only input, and the one-million-token context window. The direct DeepSeek provider remains unchanged because this identifier belongs to OpenCode Go.
 
-Focused OpenCode Go and registry tests, type checking, privacy scanning, `git diff --check`, and the full 511-file test suite passed. Production recovery will be verified after deployment with the health/version endpoint and a real multi-turn tool request.
+Focused OpenCode Go and registry tests, type checking, privacy scanning, `git diff --check`, and the full 511-file test suite passed. Release `2.8.0-cs.30` passed cross-platform CI and was deployed to production. Both the loopback and public health endpoints reported `status: ok` and version `2.8.0-cs.30`. A real `opencode-go/deepseek-v4.1-flash` request produced reasoning plus a function call, and the follow-up carrying the function result returned HTTP 200 with a `completed` terminal and reasoning. The provider no longer rejected the continuation for missing `reasoning_content`.
 
 ## Follow-up
 
