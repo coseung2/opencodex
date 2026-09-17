@@ -607,20 +607,28 @@ async function getValidCodexTokenInternal(
       let oauthError: string | undefined;
       let errDescription: string | undefined;
       try {
-        const parsed = JSON.parse(errText) as { error?: string; error_description?: string };
-        oauthError = typeof parsed.error === "string" ? parsed.error.trim().toLowerCase() : undefined;
+        const parsed = JSON.parse(errText) as {
+          error?: string | { code?: unknown };
+          error_description?: unknown;
+        };
+        const rawError = typeof parsed.error === "string"
+          ? parsed.error
+          : parsed.error && typeof parsed.error === "object" && typeof parsed.error.code === "string"
+            ? parsed.error.code
+            : undefined;
+        oauthError = rawError?.trim().toLowerCase().slice(0, 128);
         errDescription = typeof parsed.error_description === "string" ? parsed.error_description.trim().toLowerCase() : undefined;
       } catch { /* Non-JSON responses are classified from their status only. */ }
       const terminalStatus = res.status === 400 || res.status === 401;
       const detail = `${oauthError ?? ""} ${errDescription ?? ""}`;
+      const revoked = terminalStatus && (oauthError === "invalid_grant"
+        || new Set(["revoked", "revoked_token", "refresh_token_revoked", "refresh_token_invalidated", "refresh_token_reused", "invalid_refresh_token", "token_revoked"]).has(oauthError ?? "")
+        || /(?:refresh[_ ]?token|grant).*(?:revoked|invalidated|reused)/i.test(detail)
+        || /(?:revoked|invalidated|reused).*(?:refresh[_ ]?token|grant)/i.test(detail));
       const expired = terminalStatus && (oauthError === "expired_token"
         || /(?:refresh[_ ]?token|access[_ ]?token).*(?:expired|invalidated)/i.test(detail)
         || /(?:expired|invalidated).*(?:refresh[_ ]?token|access[_ ]?token)/i.test(detail));
-      const revoked = terminalStatus && (oauthError === "invalid_grant"
-        || new Set(["revoked", "revoked_token", "refresh_token_revoked", "refresh_token_reused", "invalid_refresh_token", "token_revoked"]).has(oauthError ?? "")
-        || /(?:refresh[_ ]?token|grant).*(?:revoked|invalidated|reused)/i.test(detail)
-        || /(?:revoked|invalidated|reused).*(?:refresh[_ ]?token|grant)/i.test(detail));
-      const reason = expired ? "expired" as const : revoked ? "revoked" as const : "unknown" as const;
+      const reason = revoked ? "revoked" as const : expired ? "expired" as const : "unknown" as const;
       // A re-login can replace the account while the token endpoint body is being read. Never
       // classify an old grant's response as terminal for the replacement generation.
       assertRefreshGenerationCurrent(id, startGeneration, refreshGrantFingerprint);

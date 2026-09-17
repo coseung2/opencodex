@@ -939,6 +939,35 @@ describe("codex routing", () => {
     expect(resolveCodexAccountForThread("quota-incomplete", config)).toBe("b");
   });
 
+  test("top-level OpenAI error terminals trigger transient account failover", () => {
+    const config = makeConfig({ autoSwitchThreshold: 100 });
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    expect(resolveCodexAccountForThread("astra-error", config)).toBe("a");
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const logCtx: RequestLogContext = { model: "gpt-6-astra", provider: "openai" };
+      const recorder = codexForwardTerminalOutcomeRecorder(config, {
+        kind: "pool", accountId: "a", accessToken: "test", chatgptAccountId: "test", writerGeneration: 0, generation: 0,
+      }, { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+      "gpt-6-astra", logCtx, "astra-error");
+      const inspector = createSseInspector({ logCtx, onTerminal: recorder });
+      inspector.feed(new TextEncoder().encode(`data: ${JSON.stringify({
+        type: "error",
+        error: {
+          type: "service_unavailable_error",
+          code: "server_is_overloaded",
+          message: "Our servers are experiencing high demand.",
+        },
+      })}\n\n`));
+      expect(inspector.reported()).toBe(true);
+      expect(httpStatusForRequestLogTerminal("failed", logCtx)).toBe(503);
+    }
+
+    expect(getCodexUpstreamHealth("a")?.consecutiveFailures).toBe(3);
+    expect(resolveCodexAccountForThread("astra-error", config)).toBe("b");
+  });
+
   test.each(["max_output_tokens", "content_filter", "adapter_eof"])(
     "an incomplete %s without an error does not cool or rotate the account",
     (reason) => {

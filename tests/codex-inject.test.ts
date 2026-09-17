@@ -139,7 +139,7 @@ describe("Codex config injection", () => {
     expect(profile).not.toContain('model_provider = "opencodex"');
     expect(profile).not.toContain("[model_providers.opencodex]");
     expect(profile).not.toContain("model_catalog_json");
-    expect(profile).toContain("fast_mode = true");
+    expect(profile).not.toContain("fast_mode");
   });
 
   test("non-loopback fallback profile keeps the legacy provider-table shape with the injected host", () => {
@@ -149,6 +149,23 @@ describe("Codex config injection", () => {
     expect(profile).toContain('base_url = "http://192.168.1.20:10100/v1"');
     expect(profile).toContain('model_provider = "opencodex"');
     expect(profile).toContain("[model_providers.opencodex]");
+    expect(profile).not.toContain("fast_mode");
+  });
+
+  test("routing injection preserves the caller's Fast mode preference", () => {
+    const original = [
+      'service_tier = "default"',
+      "",
+      "[features]",
+      "fast_mode = false",
+      "",
+    ].join("\n");
+
+    const injected = setRootOpenaiBaseUrl(original, 10100).content;
+
+    expect(injected).toContain('service_tier = "default"');
+    expect(injected).toContain("fast_mode = false");
+    expect(injected).not.toContain("fast_mode = true");
   });
 
   test("non-loopback fallback profile mirrors websocket and API auth provider options", () => {

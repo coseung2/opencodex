@@ -667,7 +667,7 @@ function captureUpstreamErrorParsed(
   if (parsed !== undefined && parsed !== null) {
     const json = parsed as {
       type?: unknown;
-      error?: { message?: unknown };
+      error?: { type?: unknown; code?: unknown; message?: unknown };
       last_error?: { message?: unknown };
       response?: {
         error?: { type?: unknown; code?: unknown; message?: unknown };
@@ -722,12 +722,13 @@ function captureTerminalHttpStatus(
   logCtx: RequestLogContext,
   json: {
     type?: unknown;
+    error?: { type?: unknown; code?: unknown; message?: unknown };
     response?: { error?: { type?: unknown; code?: unknown; message?: unknown } };
   },
 ): void {
   if (logCtx.terminalHttpStatus !== undefined) return;
-  if (json.type !== "response.failed" && json.type !== "response.incomplete") return;
-  const error = json.response?.error;
+  if (json.type !== "response.failed" && json.type !== "response.incomplete" && json.type !== "error") return;
+  const error = json.type === "error" ? json.error : json.response?.error;
   if (!error || typeof error !== "object") return;
   logCtx.terminalHttpStatus = httpStatusFromTerminalError({
     type: typeof error.type === "string" ? error.type : undefined,

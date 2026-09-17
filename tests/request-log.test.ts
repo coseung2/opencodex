@@ -874,6 +874,14 @@ describe("request log metadata", () => {
     })).toBe(429);
   });
 
+  test("httpStatusFromTerminalError maps OpenAI overloaded codes to 503 across error types", () => {
+    expect(httpStatusFromTerminalError({
+      type: "service_unavailable_error",
+      code: "server_is_overloaded",
+      message: "Our servers are experiencing high demand.",
+    })).toBe(503);
+  });
+
   test("httpStatusFromTerminalError maps client-closed web-search aborts to 499", () => {
     expect(httpStatusFromTerminalError({
       type: "invalid_request_error",

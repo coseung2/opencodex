@@ -371,7 +371,9 @@ export function httpStatusFromTerminalError(error: {
     error.code === "subscription_required"
   ) return 403;
   if (error.type === "insufficient_quota" || error.code === "insufficient_quota") return 429;
-  if (error.type === "server_error" && error.code === "server_is_overloaded") return 503;
+  // OpenAI has emitted server_is_overloaded with both server_error and
+  // service_unavailable_error types. The stable code determines retryability.
+  if (error.code === "server_is_overloaded") return 503;
   // Client-closed messages often arrive as invalid_request_error after classifyError; check message
   // before treating every invalid_request_error as HTTP 400.
   const message = error.message ?? "";

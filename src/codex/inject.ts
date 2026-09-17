@@ -393,32 +393,6 @@ function removeProfileSection(content: string): string {
   return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
-function normalizeServiceTier(content: string): string {
-  return content.replace(/^(\s*service_tier\s*=\s*)["']priority["']\s*$/gm, '$1"fast"');
-}
-
-function ensureFastModeFeature(content: string): string {
-  const lines = content.split("\n");
-  const featuresStart = lines.findIndex(line => line.trim() === "[features]");
-  if (featuresStart === -1) {
-    return content.trimEnd() + "\n\n[features]\nfast_mode = true\n";
-  }
-
-  const nextTable = lines.findIndex((line, index) => index > featuresStart && /^\s*\[/.test(line));
-  const featuresEnd = nextTable === -1 ? lines.length : nextTable;
-  for (let i = featuresStart + 1; i < featuresEnd; i++) {
-    if (/^\s*fast_mode\s*=/.test(lines[i])) {
-      lines[i] = lines[i].replace(/^(\s*)fast_mode\s*=.*$/, "$1fast_mode = true");
-      return lines.join("\n");
-    }
-  }
-
-  let insertAt = featuresEnd;
-  while (insertAt > featuresStart + 1 && lines[insertAt - 1].trim() === "") insertAt--;
-  lines.splice(insertAt, 0, "fast_mode = true");
-  return lines.join("\n");
-}
-
 function isOpencodexCatalogPath(path: string): boolean {
   return path.replace(/\\/g, "/").split("/").pop() === "opencodex-catalog.json";
 }
@@ -446,7 +420,7 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
       buildOpenaiBaseUrlLine(port, hostname),
     ];
     if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
-    lines.push("", "[features]", "fast_mode = true", "");
+    lines.push("");
     return lines.join("\n");
   }
   const lines = [
@@ -455,7 +429,6 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
     'model_provider = "opencodex"',
   ];
   if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
-  lines.push("", "[features]", "fast_mode = true");
   lines.push(buildProviderTableBlock(port, supportsWebsockets, includeApiAuthHeader, hostname).trimEnd(), "");
   return lines.join("\n");
 }
@@ -541,8 +514,8 @@ export async function injectCodexConfig(port: number, config?: OcxConfig, option
   content = removeProfileSection(content);
   content = stripExistingModelProvider(content);
   content = stripRootContextWindowOverrides(content);
-  content = normalizeServiceTier(content);
-  content = ensureFastModeFeature(content);
+  // Speed is a caller-owned Codex preference. Installing a proxy route must not
+  // enable, disable, or normalize Fast mode as an unrelated side effect.
 
   const catalogPath = chooseCatalogPathForInjection(content, options.catalogPath);
   content = catalogPath ? setRootModelCatalogPath(content, catalogPath) : stripOpencodexCatalogPath(content);

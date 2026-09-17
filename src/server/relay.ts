@@ -315,6 +315,11 @@ export function terminalStatusFromParsed(parsed: unknown): ResponsesTerminalStat
       return "failed";
     case "response.incomplete":
       return "incomplete";
+    // The native OpenAI Responses stream can terminate with a top-level error
+    // event instead of wrapping the failure in response.failed. Treat it as a
+    // protocol terminal so account health/failover sees the upstream failure.
+    case "error":
+      return "failed";
     default:
       return null;
   }

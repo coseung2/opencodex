@@ -167,6 +167,45 @@ describe("codex-account-store CRUD", () => {
     }
   });
 
+  test("nested refresh_token_invalidated errors require reauthentication without exposing details", async () => {
+    const {
+      getValidCodexToken,
+      saveCodexAccountCredential,
+      TokenRefreshError,
+    } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("nested-revoked", {
+      accessToken: "sensitive-access-token",
+      refreshToken: "sensitive-refresh-token",
+      expiresAt: 0,
+      chatgptAccountId: "sensitive-account-id",
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      error: {
+        code: "refresh_token_invalidated",
+        message: "sensitive-refresh-token was invalidated for sensitive-account-id",
+        type: "invalid_request_error",
+        param: null,
+      },
+    }), { status: 401 })) as typeof fetch;
+
+    try {
+      await getValidCodexToken("nested-revoked");
+      throw new Error("expected getValidCodexToken to reject");
+    } catch (err) {
+      expect(err).toBeInstanceOf(TokenRefreshError);
+      expect((err as InstanceType<typeof TokenRefreshError>).reason).toBe("revoked");
+      expect((err as InstanceType<typeof TokenRefreshError>).httpStatus).toBe(401);
+      const message = (err as Error).message;
+      expect(message).toBe("Codex token refresh failed (revoked); reauthenticate the account.");
+      expect(message).not.toContain("sensitive-refresh-token");
+      expect(message).not.toContain("sensitive-account-id");
+      expect(message).not.toContain("refresh_token_invalidated");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("forceRefreshCodexToken refreshes a still-future credential after an upstream 401", async () => {
     const {
       forceRefreshCodexToken,
