@@ -201,6 +201,7 @@ describe("Codex catalog sync hardening", () => {
         routedEntry("kiro/claude-opus-4.8", 5),
         routedEntry("opencode-go/glm-5.2", 6),
         routedEntry("opencode-go/hy3-preview", 7),
+        routedEntry("opencode-go/union-alpha", 8),
       ],
     }, null, 2) + "\n");
 
@@ -215,6 +216,7 @@ describe("Codex catalog sync hardening", () => {
     expect(slugs).toContain("kiro/claude-opus-4.8");
     expect(slugs).toContain("opencode-go/glm-5.2");
     expect(slugs).not.toContain("opencode-go/hy3-preview");
+    expect(slugs).not.toContain("opencode-go/union-alpha");
   });
 
   /*

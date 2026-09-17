@@ -2778,6 +2778,9 @@ describe("shouldExposeRoutedModel — Gemini image-capable exemption", () => {
 
   test("still filters compatibility-excluded slugs", () => {
     expect(shouldExposeRoutedModel({ provider: "opencode-go", id: "hy3-preview" })).toBe(false);
+    expect(shouldExposeRoutedModel({ provider: "opencode-go", id: "union-alpha" })).toBe(false);
+    // The catalog exclusion is an exact provider/model pair, not a global id ban.
+    expect(shouldExposeRoutedModel({ provider: "union-alpha-control-live-test", id: "union-alpha" })).toBe(true);
   });
 });
 

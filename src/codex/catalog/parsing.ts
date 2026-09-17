@@ -123,6 +123,12 @@ export const JAWCODE_CATALOG_AUGMENT_PROVIDERS = new Set(["opencode-go"]);
 export const ROUTED_MODEL_COMPATIBILITY_EXCLUSIONS = new Set([
   // Issue #82: Zen Go /models advertises HY3, but Console Go rejects it as outside the lite list.
   "opencode-go/hy3-preview",
+  // 2026-09-17 live probe: Zen Go /models advertises union-alpha ("Union Alpha Free, limited
+  // time"), but every chat/completions and responses request fails with an opaque
+  // 500 {"type":"error","error":{"type":"error","message":"Internal server error"}} on every
+  // pooled key. Sibling alpha rows (omen-alpha, muse-spark-1.3-contributor) succeed on the same
+  // keys and request shapes, so the pair is uncallable upstream rather than client-shaped.
+  "opencode-go/union-alpha",
 ]);
 
 export function isRoutedModelCompatibilityExcluded(slug: string): boolean {

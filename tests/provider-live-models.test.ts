@@ -10,6 +10,7 @@ import type { OcxConfig, OcxProviderConfig } from "../src/types";
 const PROVIDER = "xai-live-test";
 const HY3_PROVIDER = "opencode-go";
 const HY3_CONTROL_PROVIDER = "hy3-control-live-test";
+const UNION_ALPHA_CONTROL_PROVIDER = "union-alpha-control-live-test";
 const OPENCODE_FREE_PROVIDER = "opencode-free";
 
 function withTestFetch<T extends OcxProviderConfig>(provider: T): T {
@@ -41,6 +42,7 @@ afterEach(() => {
   clearModelCache(PROVIDER);
   clearModelCache(HY3_PROVIDER);
   clearModelCache(HY3_CONTROL_PROVIDER);
+  clearModelCache(UNION_ALPHA_CONTROL_PROVIDER);
 });
 
 describe("live provider model discovery (authority + fallback)", () => {
@@ -116,6 +118,45 @@ describe("live provider model discovery (authority + fallback)", () => {
     expect(slugs).toContain("opencode-go/glm-5.2");
     expect(slugs).toContain("opencode-go/future-live-model");
     expect(slugs).toContain("hy3-control-live-test/hy3-preview");
+  });
+
+  test("union-alpha compatibility guard hides only opencode-go/union-alpha from live discovery", async () => {
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const isOpenCodeGo = String(url).startsWith("https://opencode-go.test/");
+      return new Response(JSON.stringify({
+        data: isOpenCodeGo
+          ? [
+              { id: "glm-5.2" },
+              { id: "union-alpha" },
+              { id: "future-live-model" },
+            ]
+          : [{ id: "union-alpha" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    const models = await gatherRoutedModels({
+      providers: {
+        [HY3_PROVIDER]: withTestFetch({
+          baseUrl: "https://opencode-go.test/v1",
+          adapter: "openai-chat",
+          authMode: "key",
+          apiKey: "sk-test",
+          models: ["glm-5.2"],
+        }),
+        [UNION_ALPHA_CONTROL_PROVIDER]: withTestFetch({
+          baseUrl: "https://union-alpha-control.test/v1",
+          adapter: "openai-chat",
+          authMode: "key",
+          apiKey: "sk-test",
+        }),
+      },
+    } as unknown as OcxConfig);
+    const slugs = models.map(model => `${model.provider}/${model.id}`);
+
+    expect(slugs).not.toContain("opencode-go/union-alpha");
+    expect(slugs).toContain("opencode-go/glm-5.2");
+    expect(slugs).toContain("opencode-go/future-live-model");
+    expect(slugs).toContain("union-alpha-control-live-test/union-alpha");
   });
 
   test("fetch failure falls back to the configured static list", async () => {
