@@ -35,6 +35,7 @@ import type { OcxConfig } from "../src/types";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { configuredAdminToken } from "../src/lib/admin-secrets";
+import { clearCallerCodexPoolState } from "../src/codex/auth-context";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -133,6 +134,7 @@ afterEach(() => {
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
   clearCodexUpstreamHealth();
+  clearCallerCodexPoolState();
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountNeedsReauth("pool-b");
@@ -151,7 +153,8 @@ function unsupportedModelBody(model = POOL_RETRY_MODEL): string {
 type PoolRetryHarness = {
   config: OcxConfig;
   dispatches: string[];
-  request: (init?: { stream?: boolean; signal?: AbortSignal }) => Promise<Response>;
+  request: (init?: { stream?: boolean; signal?: AbortSignal; headers?: HeadersInit }) => Promise<Response>;
+  compact: (init?: { signal?: AbortSignal; headers?: HeadersInit }) => Promise<Response>;
   restoreFetch: () => void;
   server: ReturnType<typeof startServer>;
   upstream: ReturnType<typeof Bun.serve>;
@@ -248,12 +251,29 @@ async function startPoolRetryHarness(
     },
     server,
     upstream,
-    request: ({ stream = false, signal } = {}) => originalGlobalFetch(
+    request: ({ stream = false, signal, headers: extraHeaders } = {}) => originalGlobalFetch(
       new URL("/v1/responses", server.url),
       {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: "Bearer inbound-token" },
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer inbound-token",
+          ...Object.fromEntries(new Headers(extraHeaders)),
+        },
         body: JSON.stringify({ model: POOL_RETRY_MODEL, input: "hello", stream }),
+        signal,
+      },
+    ),
+    compact: ({ signal, headers: extraHeaders } = {}) => originalGlobalFetch(
+      new URL("/v1/responses/compact", server.url),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer inbound-token",
+          ...Object.fromEntries(new Headers(extraHeaders)),
+        },
+        body: JSON.stringify({ model: POOL_RETRY_MODEL, input: [] }),
         signal,
       },
     ),
@@ -1867,6 +1887,97 @@ describe("server local API auth", () => {
       expect(getCodexUpstreamHealth("pool-a")).toMatchObject({ cooldownUntil: expect.any(Number) });
       // Server persists the rotated active account; the harness snapshot may be stale.
       expect(loadConfig().activeCodexAccountId).toBe("pool-b");
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test("Notch caller-pool uses the PC login first, then pins that thread to VM pool fallback", async () => {
+    const harness = await startPoolRetryHarness(accountId => accountId === "acct-caller"
+      ? new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": "60" },
+      })
+      : Response.json({ id: accountId, status: "completed", output: [] }));
+    const headers = {
+      "chatgpt-account-id": "acct-caller",
+      "x-opencodex-api-key": "ocx_data_admission",
+      "x-opencodex-caller-pool": "1",
+      "x-codex-parent-thread-id": "notch-caller-thread",
+    };
+    try {
+      expect((await (await harness.request({ headers })).json() as { id: string }).id)
+        .toBe("acct-pool-a");
+      expect((await (await harness.compact({ headers: {
+        ...headers,
+        authorization: "Bearer refreshed-inbound-token",
+      } })).json() as { id: string }).id)
+        .toBe("acct-pool-a");
+      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a", "acct-pool-a"]);
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test("Notch caller-pool falls back to VM pool when the PC ChatGPT login is rejected", async () => {
+    const harness = await startPoolRetryHarness(accountId => accountId === "acct-caller"
+      ? Response.json({ error: { message: "token expired" } }, { status: 401 })
+      : Response.json({ id: accountId, status: "completed", output: [] }));
+    try {
+      const response = await harness.request({ headers: {
+        "chatgpt-account-id": "acct-caller",
+        "x-opencodex-api-key": "ocx_data_admission",
+        "x-opencodex-caller-pool": "1",
+      } });
+      expect(response.status).toBe(200);
+      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a"]);
+      expect(isAccountNeedsReauth("pool-a")).toBe(false);
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test("Notch caller-pool falls back to VM pool for an allow-listed account/model rejection", async () => {
+    const harness = await startPoolRetryHarness(accountId => accountId === "acct-caller"
+      ? new Response(unsupportedModelBody(), { status: 400, headers: { "content-type": "application/json" } })
+      : Response.json({ id: accountId, status: "completed", output: [] }));
+    try {
+      const response = await harness.request({ headers: {
+        "chatgpt-account-id": "acct-caller",
+        "x-opencodex-api-key": "ocx_data_admission",
+        "x-opencodex-caller-pool": "1",
+      } });
+      expect(response.status).toBe(200);
+      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a"]);
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  });
+
+  test("Notch caller-pool does not pin a VM fallback that rejects the request", async () => {
+    let callerAttempts = 0;
+    const harness = await startPoolRetryHarness(accountId => {
+      if (accountId === "acct-caller") {
+        callerAttempts++;
+        return callerAttempts === 1
+          ? new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "0" },
+          })
+          : Response.json({ id: accountId, status: "completed", output: [] });
+      }
+      return Response.json({ error: { message: "temporary failure" } }, { status: 500 });
+    });
+    const headers = {
+      "chatgpt-account-id": "acct-caller",
+      "x-opencodex-api-key": "ocx_data_admission",
+      "x-opencodex-caller-pool": "1",
+      "x-codex-parent-thread-id": "notch-rejected-fallback-thread",
+    };
+    try {
+      expect((await harness.request({ headers })).status).toBe(500);
+      expect((await harness.request({ headers })).status).toBe(200);
+      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a", "acct-caller"]);
     } finally {
       await stopPoolRetryHarness(harness);
     }

@@ -35,27 +35,13 @@ credential in Windows Credential Manager. Plain HTTP is accepted only for loopba
 private, link-local, or `100.64.0.0/10` overlay IP addresses. Public addresses and
 hostnames require HTTPS.
 
-For Codex connection control, expose OCX through an HTTPS reverse proxy that maps
-OCX data bearer tokens to `X-OpenCodex-API-Key` and removes that bearer from the
-upstream `Authorization` header. OCX reserves the Responses Authorization header
-for upstream OpenAI authentication. Keep other Authorization values unchanged.
-For nginx, place these maps in the `http` context:
-
-```nginx
-map $http_authorization $notch_data_key {
-    default $http_x_opencodex_api_key;
-    "~^Bearer (ocx_data_[a-f0-9]{40})$" $1;
-}
-map $http_authorization $notch_upstream_authorization {
-    default $http_authorization;
-    "~^Bearer ocx_data_[a-f0-9]{40}$" "";
-}
-```
-
-In the OCX proxy location, use `proxy_set_header X-OpenCodex-API-Key $notch_data_key;`
-and `proxy_set_header Authorization $notch_upstream_authorization;` alongside the
-existing Host and forwarding headers. OCX still validates the data key; this mapping
-does not bypass authentication. Notch checks Responses admission before saving.
+For Codex connection control, the HTTPS reverse proxy must preserve two independent
+headers. `Authorization` carries the connecting PC's ChatGPT bearer to the OpenAI
+upstream. `X-OpenCodex-API-Key` carries the Notch admission key that OCX validates.
+Do not translate one into the other. nginx forwards them by default; explicit
+`proxy_set_header Authorization $http_authorization;` and
+`proxy_set_header X-OpenCodex-API-Key $http_x_opencodex_api_key;` lines can document
+the contract. Notch checks Responses admission before saving.
 The server must also have a generated `/api/catalog` available. On a server without
 Codex installed, seed its native catalog from the connecting Codex version's
 `codex debug models --bundled` output, then synchronize it using the server's OCX
@@ -63,12 +49,20 @@ configuration so provider visibility and subagent choices come from that server.
 
 **Connect** also configures this PC's Codex to use the server directly. Notch creates
 a separate data credential, stores it in Windows Credential Manager, and downloads
-the VM's Codex model catalog. Codex retrieves the credential through its supported
-command-backed provider authentication; no token is written into `config.toml`.
-Use a Codex version supporting `model_providers.<id>.auth.command`.
-Restart already-running Codex sessions after changing servers. Existing threads may
+the VM's Codex model catalog. It stores the data credential in the current Windows
+user's `OPENCODEX_NOTCH_API_AUTH_TOKEN` environment value and writes only an
+`env_http_headers` reference to `config.toml`. The `ocx-notch` provider sets
+`requires_openai_auth = true`, so Codex keeps its local ChatGPT login and sends its
+bearer separately. Fully close and reopen Codex after changing servers because an
+already-running process cannot inherit a new user environment value. Existing threads may
 retain their previous provider; start a new thread after restarting when needed.
 The connection uses the custom provider `ocx-notch`; it does not rewrite conversation history.
+
+For a new thread, OCX tries the connecting PC's ChatGPT account first. A rejected,
+quota-limited, or supported account/model-incompatible request falls back to an
+eligible account in the VM's OpenAI pool. OCX keeps that caller and thread on the
+selected fallback for continuations and compaction. The caller bearer is used only
+for the request and is never added to the VM account store.
 
 Leave the management token blank when reconnecting to the same saved server.
 **Disconnect** revokes this Notch client's data key and stops Notch polling without
@@ -78,8 +72,15 @@ is shown as an error. **Local PC** explicitly configures Codex and Notch for loc
 Saved server information remains in the vault for reconnection.
 
 Notch preserves unrelated Codex settings and saves `config.toml.before-notch` before
-its first configuration change. An active Codex profile or multiline TOML strings
-require manual configuration; Notch reports these before changing the config.
+its first configuration change. It restores the exact pre-Notch config only when the
+managed config is still unchanged. An active Codex profile, multiline TOML strings,
+or edits made after connecting require manual configuration; Notch reports these
+instead of overwriting the file.
+
+The provider connection and plugin OAuth sessions are separate. If an MCP/plugin
+reports an invalidated or revoked OAuth token, list configured servers with
+`codex mcp list --json`, then run `codex mcp logout <name>` followed by
+`codex mcp login <name>` for the affected server.
 
 Remote mode displays connection status, VM CPU as a segmented meter, and server memory.
 CPU is computed from successive VM host counters, not this PC's CPU or only OCX's

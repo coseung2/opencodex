@@ -83,7 +83,12 @@ import {
   CodexPoolAuthenticationError,
   CodexThreadAffinityExpiredError,
   headersForCodexAuthContext,
+  isCallerCodexPoolAuthContext,
   isCodexAuthContextUsable,
+  isStoredCodexPoolAuthContext,
+  markCallerCodexPoolUnavailable,
+  rememberCallerCodexPoolFallback,
+  callerPoolFallbackHeaders,
   resolveCodexAuthContext,
   shouldMarkAccountNeedsReauthForCodexAuthFailure,
   codexProbeLeaseId,
@@ -91,6 +96,8 @@ import {
   releaseCodexAuthContextProbeLease,
   stripCodexRuntimeProviderFields,
   type CodexAuthContext,
+  type ForwardCodexPoolAuthContext,
+  type StoredCodexPoolAuthContext,
 } from "../../codex/auth-context";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshCodexToken } from "../../codex/account-store";
@@ -220,7 +227,7 @@ export function sidecarOutcomeRecorder(
   authCtx: CodexAuthContext,
   threadId?: string | null,
 ): ((outcome: CodexUpstreamOutcome) => void) | undefined {
-  return authCtx.kind === "pool" || authCtx.kind === "main-pool"
+  return isStoredCodexPoolAuthContext(authCtx)
     ? outcome => recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       threadId,
       fixedAccount: authCtx.fixedAccount,
@@ -240,7 +247,7 @@ export { DEFAULT_SHADOW_SOURCE_MODELS, isShadowSourceModel, shadowSourceModels }
 
 
 export function codexLogAccountId(authCtx: CodexAuthContext): string | null {
-  return authCtx.kind === "pool" || authCtx.kind === "main-pool" ? authCtx.accountId : null;
+  return isStoredCodexPoolAuthContext(authCtx) ? authCtx.accountId : null;
 }
 
 
@@ -248,8 +255,16 @@ export function codexLogAccountId(authCtx: CodexAuthContext): string | null {
 export function usesCodexForwardPoolAuth(
   authCtx: CodexAuthContext,
   provider: OcxProviderConfig,
-): authCtx is Extract<CodexAuthContext, { kind: "pool" | "main-pool" }> {
-  return (authCtx.kind === "pool" || authCtx.kind === "main-pool")
+): authCtx is StoredCodexPoolAuthContext {
+  return isStoredCodexPoolAuthContext(authCtx)
+    && provider.authMode === "forward" && provider.adapter === "openai-responses";
+}
+
+function usesCodexForwardCallerOrPoolAuth(
+  authCtx: CodexAuthContext,
+  provider: OcxProviderConfig,
+): authCtx is ForwardCodexPoolAuthContext {
+  return authCtx.kind !== "main"
     && provider.authMode === "forward" && provider.adapter === "openai-responses";
 }
 
@@ -346,7 +361,7 @@ interface CodexPoolAccountRetryArgs {
     codexWsRuntimeIdentity?: BunRuntimeGateInput;
     translatorBudget: TranslatorBudget;
   };
-  firstAuthCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>;
+  firstAuthCtx: ForwardCodexPoolAuthContext;
   firstResponse: Response;
   outcomeStatus: number;
   upstream: AbortController;
@@ -358,7 +373,7 @@ interface CodexPoolAccountRetryArgs {
 type CodexPoolAccountRetryResult =
   | {
     kind: "retried";
-    authCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>;
+    authCtx: StoredCodexPoolAuthContext;
     request: Awaited<ReturnType<ReturnType<typeof resolveAdapter>["buildRequest"]>>;
     upstreamResponse: Response;
     selectedForwardHeaders: Headers;
@@ -367,7 +382,7 @@ type CodexPoolAccountRetryResult =
   | {
     kind: "transport";
     error: unknown;
-    authCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>;
+    authCtx: StoredCodexPoolAuthContext;
   };
 
 function codexQuotaOutcomeMeta(response: Response): {
@@ -438,13 +453,21 @@ async function retryCodexPoolOnAlternateAccount(
   } = args;
   if (firstAuthCtx.fixedAccount) return { kind: "no-alternate" };
   const inboundWire = options.inboundWire ?? "responses";
+  if (isCallerCodexPoolAuthContext(firstAuthCtx)) {
+    // The caller already produced an upstream rejection. Remember that even
+    // when the VM pool has no eligible alternate, so the next request does not
+    // immediately replay the same rejected PC credential.
+    markCallerCodexPoolUnavailable(firstAuthCtx, firstResponse.headers.get("retry-after"));
+  }
   let retryAuthCtx: CodexAuthContext | undefined;
   try {
     retryAuthCtx = await resolveCodexAuthContext(
-      req.headers,
+      isCallerCodexPoolAuthContext(firstAuthCtx) ? callerPoolFallbackHeaders(req.headers) : req.headers,
       config,
       "pool",
-      { excludeAccountId: firstAuthCtx.accountId, modelId: route.modelId },
+      isCallerCodexPoolAuthContext(firstAuthCtx)
+        ? { modelId: route.modelId }
+        : { excludeAccountId: firstAuthCtx.accountId, modelId: route.modelId },
     );
   } catch (error) {
     if (
@@ -453,11 +476,12 @@ async function retryCodexPoolOnAlternateAccount(
       && !(error instanceof CodexAccountCooldownError)
     ) throw error;
   }
-  if (retryAuthCtx?.kind !== "pool" && retryAuthCtx?.kind !== "main-pool") {
+  if (!isStoredCodexPoolAuthContext(retryAuthCtx)) {
     // A body-confirmed quota response may arrive under HTTP 5xx. Without an alternate,
     // the ordinary terminal recorder sees only that wire status and would misclassify it
     // as transient, leaving the exhausted account immediately selectable next turn.
-    if (outcomeStatus !== firstResponse.status && (outcomeStatus === 429 || outcomeStatus === 402)) {
+    if (isStoredCodexPoolAuthContext(firstAuthCtx)
+      && outcomeStatus !== firstResponse.status && (outcomeStatus === 429 || outcomeStatus === 402)) {
       recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
         ...codexQuotaOutcomeMeta(firstResponse),
         threadId: req.headers.get("x-codex-parent-thread-id"),
@@ -471,7 +495,7 @@ async function retryCodexPoolOnAlternateAccount(
   }
 
   const quotaMeta = codexQuotaOutcomeMeta(firstResponse);
-  if (outcomeStatus === 429 || outcomeStatus === 402) {
+  if (isStoredCodexPoolAuthContext(firstAuthCtx) && (outcomeStatus === 429 || outcomeStatus === 402)) {
     const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/auth-api");
     applyAccountQuotaFromUpstreamHeaders(
       firstAuthCtx.accountId,
@@ -480,7 +504,8 @@ async function retryCodexPoolOnAlternateAccount(
       getPoolAccountPlan(config, firstAuthCtx.accountId),
     );
   }
-  if (!shouldDeferCodexResetDerivedCooldown(firstResponse, options.deferCodexResetDerivedCooldown)) {
+  if (isStoredCodexPoolAuthContext(firstAuthCtx)
+    && !shouldDeferCodexResetDerivedCooldown(firstResponse, options.deferCodexResetDerivedCooldown)) {
     recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
       ...quotaMeta,
       threadId: req.headers.get("x-codex-parent-thread-id"),
@@ -539,6 +564,12 @@ async function retryCodexPoolOnAlternateAccount(
       stream,
       providerFetch(route.provider, options.codexWsRuntimeIdentity),
     );
+    if (isCallerCodexPoolAuthContext(firstAuthCtx) && upstreamResponse.ok) {
+      // Bind only after the alternate successfully served the request. A
+      // construction, transport, authentication, quota, or model rejection
+      // must not pin later turns to that account.
+      rememberCallerCodexPoolFallback(req.headers, route.modelId, retryAuthCtx.accountId);
+    }
     return {
       kind: "retried",
       authCtx: retryAuthCtx,
@@ -1959,9 +1990,11 @@ async function handleResponsesInner(
       }
     }
 
-    if (usesCodexForwardPoolAuth(authCtx, route.provider) && !authCtx.fixedAccount) {
+    if (usesCodexForwardCallerOrPoolAuth(authCtx, route.provider) && !authCtx.fixedAccount) {
       let poolRetryOutcome: number | undefined;
-      if (await shouldRetryCodexPoolAccountModel400(
+      if (isCallerCodexPoolAuthContext(authCtx) && upstreamResponse.status === 401) {
+        poolRetryOutcome = 401;
+      } else if (await shouldRetryCodexPoolAccountModel400(
         upstreamResponse,
         route.modelId,
         options.abortSignal,

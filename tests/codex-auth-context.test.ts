@@ -13,6 +13,7 @@ import {
   cooldownErrorMessage,
   cooldownErrorResponse,
   headersForCodexAuthContext,
+  clearCallerCodexPoolState,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
   shouldMarkAccountNeedsReauthForCodexAuthFailure,
@@ -75,6 +76,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearCallerCodexPoolState();
   setIcaclsRunnerForTests(null);
   rmSync(testDir, { recursive: true, force: true });
   clearThreadAccountMap();
@@ -172,6 +174,37 @@ const forwardProvider: OcxProviderConfig = {
 };
 
 describe("Codex auth context", () => {
+  test("Notch caller-pool opts into caller auth without changing ordinary pool selection", async () => {
+    saveCodexAccountCredential("pool-a", {
+      accessToken: "pool_token",
+      refreshToken: "pool_refresh",
+      expiresAt: Date.now() + 5 * 60_000,
+      chatgptAccountId: "pool_acc",
+    });
+    const ordinary = await resolveCodexAuthContext(
+      new Headers({ authorization: "Bearer caller" }),
+      config(),
+      "pool",
+    );
+    expect(ordinary).toMatchObject({ kind: "pool", accountId: "pool-a" });
+
+    const notchHeaders = new Headers({
+      authorization: "Bearer caller",
+      "chatgpt-account-id": "caller-account",
+      "x-opencodex-api-key": "ocx_data_admission",
+      "x-opencodex-caller-pool": "1",
+    });
+    const caller = await resolveCodexAuthContext(notchHeaders, config(), "pool");
+    expect(caller).toMatchObject({ kind: "caller-pool", chatgptAccountId: "caller-account" });
+    expect(caller.accountId).toMatch(/^caller:[a-f0-9]{32}$/);
+    expect(headersForCodexAuthContext(notchHeaders, caller).get("authorization"))
+      .toBe("Bearer caller");
+
+    notchHeaders.set("authorization", "Bearer refreshed-caller");
+    const refreshed = await resolveCodexAuthContext(notchHeaders, config(), "pool");
+    expect(refreshed).toMatchObject({ kind: "caller-pool", accountId: caller.accountId });
+  });
+
   test("direct mode returns caller-owned main context without touching pool selection", async () => {
     const cfg = { ...config(), activeCodexAccountId: "missing-pool-account" };
     await expect(resolveCodexAuthContext(new Headers({ authorization: "Bearer caller" }), cfg, "direct"))

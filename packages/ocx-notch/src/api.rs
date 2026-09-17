@@ -121,12 +121,16 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         if base_url.is_some() || token.is_some() {
             return Err("Remote mode needs both a server address and a token".into());
         }
-        let before = crate::codex_connection::configure(None, None)?;
+        let config_rollback = crate::codex_connection::configure(None, None)?;
+        let environment = match crate::codex_connection::remove_owned_admission_environment() {
+            Ok(environment) => environment,
+            Err(error) => {
+                let _ = crate::codex_connection::rollback_config_update(&config_rollback);
+                return Err(error);
+            }
+        };
         if let Err(error) = connection::clear() {
-            crate::codex_connection::atomic_write(
-                &crate::codex_connection::codex_dir()?.join("config.toml"),
-                before.as_bytes(),
-            )?;
+            rollback_codex_client_state(&config_rollback, &environment)?;
             return Err(error);
         }
         return Ok(());
@@ -207,37 +211,42 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         return Err("The server rejected the Codex data credential".into());
     }
     // An empty request must reach Responses validation without running a model.
-    // GET /models alone cannot prove the distinct Responses admission path works.
-    match request_to_with_bearer(&data, "POST", "/v1/responses", Some(b"{}"), 10_000, true) {
+    // GET /models alone cannot prove the dedicated Responses admission header works.
+    match request_to(&data, "POST", "/v1/responses", Some(b"{}"), 10_000) {
         Err(error) if is_http_status(&error, 400) || is_http_status(&error, 422) => {}
         _ => {
             cleanup_new_server_key(&target, &key, created_this_attempt);
-            return Err("The server must translate Codex bearer authentication into the OCX data header before connecting".into());
+            return Err("The server rejected the dedicated OCX Responses admission header".into());
         }
     }
-    let previous_config = match crate::codex_connection::configure(Some(&origin), Some(&catalog)) {
+    let config_rollback = match crate::codex_connection::configure(Some(&origin), Some(&catalog)) {
         Ok(config) => config,
         Err(error) => {
             cleanup_new_server_key(&target, &key, created_this_attempt);
             return Err(error);
         }
     };
+    let previous_environment =
+        match crate::codex_connection::install_admission_environment(&key.key) {
+            Ok(environment) => environment,
+            Err(error) => {
+                let _ = crate::codex_connection::rollback_config_update(&config_rollback);
+                cleanup_new_server_key(&target, &key, created_this_attempt);
+                return Err(error);
+            }
+        };
     if let Err(error) = crate::codex_connection::save_key(&origin, &key) {
-        let _ = crate::codex_connection::atomic_write(
-            &crate::codex_connection::codex_dir()?.join("config.toml"),
-            previous_config.as_bytes(),
-        );
+        let rollback = rollback_codex_client_state(&config_rollback, &previous_environment);
         cleanup_new_server_key(&target, &key, created_this_attempt);
+        rollback?;
         return Err(error);
     }
     if let Err(error) = connection::commit(profile) {
-        crate::codex_connection::atomic_write(
-            &crate::codex_connection::codex_dir()?.join("config.toml"),
-            previous_config.as_bytes(),
-        )
-        .map_err(|_| "Could not restore Codex configuration after a failed connection")?;
-        restore_saved_data_key(&origin, previous_key.as_ref())?;
+        let routing_rollback = rollback_codex_client_state(&config_rollback, &previous_environment);
+        let key_rollback = restore_saved_data_key(&origin, previous_key.as_ref());
         cleanup_new_server_key(&target, &key, created_this_attempt);
+        routing_rollback?;
+        key_rollback?;
         return Err(error);
     }
     if explicit_token {
@@ -258,6 +267,20 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         }
     }
     Ok(())
+}
+
+fn rollback_codex_client_state(
+    config: &crate::codex_connection::ConfigRollback,
+    environment: &crate::codex_connection::EnvironmentRollback,
+) -> Result<(), String> {
+    let config_result = crate::codex_connection::rollback_config_update(config);
+    let environment_result = crate::codex_connection::rollback_admission_environment(environment);
+    match (config_result, environment_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(_), Ok(())) => Err("Could not restore Codex configuration after a failed connection".into()),
+        (Ok(()), Err(_)) => Err("Could not restore the Codex admission environment after a failed connection".into()),
+        (Err(_), Err(_)) => Err("Could not restore Codex configuration or admission environment after a failed connection".into()),
+    }
 }
 
 fn cleanup_new_server_key(
@@ -284,30 +307,52 @@ fn restore_saved_data_key(
 
 pub fn disconnect_codex() -> Result<(), String> {
     let profile = connection::saved_profile()?.ok_or("No remote OCX is saved")?;
-    if let Some(key) = crate::codex_connection::load_key(&profile.endpoint.base_url)? {
+    let config_restore = crate::codex_connection::preflight_config_restore()?;
+    let saved_key = crate::codex_connection::load_key(&profile.endpoint.base_url)?;
+    let environment = crate::codex_connection::remove_owned_admission_environment()?;
+    let config_rollback = match crate::codex_connection::restore_owned_config(&config_restore) {
+        Ok(rollback) => rollback,
+        Err(error) => {
+            let _ = crate::codex_connection::rollback_admission_environment(&environment);
+            return Err(error);
+        }
+    };
+    let key_target = crate::codex_connection::key_target(&profile.endpoint.base_url);
+    if let Err(error) = connection::delete_secret(&key_target) {
+        let _ = rollback_codex_client_state(&config_rollback, &environment);
+        return Err(error);
+    }
+    if let Err(error) = connection::disconnect() {
+        if let Some(saved_key) = saved_key.as_ref() {
+            let _ = crate::codex_connection::save_key(&profile.endpoint.base_url, saved_key);
+        }
+        let _ = rollback_codex_client_state(&config_rollback, &environment);
+        return Err(error);
+    }
+    if let Some(key) = saved_key.as_ref().filter(|key| should_revoke_data_key(key)) {
         let target = Target {
             endpoint: profile.endpoint.clone(),
             token: Some(profile.token.clone()),
         };
-        if should_revoke_data_key(&key) {
-            let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
-            match request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000) {
-                Ok(_) => {}
-                Err(error) if is_http_status(&error, 404) => {}
-                Err(_) => {
-                    return Err(
-                        "Could not revoke the Codex connection on the server; reconnect and retry"
-                            .into(),
-                    )
+        let body = serde_json::to_vec(&serde_json::json!({"id":key.id})).unwrap();
+        match request_to(&target, "DELETE", "/api/keys", Some(&body), 10_000) {
+            Ok(_) => {}
+            Err(error) if is_http_status(&error, 404) => {}
+            Err(_) => {
+                let _ = connection::commit(profile.clone());
+                if let Some(saved_key) = saved_key.as_ref() {
+                    let _ =
+                        crate::codex_connection::save_key(&profile.endpoint.base_url, saved_key);
                 }
+                let _ = rollback_codex_client_state(&config_rollback, &environment);
+                return Err(
+                    "Could not revoke the Codex connection on the server; reconnect and retry"
+                        .into(),
+                );
             }
         }
-        connection::delete_secret(&crate::codex_connection::key_target(
-            &profile.endpoint.base_url,
-        ))?;
     }
-    crate::codex_connection::configure(Some("http://127.0.0.1:9"), None)?;
-    connection::disconnect()
+    Ok(())
 }
 
 pub fn sync_codex_catalog() -> Result<(), String> {
@@ -764,17 +809,6 @@ fn request_to(
     body: Option<&[u8]>,
     timeout_ms: i32,
 ) -> Result<Vec<u8>, String> {
-    request_to_with_bearer(target, method, path, body, timeout_ms, false)
-}
-
-fn request_to_with_bearer(
-    target: &Target,
-    method: &str,
-    path: &str,
-    body: Option<&[u8]>,
-    timeout_ms: i32,
-    bearer: bool,
-) -> Result<Vec<u8>, String> {
     unsafe {
         let session = InternetHandle(valid_handle(WinHttpOpen(
             w!("OCX Notch/0.1"),
@@ -821,10 +855,7 @@ fn request_to_with_bearer(
         )
         .map_err(win_error)?;
 
-        let mut headers = request_headers(target, body.is_some());
-        if bearer {
-            headers = headers.replacen("X-OpenCodex-API-Key: ", "Authorization: Bearer ", 1);
-        }
+        let headers = request_headers(target, body.is_some());
         let headers = wide(&headers);
         WinHttpAddRequestHeaders(
             request.0,
