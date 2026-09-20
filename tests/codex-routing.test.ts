@@ -1642,6 +1642,53 @@ describe("codex routing", () => {
     expect(resolveCodexAccountForThread("disabled-next", config, now + 3)).toBe("a");
   });
 
+  // A drained account is a guaranteed failure. It must not inherit traffic just
+  // because every account that still has quota is inside its transient-avoid window.
+  test("a drained account is not selected while a quota-holding account is only soft-avoided", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 100);
+    updateAccountQuota("b", 20);
+
+    recordCodexUpstreamOutcome(config, "b", 503, { now });
+    recordCodexUpstreamOutcome(config, "b", 503, { now: now + 1 });
+    recordCodexUpstreamOutcome(config, "b", 503, { now: now + 2 });
+    expect(isCodexAccountSoftAvoided("b", now + 3)).toBe(true);
+
+    expect(pickLowestUsageCodexAccount(config, undefined, now + 3)).toBe("b");
+    expect(resolveCodexAccountForThread("drained-vs-avoided", config, now + 3)).toBe("b");
+  });
+
+  test("a quota failure does not promote a drained account ahead of a soft-avoided one", () => {
+    saveTestCredential("c");
+    const config = makeConfig({
+      codexAccounts: ["a", "b", "c"].map(id => ({ id, email: `${id}@test`, isMain: false })),
+    });
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 100);
+    updateAccountQuota("b", 100);
+    updateAccountQuota("c", 30);
+    recordCodexUpstreamOutcome(config, "c", 503, { now });
+    recordCodexUpstreamOutcome(config, "c", 503, { now: now + 1 });
+    recordCodexUpstreamOutcome(config, "c", 503, { now: now + 2 });
+    expect(isCodexAccountSoftAvoided("c", now + 3)).toBe(true);
+
+    // "a" is the configured active account and is now hard-cooled by its 429; the
+    // failover cursor must land on "c" rather than on drained "b".
+    recordCodexUpstreamOutcome(config, "a", 429, { retryAfter: "60", now: now + 10 });
+    expect(getEffectiveActiveCodexAccountId(config)).toBe("c");
+    expect(resolveCodexAccountForThread("drained-not-promoted", config, now + 11)).toBe("c");
+  });
+
+  test("a fully drained pool still resolves its remaining account", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 100);
+    updateAccountQuota("b", 100);
+    expect(pickLowestUsageCodexAccount(config, undefined, now)).toBe("a");
+    expect(resolveCodexAccountForThread("all-drained", config, now)).toBe("a");
+  });
+
   // Race-safe affinity: late failures must not delete a newer healthy binding.
   test("late failure from old account does not delete a newer healthy affinity", () => {
     const config = makeConfig();

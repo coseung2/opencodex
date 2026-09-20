@@ -21,7 +21,13 @@ import {
   selectPriorityTier,
   seedPoolRotationAccount,
 } from "./pool-rotation";
-import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota, isCodexFiveHourQuotaPlan, liveFiveHourPercent } from "./quota";
+import {
+  CODEX_UNKNOWN_USAGE_SCORE,
+  getAccountQuota,
+  isCodexFiveHourQuotaPlan,
+  isCodexQuotaExhausted,
+  liveFiveHourPercent,
+} from "./quota";
 import { MAIN_CODEX_ACCOUNT_ID, getMainAccountPlan } from "./main-account";
 import { isSelectableCodexPoolAccount } from "./account-id";
 import type { OcxConfig } from "../types";
@@ -752,33 +758,56 @@ function bindThreadAffinity(
   pruneLruThreadAffinities();
 }
 
+function isCodexAccountQuotaExhausted(config: OcxConfig, accountId: string, now: number): boolean {
+  return isCodexQuotaExhausted(getAccountQuota(accountId), getPoolAccountPlan(config, accountId), now);
+}
+
+/** Accounts that pass the fixed eligibility gates, before per-call exclusion. */
+function listPoolCandidates(
+  config: OcxConfig,
+  now: number,
+  quotaScope?: CodexQuotaScope,
+): string[] {
+  const ids = (config.codexAccounts ?? [])
+    .filter(account => isSelectableCodexPoolAccount(account)
+      && !isCodexAccountPaused(config, account.id)
+      && !isAccountNeedsReauth(account.id))
+    .filter(account => getCodexQuotaHealthSnapshot(account.id, quotaScope, now) === null)
+    .filter(account => isCodexAccountUsable(config, account.id))
+    .map(account => account.id);
+  // The main Codex account is not stored in config.codexAccounts; include it as a
+  // first-class rotation candidate when its read-only token is usable (Option A).
+  if (
+    !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
+    && !isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)
+    && getCodexQuotaHealthSnapshot(MAIN_CODEX_ACCOUNT_ID, quotaScope, now) === null
+    && isCodexAccountUsable(config, MAIN_CODEX_ACCOUNT_ID)
+  ) {
+    ids.unshift(MAIN_CODEX_ACCOUNT_ID);
+  }
+  return ids;
+}
+
 function getEligiblePoolAccounts(
   config: OcxConfig,
   excludeId?: string,
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
 ): readonly string[] {
-  const ids = (config.codexAccounts ?? [])
-    .filter(account => isSelectableCodexPoolAccount(account)
-      && account.id !== excludeId
-      && !isCodexAccountPaused(config, account.id)
-      && !isAccountNeedsReauth(account.id))
-    .filter(account => getCodexQuotaHealthSnapshot(account.id, quotaScope, now) === null)
-    .filter(account => !isCodexAccountSoftAvoided(account.id, now))
-    .filter(account => isCodexAccountUsable(config, account.id))
-    .map(account => account.id);
-  // The main Codex account is not stored in config.codexAccounts; include it as a
-  // first-class rotation candidate when its read-only token is usable (Option A).
-  if (
-    excludeId !== MAIN_CODEX_ACCOUNT_ID
-    && !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
-    && !isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)
-    && getCodexQuotaHealthSnapshot(MAIN_CODEX_ACCOUNT_ID, quotaScope, now) === null
-    && !isCodexAccountSoftAvoided(MAIN_CODEX_ACCOUNT_ID, now)
-    && isCodexAccountUsable(config, MAIN_CODEX_ACCOUNT_ID)
-  ) {
-    ids.unshift(MAIN_CODEX_ACCOUNT_ID);
-  }
+  const candidates = listPoolCandidates(config, now, quotaScope);
+  // A drained account is a guaranteed failure; a soft avoid is only a hint that
+  // the account failed repeatedly right now. Retire the drained accounts for the
+  // whole pool as soon as any account still holds quota — dropping them only from
+  // the caller's excluded view would release them again on the next failover hop.
+  // Without this, one upstream overload wave soft-avoids every healthy account in
+  // turn, the pool fails over onto a drained account, and the caller gets
+  // "The usage limit has been reached" plus a cooled-out 429 instead of the
+  // transient overload error it actually is.
+  const withQuota = candidates.filter(id => !isCodexAccountQuotaExhausted(config, id, now));
+  const pool = withQuota.length > 0 ? withQuota : candidates;
+  const inScope = excludeId === undefined ? pool : pool.filter(id => id !== excludeId);
+  const unAvoided = inScope.filter(id => !isCodexAccountSoftAvoided(id, now));
+  const ids = unAvoided.length > 0 ? unAvoided : inScope;
   if (!config.codexAccountPriorities) return ids;
   return selectPriorityTier(
     ids,
