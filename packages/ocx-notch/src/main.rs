@@ -862,21 +862,86 @@ fn reset_credit_count(account: &AccountView) -> Option<u32> {
         .filter(|count| *count > 0)
 }
 
+/// The API reports reset-credit timestamps in UTC (trailing `Z`); the panel shows KST (UTC+9).
 fn format_credit_timestamp(value: &str) -> String {
+    let compact = || -> String { value.chars().take(24).collect() };
     let Some((date, rest)) = value.split_once('T') else {
-        return value.chars().take(24).collect();
+        return compact();
     };
-    let time: String = rest.chars().take(5).collect();
-    if date.len() == 10 && time.len() == 5 {
-        format!(
-            "{}.{:}.{:} {time} UTC",
-            &date[0..4],
-            &date[5..7],
-            &date[8..10]
-        )
-    } else {
-        value.chars().take(24).collect()
+    if date.len() != 10 {
+        return compact();
     }
+    let field = |offset: usize| -> Option<u32> { date.get(offset..offset + 2)?.parse().ok() };
+    let (Some(year), Some(month), Some(day)) = (date.get(0..4), field(5), field(8)) else {
+        return compact();
+    };
+    let Ok(year) = year.parse::<u32>() else {
+        return compact();
+    };
+    let clock = rest.chars().take(8).collect::<String>();
+    let (Some(hour), Some(minute)) = (clock.get(0..2), clock.get(3..5)) else {
+        return compact();
+    };
+    let (Some(hour), Some(minute)) = (hour.parse::<u32>().ok(), minute.parse::<u32>().ok()) else {
+        return compact();
+    };
+    let Some(local) = kst_time(year, month, day, hour, minute) else {
+        return compact();
+    };
+    format!(
+        "{:04}.{:02}.{:02} {:02}:{:02} KST",
+        local.0, local.1, local.2, local.3, local.4
+    )
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Shift a UTC calendar stamp to KST (UTC+9), rolling the date over as needed.
+fn kst_time(
+    year: u32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Option<(u32, u32, u32, u32, u32)> {
+    if month == 0 || month > 12 || day == 0 || hour > 23 || minute > 59 {
+        return None;
+    }
+    let (mut year, mut month, mut day) = (year, month, day);
+    if day > days_in_month(year, month) {
+        return None;
+    }
+    let mut hour = hour + 9;
+    if hour >= 24 {
+        hour -= 24;
+        day += 1;
+        if day > days_in_month(year, month) {
+            day = 1;
+            month += 1;
+            if month > 12 {
+                month = 1;
+                year += 1;
+            }
+        }
+    }
+    Some((year, month, day, hour, minute))
 }
 
 fn main() {
@@ -8726,12 +8791,34 @@ mod account_control_tests {
     }
 
     #[test]
-    fn reset_credit_dates_are_compact_and_explicitly_utc() {
+    fn reset_credit_dates_are_compact_and_explicitly_kst() {
+        // 00:27 UTC is 09:27 KST on the same calendar day.
         assert_eq!(
             format_credit_timestamp("2026-09-21T00:27:48.432665Z"),
-            "2026.09.21 00:27 UTC"
+            "2026.09.21 09:27 KST"
+        );
+        // 16:05 UTC rolls over to the next day in KST.
+        assert_eq!(
+            format_credit_timestamp("2026-09-21T16:05:00Z"),
+            "2026.09.22 01:05 KST"
+        );
+        // Month rollover.
+        assert_eq!(
+            format_credit_timestamp("2026-09-30T15:30:00Z"),
+            "2026.10.01 00:30 KST"
+        );
+        // Year rollover.
+        assert_eq!(
+            format_credit_timestamp("2026-12-31T23:59:00Z"),
+            "2027.01.01 08:59 KST"
+        );
+        // Leap-year day rollover into March.
+        assert_eq!(
+            format_credit_timestamp("2028-02-29T15:00:00Z"),
+            "2028.03.01 00:00 KST"
         );
         assert_eq!(format_credit_timestamp("unknown"), "unknown");
+        assert_eq!(format_credit_timestamp("2026-13-01T00:00:00Z"), "2026-13-01T00:00:00Z");
     }
 
     #[test]
