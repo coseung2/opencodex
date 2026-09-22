@@ -253,6 +253,7 @@ const MINIMAX_M3_REASONING_EFFORT_MAP: Record<string, string> = {
   max: "adaptive",
 };
 const OPENAI_GPT56_MODELS = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+const OPENAI_GPT6_MODELS = ["gpt-6-sol", "gpt-6-luna"];
 const OPENAI_GPT56_PRO_MODELS = ["gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro"];
 const OPENAI_API_GPT56_CONTEXT_WINDOW = 1_050_000;
 const OPENAI_CODEX_GPT56_CONTEXT_WINDOW = 372_000;
@@ -261,6 +262,7 @@ const OPENAI_GPT56_CONTEXT_WINDOWS = {
   "gpt-5.6-terra": OPENAI_CODEX_GPT56_CONTEXT_WINDOW,
   "gpt-5.6-luna": OPENAI_CODEX_GPT56_CONTEXT_WINDOW,
 };
+const OPENAI_GPT6_CONTEXT_WINDOWS = Object.fromEntries(OPENAI_GPT6_MODELS.map(id => [id, OPENAI_API_GPT56_CONTEXT_WINDOW]));
 const OPENAI_API_GPT56_CONTEXT_WINDOWS: Record<string, number> = {
   ...Object.fromEntries([...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS].map(id => [id, OPENAI_API_GPT56_CONTEXT_WINDOW])),
   "gpt-5.5": OPENAI_API_GPT56_CONTEXT_WINDOW,
@@ -837,19 +839,21 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     featured: true,
     dashboardUrl: "https://platform.openai.com/api-keys",
     defaultModel: "gpt-5.5",
-    models: ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS, "gpt-6-astra"],
+    models: ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS, ...OPENAI_GPT6_MODELS, "gpt-6-astra"],
     liveModels: true,
     // API limits differ from the Codex-login Astra pin. Keep the public API ladder
     // separate: low..max is documented, while the native catalog also carries ultra.
-    modelContextWindows: { ...OPENAI_API_GPT56_CONTEXT_WINDOWS, "gpt-6-astra": 1_050_000 },
-    modelMaxInputTokens: { ...OPENAI_API_GPT56_MAX_INPUT_TOKENS, "gpt-6-astra": 922_000 },
+    modelContextWindows: { ...OPENAI_API_GPT56_CONTEXT_WINDOWS, ...OPENAI_GPT6_CONTEXT_WINDOWS, "gpt-6-astra": 1_050_000 },
+    modelMaxInputTokens: { ...OPENAI_API_GPT56_MAX_INPUT_TOKENS, ...Object.fromEntries(OPENAI_GPT6_MODELS.map(id => [id, 922_000])), "gpt-6-astra": 922_000 },
     modelMaxOutputTokens: { "gpt-6-astra": 128_000 },
     modelInputModalities: Object.fromEntries(
-      ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS, "gpt-6-astra"].map(id => [id, ["text", "image"]]),
+      ["gpt-5.5", ...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS, ...OPENAI_GPT6_MODELS, "gpt-6-astra"].map(id => [id, ["text", "image"]]),
     ),
     modelReasoningEfforts: {
       ...Object.fromEntries([...OPENAI_GPT56_MODELS, ...OPENAI_GPT56_PRO_MODELS].map(id => [id, OPENAI_API_GPT56_REASONING_EFFORTS])),
       "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
+      "gpt-6-sol": ["low", "medium", "high", "xhigh", "max"],
+      "gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
     },
     virtualModels: OPENAI_API_GPT56_VIRTUAL_MODELS,
   },

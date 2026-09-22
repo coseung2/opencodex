@@ -2583,7 +2583,7 @@ describe("Codex catalog routed normalization", () => {
 describe("OpenAI API trusted catalog augmentation", () => {
   const exactIds = [
     "gpt-5.5", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-    "gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro", "gpt-6-astra",
+    "gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra",
   ];
 
   test("rebuilds the exact registered rows after partial/conflicting successful discovery", () => {

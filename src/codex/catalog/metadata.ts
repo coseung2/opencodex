@@ -36,12 +36,15 @@ import type { RawEntry } from "./parsing";
 import { readCurrentCatalogOrCache, unique } from "./bundled";
 
 export const NATIVE_DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
+export const NATIVE_GPT6_SOL_MODEL = "gpt-6-sol";
+export const NATIVE_GPT6_LUNA_MODEL = "gpt-6-luna";
 export const NATIVE_GPT6_ASTRA_MODEL = "gpt-6-astra";
 
 export const NATIVE_OPENAI_MODELS = [
   "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_SOL_MODEL, NATIVE_GPT6_LUNA_MODEL,
   NATIVE_GPT6_ASTRA_MODEL,
 ];
 
@@ -49,6 +52,7 @@ export const DOCUMENTED_NATIVE_OPENAI_ADDITIONS = [
   "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_SOL_MODEL, NATIVE_GPT6_LUNA_MODEL,
   NATIVE_GPT6_ASTRA_MODEL,
 ];
 
@@ -72,6 +76,8 @@ export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: n
   "gpt-5.6-terra": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
   "gpt-5.6-luna": { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
   [NATIVE_DAYBREAK_BLUE_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  [NATIVE_GPT6_SOL_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  [NATIVE_GPT6_LUNA_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
   [NATIVE_GPT6_ASTRA_MODEL]: { contextWindow: 272_000, maxContextWindow: 872_000, maxInputTokens: 872_000 },
 };
 
@@ -202,6 +208,27 @@ export const UPSTREAM_NATIVE_ENTRIES: Map<string, RawEntry> = (() => {
       slug: NATIVE_DAYBREAK_BLUE_MODEL,
       display_name: "GPT Daybreak Blue",
     });
+  }
+  const gpt6Sol = entries.get("gpt-5.6-sol");
+  const gpt6Luna = entries.get("gpt-5.6-luna");
+  for (const [slug, source, displayName] of [
+    [NATIVE_GPT6_SOL_MODEL, gpt6Sol, "GPT-6-Sol"],
+    [NATIVE_GPT6_LUNA_MODEL, gpt6Luna, "GPT-6-Luna"],
+  ] as const) {
+    if (!source) continue;
+    const clone = JSON.parse(JSON.stringify(source)) as RawEntry;
+    clone.slug = slug;
+    clone.display_name = displayName;
+    if (typeof clone.description === "string") clone.description = clone.description.replace("GPT-5.6", "GPT-6");
+    if (typeof clone.base_instructions === "string") clone.base_instructions = clone.base_instructions.replaceAll("GPT-5.6", "GPT-6");
+    const messages = clone.model_messages;
+    if (messages && typeof messages === "object" && !Array.isArray(messages)) {
+      const template = (messages as Record<string, unknown>).instructions_template;
+      if (typeof template === "string") {
+        clone.model_messages = { ...messages as Record<string, unknown>, instructions_template: template.replaceAll("GPT-5.6", "GPT-6") };
+      }
+    }
+    entries.set(slug, clone);
   }
   return entries;
 })();

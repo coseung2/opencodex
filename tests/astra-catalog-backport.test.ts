@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NATIVE_GPT6_ASTRA_MODEL as ASTRA,
+  NATIVE_GPT6_LUNA_MODEL as GPT6_LUNA,
+  NATIVE_GPT6_SOL_MODEL as GPT6_SOL,
   UPSTREAM_NATIVE_ENTRIES,
   nativeDefaultReasoningEffort,
   nativeOpenAiContextWindow,
@@ -46,6 +48,27 @@ function config(window?: number, cap?: number): OcxConfig {
 const ladder = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
 describe("Astra self-described native contract", () => {
+  test("GPT-6 Sol and Luna are cataloged from the GPT-5.6 family contract", () => {
+    for (const [slug, displayName, defaultEffort] of [
+      [GPT6_SOL, "GPT-6-Sol", "low"],
+      [GPT6_LUNA, "GPT-6-Luna", "medium"],
+    ] as const) {
+      const row = upstreamNativeEntry(slug);
+      expect(row).toMatchObject({ slug, display_name: displayName, default_reasoning_level: defaultEffort });
+      expect(nativeReasoningEfforts(slug)).toEqual(slug === GPT6_SOL
+        ? ["low", "medium", "high", "xhigh", "max", "ultra"]
+        : ["low", "medium", "high", "xhigh", "max"]);
+      expect(nativeOpenAiContextWindow(slug)).toBe(1_050_000);
+      expect(nativeOpenAiMaxInputTokens(slug)).toBe(922_000);
+      expect(nativeEffortClamp(slug, "max")).toBeNull();
+      expect(nativeEffortClamp(slug, "ultra")).toBe(slug === GPT6_LUNA ? "max" : null);
+    }
+    const api = getProviderRegistryEntry("openai-apikey")!;
+    expect(api.models).toEqual(expect.arrayContaining([GPT6_SOL, GPT6_LUNA]));
+    expect(api.modelInputModalities?.[GPT6_SOL]).toEqual(["text", "image"]);
+    expect(api.modelContextWindows?.[GPT6_LUNA]).toBe(1_050_000);
+  });
+
   test("uses its own pinned identity, default, tool mode and complete ladder", () => {
     const row = upstreamNativeEntry(ASTRA);
     expect(row).toMatchObject({ slug: ASTRA, display_name: "GPT-6-Astra", default_reasoning_level: "low", tool_mode: "code_mode_only", multi_agent_version: "v2", multi_agent_reasoning_effort: "xhigh", context_window: 272_000, max_context_window: 872_000 });
