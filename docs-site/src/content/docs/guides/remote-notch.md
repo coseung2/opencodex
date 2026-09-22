@@ -58,11 +58,10 @@ already-running process cannot inherit a new user environment value. Existing th
 retain their previous provider; start a new thread after restarting when needed.
 The connection uses the custom provider `ocx-notch`; it does not rewrite conversation history.
 
-For a new thread, OCX tries the connecting PC's ChatGPT account first. A rejected,
-quota-limited, or supported account/model-incompatible request falls back to an
-eligible account in the VM's OpenAI pool. OCX keeps that caller and thread on the
-selected fallback for continuations and compaction. The caller bearer is used only
-for the request and is never added to the VM account store.
+For a new thread, OCX uses the VM's OpenAI pool directly. The selected account,
+pool strategy, quota state, failover, and thread affinity are therefore all owned
+by the VM. The connecting PC's bearer is used only as the client admission
+credential; it is not treated as a separate account-selection path.
 
 Leave the management token blank when reconnecting to the same saved server.
 **Disconnect** revokes this Notch client's data key and stops Notch polling without

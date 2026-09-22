@@ -13,7 +13,6 @@ import {
   cooldownErrorMessage,
   cooldownErrorResponse,
   headersForCodexAuthContext,
-  clearCallerCodexPoolState,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
   shouldMarkAccountNeedsReauthForCodexAuthFailure,
@@ -76,7 +75,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearCallerCodexPoolState();
   setIcaclsRunnerForTests(null);
   rmSync(testDir, { recursive: true, force: true });
   clearThreadAccountMap();
@@ -174,7 +172,7 @@ const forwardProvider: OcxProviderConfig = {
 };
 
 describe("Codex auth context", () => {
-  test("Notch caller-pool opts into caller auth without changing ordinary pool selection", async () => {
+  test("Notch admission headers do not bypass VM pool selection", async () => {
     saveCodexAccountCredential("pool-a", {
       accessToken: "pool_token",
       refreshToken: "pool_refresh",
@@ -194,15 +192,12 @@ describe("Codex auth context", () => {
       "x-opencodex-api-key": "ocx_data_admission",
       "x-opencodex-caller-pool": "1",
     });
-    const caller = await resolveCodexAuthContext(notchHeaders, config(), "pool");
-    expect(caller).toMatchObject({ kind: "caller-pool", chatgptAccountId: "caller-account" });
-    expect(caller.accountId).toMatch(/^caller:[a-f0-9]{32}$/);
-    expect(headersForCodexAuthContext(notchHeaders, caller).get("authorization"))
-      .toBe("Bearer caller");
-
-    notchHeaders.set("authorization", "Bearer refreshed-caller");
-    const refreshed = await resolveCodexAuthContext(notchHeaders, config(), "pool");
-    expect(refreshed).toMatchObject({ kind: "caller-pool", accountId: caller.accountId });
+    const notch = await resolveCodexAuthContext(notchHeaders, config(), "pool");
+    expect(notch).toMatchObject({ kind: "pool", accountId: "pool-a" });
+    expect(headersForCodexAuthContext(notchHeaders, notch).get("authorization"))
+      .toBe("Bearer pool_token");
+    expect(headersForCodexAuthContext(notchHeaders, notch).get("chatgpt-account-id"))
+      .toBe("pool_acc");
   });
 
   test("direct mode returns caller-owned main context without touching pool selection", async () => {

@@ -571,7 +571,7 @@ pub fn transform_config(
     }
     output.push_str(&lines[root_end..].join("\n"));
     if let Some(origin) = origin {
-        output.push_str(&format!("\n\n{BEGIN}\n[model_providers.{PROVIDER}]\nname = \"OCX Notch\"\nbase_url = {}\nwire_api = \"responses\"\nrequires_openai_auth = true\nhttp_headers = {{ \"x-opencodex-caller-pool\" = \"1\" }}\nenv_http_headers = {{ \"x-opencodex-api-key\" = \"{ADMISSION_ENV_VAR}\" }}\nsupports_websockets = false\n{END}\n", quote(&format!("{origin}/v1"))));
+        output.push_str(&format!("\n\n{BEGIN}\n[model_providers.{PROVIDER}]\nname = \"OCX Notch\"\nbase_url = {}\nwire_api = \"responses\"\nrequires_openai_auth = true\nenv_http_headers = {{ \"x-opencodex-api-key\" = \"{ADMISSION_ENV_VAR}\" }}\nsupports_websockets = false\n{END}\n", quote(&format!("{origin}/v1"))));
     }
     Ok(if input.contains("\r\n") {
         output.replace('\n', "\r\n")
@@ -747,7 +747,6 @@ mod tests {
         assert!(output.contains("[plugins.example]\nenabled = true"));
         assert!(!output.contains("127.0.0.1"));
         assert!(output.contains("requires_openai_auth = true"));
-        assert!(output.contains("x-opencodex-caller-pool"));
         assert!(output.contains("OPENCODEX_NOTCH_API_AUTH_TOKEN"));
         assert!(!output.contains("--codex-token"));
         let again = transform_config(

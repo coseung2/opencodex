@@ -30,16 +30,6 @@ import { getAccountQuota } from "./quota";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
-import { createHash, createHmac } from "node:crypto";
-
-const CALLER_POOL_HEADER = "x-opencodex-caller-pool";
-const CALLER_POOL_AFFINITY_MAX = 2_048;
-const CALLER_POOL_AFFINITY_TTL_MS = 24 * 60 * 60_000;
-const CALLER_POOL_DEFAULT_COOLDOWN_MS = 5 * 60_000;
-
-type CallerPoolAffinity = { accountId: string; lastUsedAt: number };
-const callerPoolAffinity = new Map<string, CallerPoolAffinity>();
-const callerPoolCooldown = new Map<string, number>();
 
 export type CodexAuthContext =
   | { kind: "main"; accountId: null }
@@ -77,17 +67,6 @@ export type CodexAuthContext =
       probeLeaseId?: string;
       quotaScope?: CodexQuotaScope;
       probeQuotaScope?: CodexQuotaScope;
-    }
-  | {
-      /** Request-scoped ChatGPT login supplied by an authenticated Notch PC. */
-      kind: "caller-pool";
-      accountId: string;
-      writerGeneration: number;
-      chatgptAccountId?: string;
-      fixedAccount?: false;
-      probeLeaseId?: never;
-      quotaScope?: CodexQuotaScope;
-      probeQuotaScope?: never;
     };
 
 /** Probe lease carried by this context, when it holds one. */
@@ -102,12 +81,6 @@ export function isStoredCodexPoolAuthContext(
   ctx: CodexAuthContext | undefined,
 ): ctx is StoredCodexPoolAuthContext {
   return ctx?.kind === "pool" || ctx?.kind === "main-pool";
-}
-
-export function isCallerCodexPoolAuthContext(
-  ctx: CodexAuthContext | undefined,
-): ctx is Extract<CodexAuthContext, { kind: "caller-pool" }> {
-  return ctx?.kind === "caller-pool";
 }
 
 /** Scope of a lease carried by this context, when it probes a model-specific quota. */
@@ -157,92 +130,6 @@ export class CodexDirectAuthenticationError extends Error {
 
 export function hasCallerCodexBearer(headers: Headers): boolean {
   return /^Bearer\s+\S+/i.test(headers.get("authorization")?.trim() ?? "");
-}
-
-function boundedCallerPoolIdentity(headers: Headers): string | null {
-  if (headers.get(CALLER_POOL_HEADER)?.trim() !== "1") return null;
-  const admission = headers.get("x-opencodex-api-key")?.trim();
-  const authorization = headers.get("authorization")?.trim();
-  const account = headers.get("chatgpt-account-id")?.trim();
-  if (!admission || !account || !authorization || !/^Bearer\s+\S+/i.test(authorization)) return null;
-  return `caller:${createHmac("sha256", admission)
-    .update("opencodex:notch-caller-pool:v1\0")
-    .update(account)
-    .digest("hex")
-    .slice(0, 32)}`;
-}
-
-function callerPoolAffinityKey(headers: Headers, modelId?: string): string | null {
-  const callerId = boundedCallerPoolIdentity(headers);
-  const threadId = headers.get("x-codex-parent-thread-id")?.trim();
-  if (!callerId || !threadId) return null;
-  return createHash("sha256")
-    .update("opencodex:notch-caller-thread:v1\0")
-    .update(callerId)
-    .update("\0")
-    .update(threadId)
-    .update("\0")
-    .update(codexQuotaScopeForModel(modelId) ?? "legacy")
-    .digest("hex");
-}
-
-function pruneCallerPoolState(now: number): void {
-  for (const [key, affinity] of callerPoolAffinity) {
-    if (now - affinity.lastUsedAt > CALLER_POOL_AFFINITY_TTL_MS) callerPoolAffinity.delete(key);
-  }
-  for (const [accountId, until] of callerPoolCooldown) {
-    if (until <= now) callerPoolCooldown.delete(accountId);
-  }
-  while (callerPoolAffinity.size > CALLER_POOL_AFFINITY_MAX) {
-    let oldestKey: string | undefined;
-    let oldest = Number.POSITIVE_INFINITY;
-    for (const [key, affinity] of callerPoolAffinity) {
-      if (affinity.lastUsedAt < oldest) {
-        oldest = affinity.lastUsedAt;
-        oldestKey = key;
-      }
-    }
-    if (!oldestKey) break;
-    callerPoolAffinity.delete(oldestKey);
-  }
-}
-
-export function clearCallerCodexPoolState(): void {
-  callerPoolAffinity.clear();
-  callerPoolCooldown.clear();
-}
-
-export function rememberCallerCodexPoolFallback(
-  headers: Headers,
-  modelId: string | undefined,
-  accountId: string,
-  now = Date.now(),
-): void {
-  const key = callerPoolAffinityKey(headers, modelId);
-  if (!key) return;
-  callerPoolAffinity.set(key, { accountId, lastUsedAt: now });
-  pruneCallerPoolState(now);
-}
-
-export function markCallerCodexPoolUnavailable(
-  ctx: CodexAuthContext,
-  retryAfter: string | null = null,
-  now = Date.now(),
-): void {
-  if (ctx.kind !== "caller-pool") return;
-  const seconds = retryAfter === null ? NaN : Number(retryAfter);
-  const duration = Number.isFinite(seconds) && seconds >= 0
-    ? Math.min(seconds * 1_000, 24 * 60 * 60_000)
-    : CALLER_POOL_DEFAULT_COOLDOWN_MS;
-  callerPoolCooldown.set(ctx.accountId, now + duration);
-  pruneCallerPoolState(now);
-}
-
-export function callerPoolFallbackHeaders(headers: Headers): Headers {
-  const selected = new Headers(headers);
-  selected.delete(CALLER_POOL_HEADER);
-  selected.delete("x-codex-parent-thread-id");
-  return selected;
 }
 
 export class CodexAccountCooldownError extends Error {
@@ -357,47 +244,6 @@ export async function resolveCodexAuthContext(
   if (mode === "direct" && fixedAccountId === undefined) {
     if (!hasCallerCodexBearer(headers)) throw new CodexDirectAuthenticationError();
     return { kind: "main", accountId: null };
-  }
-  if (mode === "pool" && fixedAccountId === undefined && options.excludeAccountId === undefined) {
-    const callerId = boundedCallerPoolIdentity(headers);
-    if (callerId) {
-      const now = Date.now();
-      pruneCallerPoolState(now);
-      const affinityKey = callerPoolAffinityKey(headers, options.modelId);
-      const affinity = affinityKey ? callerPoolAffinity.get(affinityKey) : undefined;
-      if (affinity) {
-        try {
-          const stored = await resolveCodexAuthContext(
-            callerPoolFallbackHeaders(headers),
-            config,
-            "pool",
-            { accountId: affinity.accountId, modelId: options.modelId },
-          );
-          affinity.lastUsedAt = now;
-          if (stored.kind === "pool" || stored.kind === "main-pool") {
-            return { ...stored, fixedAccount: undefined };
-          }
-        } catch {
-          callerPoolAffinity.delete(affinityKey!);
-        }
-      }
-      if ((callerPoolCooldown.get(callerId) ?? 0) <= now) {
-        return {
-          kind: "caller-pool",
-          accountId: callerId,
-          writerGeneration,
-          ...(headers.get("chatgpt-account-id")?.trim()
-            ? { chatgptAccountId: headers.get("chatgpt-account-id")!.trim() }
-            : {}),
-          ...(codexQuotaScopeForModel(options.modelId)
-            ? { quotaScope: codexQuotaScopeForModel(options.modelId) }
-            : {}),
-        };
-      }
-      return resolveCodexAuthContext(callerPoolFallbackHeaders(headers), config, "pool", {
-        modelId: options.modelId,
-      });
-    }
   }
   reconcileMainCodexAccountRuntimeState();
   const threadId = headers.get("x-codex-parent-thread-id");
@@ -525,7 +371,6 @@ export function applyCodexAuthContextToProvider(
   ctx: CodexAuthContext,
   mode: CodexAccountMode | undefined,
 ): OcxRuntimeProviderConfig {
-  if (ctx.kind === "caller-pool") return provider;
   if ((ctx.kind !== "pool" && ctx.kind !== "main-pool") || provider.authMode !== "forward") return provider;
   if (mode !== "pool" && ctx.fixedAccount !== true) return provider;
   return {
@@ -552,7 +397,7 @@ export function headersForCodexAuthContext(headers: Headers, ctx: CodexAuthConte
 }
 
 export function isCodexAuthContextUsable(ctx: CodexAuthContext, config: OcxConfig): boolean {
-  if (ctx.kind === "main" || ctx.kind === "caller-pool") return true;
+  if (ctx.kind === "main") return true;
   if (ctx.kind === "main-pool") return isCodexAccountUsable(config, ctx.accountId);
   return isCodexAccountUsable(config, ctx.accountId) && isCodexAccountGenerationLive(ctx.accountId, ctx.generation);
 }

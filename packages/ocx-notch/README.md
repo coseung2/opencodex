@@ -150,11 +150,11 @@ TOML strings, and user edits made after connecting require manual resolution; No
 reports these instead of overwriting them. Conversation history is not migrated, and
 Claude or other clients are not automatically reconfigured.
 
-For new Notch threads, the connecting PC's ChatGPT account is tried first. A 401,
-quota response, or supported account/model incompatibility falls back to the VM's
-OpenAI pool. The selected VM account stays associated with that caller and thread so
-continuations and compaction use the same account. The PC bearer is request-scoped;
-Notch and the VM do not add it to the VM account store.
+For new Notch threads, the VM's OpenAI pool is used directly. The selected VM account
+stays associated with that thread so continuations and compaction use the same
+account, subject to the normal pool strategy and failover rules. The PC bearer is
+request-scoped admission/authentication material; Notch and the VM do not add it to
+the VM account store or use it to select a separate account.
 
 ### Connect, disconnect, and local mode
 

@@ -35,7 +35,6 @@ import type { OcxConfig } from "../src/types";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { configuredAdminToken } from "../src/lib/admin-secrets";
-import { clearCallerCodexPoolState } from "../src/codex/auth-context";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -134,7 +133,6 @@ afterEach(() => {
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
   clearCodexUpstreamHealth();
-  clearCallerCodexPoolState();
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountNeedsReauth("pool-b");
@@ -1892,7 +1890,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("Notch caller-pool uses the PC login first, then pins that thread to VM pool fallback", async () => {
+  test("Notch uses the VM pool instead of the connecting PC login", async () => {
     const harness = await startPoolRetryHarness(accountId => accountId === "acct-caller"
       ? new Response(JSON.stringify({ error: { message: "rate limited" } }), {
         status: 429,
@@ -1913,13 +1911,13 @@ describe("server local API auth", () => {
         authorization: "Bearer refreshed-inbound-token",
       } })).json() as { id: string }).id)
         .toBe("acct-pool-a");
-      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a", "acct-pool-a"]);
+      expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-a"]);
     } finally {
       await stopPoolRetryHarness(harness);
     }
   });
 
-  test("Notch caller-pool falls back to VM pool when the PC ChatGPT login is rejected", async () => {
+  test("Notch pool requests ignore the connecting PC account even when it is invalid", async () => {
     const harness = await startPoolRetryHarness(accountId => accountId === "acct-caller"
       ? Response.json({ error: { message: "token expired" } }, { status: 401 })
       : Response.json({ id: accountId, status: "completed", output: [] }));
@@ -1930,14 +1928,14 @@ describe("server local API auth", () => {
         "x-opencodex-caller-pool": "1",
       } });
       expect(response.status).toBe(200);
-      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a"]);
+      expect(harness.dispatches).toEqual(["acct-pool-a"]);
       expect(isAccountNeedsReauth("pool-a")).toBe(false);
     } finally {
       await stopPoolRetryHarness(harness);
     }
   });
 
-  test("Notch caller-pool falls back to VM pool for an allow-listed account/model rejection", async () => {
+  test("Notch pool requests use VM pool for model rejection handling", async () => {
     const harness = await startPoolRetryHarness(accountId => accountId === "acct-caller"
       ? new Response(unsupportedModelBody(), { status: 400, headers: { "content-type": "application/json" } })
       : Response.json({ id: accountId, status: "completed", output: [] }));
@@ -1948,36 +1946,7 @@ describe("server local API auth", () => {
         "x-opencodex-caller-pool": "1",
       } });
       expect(response.status).toBe(200);
-      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a"]);
-    } finally {
-      await stopPoolRetryHarness(harness);
-    }
-  });
-
-  test("Notch caller-pool does not pin a VM fallback that rejects the request", async () => {
-    let callerAttempts = 0;
-    const harness = await startPoolRetryHarness(accountId => {
-      if (accountId === "acct-caller") {
-        callerAttempts++;
-        return callerAttempts === 1
-          ? new Response(JSON.stringify({ error: { message: "rate limited" } }), {
-            status: 429,
-            headers: { "content-type": "application/json", "retry-after": "0" },
-          })
-          : Response.json({ id: accountId, status: "completed", output: [] });
-      }
-      return Response.json({ error: { message: "temporary failure" } }, { status: 500 });
-    });
-    const headers = {
-      "chatgpt-account-id": "acct-caller",
-      "x-opencodex-api-key": "ocx_data_admission",
-      "x-opencodex-caller-pool": "1",
-      "x-codex-parent-thread-id": "notch-rejected-fallback-thread",
-    };
-    try {
-      expect((await harness.request({ headers })).status).toBe(500);
-      expect((await harness.request({ headers })).status).toBe(200);
-      expect(harness.dispatches).toEqual(["acct-caller", "acct-pool-a", "acct-caller"]);
+      expect(harness.dispatches).toEqual(["acct-pool-a"]);
     } finally {
       await stopPoolRetryHarness(harness);
     }
