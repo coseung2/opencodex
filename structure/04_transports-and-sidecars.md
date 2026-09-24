@@ -129,6 +129,8 @@ session lane before per-model wire selection. One conversation keeps one opaque 
 across Responses, Chat, retries, and key rotation, while sibling subagents remain distinct. An
 operator-supplied header wins case-insensitively. Renamed providers are covered only when their
 fixed key-auth destination still matches the registry; custom and lookalike URLs receive nothing.
+Clients that provide none of the supported conversation headers receive a random runtime-only
+opaque lane for that request because OpenCode Go rejects a missing header with `MissingSessionID`.
 Muse Spark's Responses sanitizer also drops the provider-rejected `search_content_types` and
 `indexed_web_access` fields from plain `web_search` tools while preserving preview tools and
 unrelated models.
@@ -147,7 +149,7 @@ unrelated models.
 - 검토한 주요 대안: Forward a raw thread header; reuse `prompt_cache_key`; configure one global value; inject separately in Chat and Responses adapters; enrich the canonical provider before wire selection.
 - 선택한 방식: Hash the existing parent-qualified session lane with a provider-specific domain, attach it as runtime-only provider metadata before wire selection, and preserve an explicit operator override.
 - 다른 대안 대신 이 방식을 선택한 이유: The lane already separates sibling subagents, while cache keys may represent shared cohorts and adapter-local changes would drift across Go's mixed wire matrix.
-- 장점, 단점 및 영향: Go requests gain stable opaque affinity across normal retries and key rotation without persisted config changes; requests with no stable lane remain headerless rather than receiving a per-request value that defeats affinity.
+- 장점, 단점 및 영향: Go requests gain stable opaque affinity across normal retries and key rotation without persisted config changes; requests with no stable caller lane receive per-request affinity so they remain callable, while cross-turn affinity requires the client to send a supported conversation header.
 
 ### Passthrough SSE stream shapes (#314)
 

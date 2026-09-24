@@ -70,11 +70,11 @@ describe("selected upstream model metadata", () => {
     expect(xai.modelReasoningEfforts?.["grok-4.5"]).toEqual(["low", "medium", "high"]);
   });
 
-  test("Ox Alpha and DeepSeek vision preview have bounded multimodal metadata", () => {
+  test("drops closed OpenRouter previews and keeps DeepSeek vision metadata", () => {
     const openrouter = provider("openrouter");
-    expect(openrouter.models).toContain("stealth/ox-alpha");
-    expect(openrouter.modelContextWindows?.["stealth/ox-alpha"]).toBe(1_048_576);
-    expect(openrouter.modelInputModalities?.["stealth/ox-alpha"]).toEqual(["text", "image"]);
+    expect(openrouter.models).not.toContain("stealth/ox-alpha");
+    expect(openrouter.modelContextWindows?.["stealth/ox-alpha"]).toBeUndefined();
+    expect(openrouter.modelInputModalities?.["stealth/ox-alpha"]).toBeUndefined();
 
     const deepseek = provider("deepseek");
     expect(deepseek.models).toContain("deepseek-v4-flash-vision-exp");
@@ -101,11 +101,11 @@ describe("Gemini 3.7 Flash replacement", () => {
     expect(ANTIGRAVITY_MODEL_EFFORTS["gemini-3.7-flash"]).toEqual(["low", "medium", "high"]);
     expect(ANTIGRAVITY_MODEL_INPUT_MODALITIES["gemini-3.7-flash"]).toEqual(["text", "image"]);
     expect(resolveAntigravityEffortWireModel("gemini-3.7-flash")).toEqual({
-      wireModelId: "gemini-3.7-flash",
+      wireModelId: "gemini-3.7-flash-tiered",
       thinkingLevel: "medium",
     });
     expect(resolveAntigravityEffortWireModel("gemini-3.6-flash-low")).toEqual({
-      wireModelId: "gemini-3.7-flash",
+      wireModelId: "gemini-3.7-flash-tiered",
       thinkingLevel: "low",
     });
   });

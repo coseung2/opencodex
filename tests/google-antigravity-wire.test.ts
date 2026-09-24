@@ -101,11 +101,11 @@ describe("antigravity CCA envelope", () => {
     }
 
     for (const [alias, wire] of [
-      ["gemini-3.5-flash-extra-low", "gemini-3.7-flash"],
-      ["gemini-3.5-flash-low", "gemini-3.7-flash"],
-      ["gemini-3.5-flash-mid", "gemini-3.7-flash"],
-      ["gemini-3.5-flash-high", "gemini-3.7-flash"],
-      ["gemini-3-flash-agent", "gemini-3.7-flash"],
+      ["gemini-3.5-flash-extra-low", "gemini-3.7-flash-tiered"],
+      ["gemini-3.5-flash-low", "gemini-3.7-flash-tiered"],
+      ["gemini-3.5-flash-mid", "gemini-3.7-flash-tiered"],
+      ["gemini-3.5-flash-high", "gemini-3.7-flash-tiered"],
+      ["gemini-3-flash-agent", "gemini-3.7-flash-tiered"],
       ["gemini-3.1-pro-high", "gemini-pro-agent"],
       ["gemini-3.1-pro-preview", "gemini-pro-agent"],
     ]) {
@@ -115,7 +115,7 @@ describe("antigravity CCA envelope", () => {
 
     for (const modelId of ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high"]) {
       const req = await createGoogleAdapter(provider).buildRequest(parsed("x", false, modelId));
-      expect(JSON.parse(req.body).model).toBe("gemini-3.7-flash");
+      expect(JSON.parse(req.body).model).toBe("gemini-3.7-flash-tiered");
     }
   });
 
@@ -167,28 +167,28 @@ describe("antigravity CCA envelope", () => {
   test("gemini-3.7-flash with effort=high keeps one wire id + thinkingConfig", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.7-flash", "high"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("high");
   });
 
   test("gemini-3.7-flash with effort=low keeps one wire id + thinkingConfig", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.7-flash", "low"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("low");
   });
 
   test("gemini-3.7-flash with no effort sends the documented medium default", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.7-flash"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("medium");
   });
 
   test("gemini-3.7-flash with effort=max clamps to high", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.7-flash", "max"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("high");
   });
 
@@ -225,21 +225,21 @@ describe("antigravity CCA envelope", () => {
   test("retired suffix ID with explicit effort routes to 3.7 at that effort", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.6-flash-low", "high"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("high");
   });
 
   test("retired suffix ID with no effort preserves its historical tier", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.6-flash-low"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("low");
   });
 
   test("legacy compat alias resolves to 3.7 and explicit effort wins", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.5-flash-high", "low"));
     const env = JSON.parse(req.body);
-    expect(env.model).toBe("gemini-3.7-flash");
+    expect(env.model).toBe("gemini-3.7-flash-tiered");
     expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("low");
   });
 

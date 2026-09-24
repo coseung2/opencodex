@@ -258,6 +258,18 @@ const IMAGE_CAPABLE_MODELS = new Set([
   "gemini-3-pro-image-preview",
 ]);
 
+// Google keeps the picker-facing base IDs, but these Generative Language API
+// generations are served under renamed wire paths. Resolve only at dispatch so
+// saved selections, catalog rows, and usage attribution retain their stable IDs.
+const GEMINI_DIRECT_WIRE_RENAMES: Record<string, string> = {
+  "gemini-3.6-flash": "gemini-3.6-flash-tiered",
+  "gemini-3.7-flash": "gemini-3.7-flash-tiered",
+};
+
+function resolveDirectGeminiWireModelId(modelId: string): string {
+  return GEMINI_DIRECT_WIRE_RENAMES[modelId] ?? modelId;
+}
+
 function isImageCapableModel(modelId: string): boolean {
   return IMAGE_CAPABLE_MODELS.has(modelId);
 }
@@ -408,7 +420,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       }
 
       // ai-studio (default): Generative Language API + x-goog-api-key.
-      const url = `${provider.baseUrl}/v1beta/models/${parsed.modelId}:${method}${streamParam}`;
+      const wireModelId = resolveDirectGeminiWireModelId(parsed.modelId);
+      const url = `${provider.baseUrl}/v1beta/models/${wireModelId}:${method}${streamParam}`;
       const apiKey = provider.apiKey?.trim();
       if (!apiKey) throw new Error("google (AI Studio) requires a non-empty API key");
       headers["x-goog-api-key"] = apiKey;

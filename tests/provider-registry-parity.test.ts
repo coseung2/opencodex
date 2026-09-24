@@ -105,7 +105,7 @@ describe("provider registry parity", () => {
     const derived = deriveKeyLoginMap()["openai-apikey"];
     expect(derived.modelMaxInputTokens).not.toBe(apiRegistry.modelMaxInputTokens);
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("anthropic/claude-sonnet-5");
-    expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("stealth/ox-alpha");
+    expect(KEY_LOGIN_PROVIDERS.openrouter.models).not.toContain("stealth/ox-alpha");
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("openai/gpt-5.6-sol");
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("openai/gpt-5.6-terra");
     expect(KEY_LOGIN_PROVIDERS.openrouter.models).toContain("openai/gpt-5.6-luna");

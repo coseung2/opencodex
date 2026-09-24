@@ -992,9 +992,8 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
   {
     id: "openrouter", label: "OpenRouter", adapter: "openai-chat", baseUrl: "https://openrouter.ai/api/v1",
     authKind: "key", featured: true, dashboardUrl: "https://openrouter.ai/keys", jawcodeBundle: "openrouter",
-    models: ["anthropic/claude-sonnet-5", "stealth/ox-alpha", ...OPENROUTER_GPT56_MODELS],
-    modelContextWindows: { "anthropic/claude-sonnet-5": 1_000_000, "stealth/ox-alpha": OX_ALPHA_CONTEXT_WINDOW, ...OPENROUTER_GPT56_CONTEXT_WINDOWS },
-    modelInputModalities: { "stealth/ox-alpha": ["text", "image"] },
+    models: ["anthropic/claude-sonnet-5", ...OPENROUTER_GPT56_MODELS],
+    modelContextWindows: { "anthropic/claude-sonnet-5": 1_000_000, ...OPENROUTER_GPT56_CONTEXT_WINDOWS },
   },
   {
     // OrcaRouter: OpenAI-compatible adaptive router (api.orcarouter.ai). Model ids are

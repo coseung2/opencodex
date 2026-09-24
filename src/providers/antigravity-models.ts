@@ -7,6 +7,7 @@
 // picker exposes collapsed base models with reasoning-effort routing.
 
 const GEMINI_FLASH_CURRENT = "gemini-3.7-flash";
+const GEMINI_FLASH_WIRE_ID = "gemini-3.7-flash-tiered";
 const RETIRED_FLASH_TIERS: Record<string, string> = {
   "gemini-3.6-flash": "medium",
   "gemini-3.6-flash-low": "low",
@@ -21,7 +22,7 @@ const RETIRED_FLASH_TIERS: Record<string, string> = {
 
 // ── Wire IDs (what CCA :fetchAvailableModels returns) ──
 const ANTIGRAVITY_WIRE_MODELS = [
-  GEMINI_FLASH_CURRENT,
+  GEMINI_FLASH_WIRE_ID,
   "gemini-3.1-pro-low",
   "gemini-pro-agent",
   "gemini-3.1-flash-image",
@@ -56,6 +57,9 @@ const ANTIGRAVITY_DEFAULT_EFFORT: Record<string, string> = {
 const ANTIGRAVITY_THINKING_LEVEL_MODELS: Record<string, string> = {
   [GEMINI_FLASH_CURRENT]: "medium",
 };
+const ANTIGRAVITY_PICKER_TO_WIRE: Record<string, string> = {
+  [GEMINI_FLASH_CURRENT]: GEMINI_FLASH_WIRE_ID,
+};
 const ANTIGRAVITY_THINKING_LEVELS = new Set(["low", "medium", "high"]);
 
 function resolveAntigravityThinkingLevel(effort: string): string | undefined {
@@ -75,7 +79,7 @@ const ANTIGRAVITY_VISIBLE_MODEL_ALIASES: Record<string, string> = {
 const ANTIGRAVITY_COMPATIBILITY_MODEL_ALIASES: Record<string, string> = {
   "gemini-3.1-pro-low": "gemini-3.1-pro-low",
   "gemini-pro-agent": "gemini-pro-agent",
-  ...Object.fromEntries(Object.keys(RETIRED_FLASH_TIERS).map(retired => [retired, GEMINI_FLASH_CURRENT])),
+  ...Object.fromEntries(Object.keys(RETIRED_FLASH_TIERS).map(retired => [retired, GEMINI_FLASH_WIRE_ID])),
 };
 
 export const ANTIGRAVITY_MODEL_ALIASES: Record<string, string> = {
@@ -95,7 +99,7 @@ export const ANTIGRAVITY_MODELS = [
 
 // Context windows from the upstream `:fetchAvailableModels` maxTokens per model.
 const ANTIGRAVITY_WIRE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  [GEMINI_FLASH_CURRENT]: 1_048_576,
+  [GEMINI_FLASH_WIRE_ID]: 1_048_576,
   "gemini-3.1-pro-low": 1_048_576,
   "gemini-pro-agent": 1_048_576,
   "gemini-3.1-flash-image": 1_048_576,
@@ -161,7 +165,7 @@ export function resolveAntigravityEffortWireModel(
   const retiredTier = RETIRED_FLASH_TIERS[modelId];
   if (retiredTier) {
     return {
-      wireModelId: GEMINI_FLASH_CURRENT,
+      wireModelId: GEMINI_FLASH_WIRE_ID,
       thinkingLevel: effort ? resolveAntigravityThinkingLevel(effort) ?? retiredTier : retiredTier,
     };
   }
@@ -174,7 +178,7 @@ export function resolveAntigravityEffortWireModel(
   const defaultLevel = ANTIGRAVITY_THINKING_LEVEL_MODELS[modelId];
   if (defaultLevel) {
     return {
-      wireModelId: modelId,
+      wireModelId: ANTIGRAVITY_PICKER_TO_WIRE[modelId] ?? modelId,
       thinkingLevel: effort ? resolveAntigravityThinkingLevel(effort) ?? defaultLevel : defaultLevel,
     };
   }

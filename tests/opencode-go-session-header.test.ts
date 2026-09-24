@@ -139,12 +139,13 @@ describe("OpenCode Go session affinity (#3344)", () => {
     expect(captured.headers.get(SESSION_HEADER)).not.toBe("hermes-gateway");
   });
 
-  test("keeps generated affinity runtime-only and omits it without a stable lane", async () => {
+  test("generates runtime-only request affinity when the caller has no stable lane", async () => {
     const configured = opencodeGo();
-    await captureRequest({ provider: configured });
+    const captured = await captureRequest({ provider: configured });
     expect(configured.headers?.[SESSION_HEADER]).toBeUndefined();
-    expect(resolveOpenCodeGoTransport(configured, undefined)).toBe(configured);
-    expect(resolveOpenCodeGoTransport(configured, undefined).headers?.[SESSION_HEADER]).toBeUndefined();
+    expect(captured.headers.get(SESSION_HEADER)).toMatch(/^ocx_[0-9a-f]{32}$/);
+    expect(resolveOpenCodeGoTransport(configured, undefined)).not.toBe(configured);
+    expect(resolveOpenCodeGoTransport(configured, undefined).headers?.[SESSION_HEADER]).toMatch(/^ocx_[0-9a-f]{32}$/);
   });
 
   test("does not inject the header into a lookalike destination", async () => {

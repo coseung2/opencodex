@@ -8,6 +8,15 @@ function parsedWith(messages: unknown[], tools?: unknown[]): OcxParsedRequest {
   return { modelId: "gemini-3-pro", stream: false, options: {}, context: { messages, tools } } as unknown as OcxParsedRequest;
 }
 
+test("direct Gemini renamed Flash generations use their live tiered wire paths", async () => {
+  for (const modelId of ["gemini-3.6-flash", "gemini-3.7-flash"]) {
+    const parsed = parsedWith([{ role: "user", content: "hello" }]);
+    parsed.modelId = modelId;
+    const request = await createGoogleAdapter(provider).buildRequest(parsed);
+    expect(request.url).toBe(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}-tiered:generateContent`);
+  }
+});
+
 async function geminiContents(parsed: OcxParsedRequest): Promise<{ role: string; parts: Record<string, unknown>[] }[]> {
   // buildRequest is async (google-vertex auth path); await before parsing the body.
   const { body } = await createGoogleAdapter(provider).buildRequest(parsed);

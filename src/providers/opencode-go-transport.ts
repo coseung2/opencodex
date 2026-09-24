@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { OcxProviderConfig } from "../types";
 import { registryEntryForProviderDestination } from "./registry";
 
@@ -40,20 +40,25 @@ export function deriveOpenCodeGoSessionId(sessionLane: string): string {
   return `ocx_${digest}`;
 }
 
-/** Add per-conversation Go affinity only to the canonical fixed-key destination. */
+/** Add Go's required opaque session header only to the canonical fixed-key destination. */
 export function resolveOpenCodeGoTransport<T extends OcxProviderConfig>(
   provider: T,
   sessionLane: string | undefined,
 ): T {
   if (registryEntryForProviderDestination(provider)?.id !== "opencode-go") return provider;
-  if (!sessionLane) return provider;
   if (hasHeaderCaseInsensitive(provider.headers, OPENCODE_GO_SESSION_HEADER)) return provider;
+
+  // Some OpenAI-compatible clients send no Codex/OpenCode conversation headers.
+  // Go now rejects those requests with MissingSessionID, so give that request an
+  // opaque runtime-only lane. Stable caller lanes still retain cross-turn affinity;
+  // this fallback is generated once on the resolved transport and survives retries.
+  const effectiveLane = sessionLane ?? `request:${randomUUID()}`;
 
   return {
     ...provider,
     headers: {
       ...(provider.headers ?? {}),
-      [OPENCODE_GO_SESSION_HEADER]: deriveOpenCodeGoSessionId(sessionLane),
+      [OPENCODE_GO_SESSION_HEADER]: deriveOpenCodeGoSessionId(effectiveLane),
     },
   };
 }
