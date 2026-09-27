@@ -48,9 +48,12 @@ function baseConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
     port: 10100,
     defaultProvider: "a",
     providers: {
-      a: { adapter: "openai-chat", baseUrl: "https://a.example/v1", apiKey: "ka", models: ["m1"] },
-      b: { adapter: "openai-chat", baseUrl: "https://b.example/v1", apiKey: "kb", models: ["m2"] },
-      c: { adapter: "openai-chat", baseUrl: "https://c.example/v1", apiKey: "kc", models: ["m3"] },
+      // The fake `.example` hosts must never reach live model discovery: a real DNS lookup stalls
+      // the catalog round-trips in this file for ~11s and pushed them past the test timeout under
+      // batch load. Discovery has its own suites; these tests only need the configured rows.
+      a: { adapter: "openai-chat", baseUrl: "https://a.example/v1", apiKey: "ka", models: ["m1"], liveModels: false },
+      b: { adapter: "openai-chat", baseUrl: "https://b.example/v1", apiKey: "kb", models: ["m2"], liveModels: false },
+      c: { adapter: "openai-chat", baseUrl: "https://c.example/v1", apiKey: "kc", models: ["m3"], liveModels: false },
     },
     combos: {
       free: {
@@ -513,7 +516,10 @@ describe("combo management API", () => {
     const disabledResponse = await comboApi(config, "GET", "/api/subagent-models");
     const disabledBody = await disabledResponse!.json() as { available: string[] };
     expect(disabledBody.available).not.toContain("deepseek-v4-flash");
-  }, 15_000);
+    // The handler also reports live Codex app-server catalog state, which shells out to
+    // PowerShell to enumerate processes (~6s per call on a busy Windows box, and more under batch
+    // load). Two catalog round-trips therefore need more headroom than the default.
+  }, 30_000);
 
   test("GET models round-trips a disabled combo alias for the Models GUI", async () => {
     const config = baseConfig({
