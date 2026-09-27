@@ -30,6 +30,8 @@ import { routedSlug, slugEquals, slugsEquivalent } from "../../providers/slug-co
 import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
+import { fetchKiroAvailableModels } from "../../providers/kiro-live-models";
+import { resolveKiroApiRegion, resolveKiroProfileArn } from "../../oauth/kiro";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import {
   COMBO_NAMESPACE,
@@ -489,6 +491,52 @@ export async function fetchProviderModels(name: string, prov: OcxProviderConfig,
     );
     const staleCursor = getStaleCached(name);
     return staleCursor ? applyConfigHintsToCachedModels(name, prov, staleCursor) : configured;
+  }
+  if (prov.adapter === "kiro") {
+    if (!apiKey) return configured;
+    // Kiro publishes its model list through the control plane's List-Available-Models operation,
+    // not an OpenAI-style GET /models, so this discovery is bespoke like Cursor's. The service list
+    // is authoritative: it carries the tiers the account can actually reach (e.g. claude-opus-5.5,
+    // gpt-6-astra) and each entry's native effort field. The registry's static list stays as the
+    // failure fallback, and the configured default selector is always kept discoverable.
+    const cachedKiro = getFreshCached(name, ttlMs);
+    if (cachedKiro) return applyConfigHintsToCachedModels(name, prov, cachedKiro);
+    if (isModelsFetchCoolingDown(name)) {
+      const cooling = getStaleCached(name);
+      return cooling ? applyConfigHintsToCachedModels(name, prov, cooling) : configured;
+    }
+    const liveResult = await fetchKiroAvailableModels({
+      accessToken: apiKey,
+      region: resolveKiroApiRegion(),
+      profileArn: resolveKiroProfileArn(),
+    });
+    if (liveResult.ok) {
+      const discovered: CatalogModel[] = liveResult.models.map(model => ({
+        id: model.id,
+        provider: name,
+        ...catalogHintsFromProviderConfig(name, prov, model.id, contextCap),
+      }));
+      if (prov.defaultModel && !discovered.some(model => model.id === prov.defaultModel)) {
+        discovered.push({
+          id: prov.defaultModel,
+          provider: name,
+          ...catalogHintsFromProviderConfig(name, prov, prov.defaultModel, contextCap),
+        });
+      }
+      const result = discovered.length > 0 ? discovered : configured;
+      markProviderDiscoveryOk(name, liveResult.models.length);
+      setCached(name, result);
+      return result;
+    }
+    markModelsFetchFailure(name);
+    markProviderDiscoveryFailed(name, {
+      reason: liveResult.error === "auth" ? "blocked" : "provider",
+    });
+    console.warn(
+      `[opencodex] Kiro model discovery for "${name}" failed [${liveResult.error}]${liveResult.detail ? `: ${liveResult.detail}` : ""}; using stale/static catalog degradation.`,
+    );
+    const staleKiro = getStaleCached(name);
+    return staleKiro ? applyConfigHintsToCachedModels(name, prov, staleKiro) : configured;
   }
   if (prov.authMode === "oauth" && !apiKey) {
     // No usable token (logged out, or account marked needsReauth). Still surface the

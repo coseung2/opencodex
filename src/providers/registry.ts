@@ -819,10 +819,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     note: "Import-first: reuses your installed and signed-in Kiro CLI session (requires `kiro-cli login`). Add account logs `kiro-cli` out, switches it through a fresh browser login, stores the account by profile ARN, and restores the previous CLI session on cancellation or failure. Experimental third-party harness — see Kiro ToS.",
     models: KIRO_MODELS,
     defaultModel: "kiro-auto",
-    // Kiro speaks CodeWhisperer wire, not OpenAI-style GET /models. Keep the static
-    // catalog authoritative so a spurious 2xx from runtime.../models cannot drop seeded ids
-    // (e.g. newly listed GPT-5.6 tiers) via live-discovery reconciliation.
-    liveModels: false,
+    // Kiro speaks CodeWhisperer wire, not OpenAI-style GET /models, so discovery goes through the
+    // control plane's List-Available-Models operation (see `kiro-live-models.ts`) instead of the
+    // generic `modelDiscovery` spec. The static `models` list remains the failure fallback.
+    liveModels: true,
     // Kiro rejects request-level parallel tool calls; keep persisted presets and the Codex
     // catalog aligned with the adapter's single-call capability guard.
     parallelToolCalls: false,

@@ -10,6 +10,8 @@ import { applyProviderConfigHints, buildCatalogEntries } from "../src/codex/cata
 import { getValidAccessTokenSnapshot } from "../src/oauth";
 import { saveCredential } from "../src/oauth/store";
 import { normalizeKiroModelId } from "../src/providers/kiro-models";
+import { fetchProviderModels } from "../src/codex/catalog/provider-fetch";
+import { clearModelCache } from "../src/codex/model-cache";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../src/reasoning-effort";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
 import { routeModel } from "../src/router";
@@ -251,6 +253,15 @@ describe("kiro adapter — buildRequest", () => {
       ["kiro/gpt-5.6-terra", "gpt-5.6-terra"],
       ["gpt-5-6-luna", "gpt-5.6-luna"],
       ["gpt-5.6-sol-high", "gpt-5.6-sol"],
+      // GPT-6 tiers and Opus 5.5 (observed in the signed-in Kiro CLI's own
+      // GenerateAssistantResponse requests on 2026-09-27): the dotted minor and
+      // the tier suffix must survive into the upstream payload.
+      ["claude-opus-5.5", "claude-opus-5.5"],
+      ["claude-5-5-opus", "claude-opus-5.5"],
+      ["kiro/claude-opus-5.5-high", "claude-opus-5.5"],
+      ["gpt-6-astra", "gpt-6-astra"],
+      ["kiro/gpt-6-sol", "gpt-6-sol"],
+      ["gpt-6-luna-xhigh", "gpt-6-luna"],
     ]) {
       expect(normalizeKiroModelId(input)).toBe(expected);
       const { body } = await createKiroAdapter(provider).buildRequest(parsedWith([{ role: "user", content: "hi" }], undefined, input));
@@ -1125,6 +1136,30 @@ describe("kiro adapter — buildRequest", () => {
 describe("kiro adapter — native and emulated reasoning effort", () => {
   const kiro = PROVIDER_REGISTRY.find(p => p.id === "kiro") as unknown as OcxProviderConfig;
 
+  test("catalog ids carry the provider while the wire model id never does", () => {
+    const config = {
+      defaultProvider: "kiro",
+      providers: {
+        kiro: {
+          adapter: "kiro",
+          baseUrl: "https://runtime.us-east-1.kiro.dev",
+          authMode: "oauth",
+          models: [...(kiro.models as string[])],
+        },
+      },
+    } as OcxConfig;
+
+    for (const wireId of ["claude-opus-5.5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "claude-opus-5"]) {
+      const route = routeModel(config, `kiro/${wireId}`);
+      expect(route.providerName).toBe("kiro");
+      // The catalog advertises `kiro/<model>`; the adapter must receive the bare id,
+      // because CodeWhisperer resolves `modelId` without a provider namespace.
+      expect(route.modelId).toBe(wireId);
+      expect(route.modelId).not.toContain("/");
+      expect(normalizeKiroModelId(route.modelId)).toBe(wireId);
+    }
+  });
+
   test("kiro preset keeps parallel tool calls disabled in routing and the Codex catalog", () => {
     expect(kiro.parallelToolCalls).toBe(false);
 
@@ -1307,6 +1342,64 @@ describe("kiro adapter — native and emulated reasoning effort", () => {
   });
 });
 
+describe("kiro live catalog discovery", () => {
+  test("the catalog follows the service list and degrades to the static seed", async () => {
+    await saveCredential("kiro", {
+      access: "discovery-access",
+      refresh: "discovery-refresh",
+      expires: Date.now() + 3_600_000,
+      source: "oauth",
+    });
+    const provider = {
+      adapter: "kiro",
+      baseUrl: "https://runtime.us-east-1.kiro.dev",
+      authMode: "oauth",
+      models: ["claude-opus-5", "kiro-auto"],
+      defaultModel: "kiro-auto",
+      liveModels: true,
+    } as OcxProviderConfig;
+    const originalFetch = globalThis.fetch;
+    const requested: string[] = [];
+    try {
+      clearModelCache();
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        requested.push(String(input));
+        return new Response(
+          JSON.stringify({
+            models: [
+              { modelId: "claude-opus-5.5" },
+              {
+                modelId: "gpt-6-astra",
+                additionalModelRequestFieldsSchema: {
+                  properties: { reasoning: { properties: { effort: { enum: ["low", "xhigh"] } } } },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch;
+
+      const discovered = await fetchProviderModels("kiro", provider, 0);
+
+      expect(requested[0]).toContain("/List-Available-Models");
+      expect(requested[0]).toContain("origin=KIRO_CLI");
+      // The service list is authoritative; the configured default selector stays discoverable.
+      expect(discovered.map(model => model.id)).toEqual(["claude-opus-5.5", "gpt-6-astra", "kiro-auto"]);
+
+      clearModelCache();
+      globalThis.fetch = (async () => new Response("{}", { status: 500 })) as typeof fetch;
+      const degraded = await fetchProviderModels("kiro", provider, 0);
+
+      // A failed control-plane call must not empty the catalog.
+      expect(degraded.map(model => model.id)).toEqual(["claude-opus-5", "kiro-auto"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearModelCache();
+    }
+  });
+});
+
 describe("kiro adapter — per-model context windows (kiro.dev/docs/models)", () => {
   const kiro = PROVIDER_REGISTRY.find(p => p.id === "kiro") as unknown as OcxProviderConfig;
   const cw = kiro.modelContextWindows ?? {};
@@ -1346,8 +1439,11 @@ describe("kiro adapter — per-model context windows (kiro.dev/docs/models)", ()
     expect(cw["qwen3-coder-next"]).toBe(256_000);
   });
 
-  test("kiro catalog is static (no OpenAI-style live /models)", () => {
-    expect(kiro.liveModels).toBe(false);
+  test("kiro discovery uses the control plane, not an OpenAI-style live /models spec", () => {
+    // Discovery runs through List-Available-Models in a bespoke branch, so the provider must not
+    // carry a generic `modelDiscovery` spec (that path only understands `{data:[...]}`/`id`).
+    expect(kiro.liveModels).not.toBe(false);
+    expect(kiro.modelDiscovery).toBeUndefined();
   });
 
   test("Auto router has no fixed window (omitted)", () => {

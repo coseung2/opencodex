@@ -1,5 +1,17 @@
 export const KIRO_MODELS = [
   "kiro-auto",
+  // Observed on the wire 2026-09-27: the signed-in Kiro CLI sends exactly these
+  // modelIds to the same GenerateAssistantResponse endpoint this adapter calls
+  // (`~/.kiro/logs/*/kiro.log`, "Sending GenerateAssistantResponse
+  // modelId=claude-opus-5.5|gpt-6-sol|gpt-6-luna|gpt-6-astra"). The service
+  // answered with ServiceQuotaExceededException (monthly request count), not a
+  // model-validation error, so the ids are accepted. The control plane publishes
+  // the authoritative list at GET /List-Available-Models (KiroControlPlaneBearer
+  // client) with a per-model `additionalModelRequestFieldsSchema`.
+  "claude-opus-5.5",
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
   // OpenAI GPT-5.6 (Kiro experimental, us-east-1) — added to official catalog 2026-07-13
   "gpt-5.6-sol",
   "gpt-5.6-terra",
