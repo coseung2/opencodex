@@ -299,6 +299,15 @@ fn control_status_code(status_line: &[u8]) -> Option<u16> {
         .ok()
 }
 
+/// Status code of a response head's first line.
+fn head_status(head: &[u8]) -> Option<u16> {
+    let end = head
+        .windows(2)
+        .position(|pair| pair == b"\r\n")
+        .unwrap_or(head.len());
+    control_status_code(&head[..end])
+}
+
 /// HMAC-SHA-256 over the purpose and nonce. Binding the purpose keeps a proof
 /// captured from one endpoint from being replayed against another.
 fn control_proof(token: &str, purpose: &str, nonce: &str) -> Vec<u8> {
@@ -618,6 +627,35 @@ fn handle_client(
         return Ok(());
     }
 
+    // Codex's built-in OpenAI provider upgrades `/v1/responses` when it believes the
+    // endpoint speaks WebSockets. The upstream OCX server answers that handshake with
+    // 101 (a real socket) or 426, which codex-rs maps to a silent HTTP fallback. The
+    // handshake must therefore reach the server intact: stripping the upgrade headers
+    // turned it into a plain `GET /v1/responses`, which the server rejected as an
+    // unknown endpoint and Codex surfaced as a failed first attempt on every turn.
+    if is_websocket_upgrade(&request) {
+        if !profile.data_endpoint.secure {
+            if let Ok(upstream) = connect_endpoint(&profile.data_endpoint) {
+                return relay_websocket(
+                    client,
+                    upstream,
+                    &profile.data_endpoint,
+                    request,
+                    &key.key,
+                );
+            }
+        }
+        // WinHTTP cannot carry an upgraded connection, so answer the way the server
+        // does when WebSockets are off: Codex falls back to HTTP SSE without an error.
+        write_json_error(
+            &mut client,
+            426,
+            "upgrade_required",
+            "The OCX data relay does not carry WebSockets on this path",
+        );
+        return Ok(());
+    }
+
     if !profile.data_endpoint.secure {
         match connect_endpoint(&profile.data_endpoint) {
             Ok(upstream) => {
@@ -754,6 +792,120 @@ fn read_response_prefix(upstream: &mut TcpStream) -> Result<Vec<u8>, String> {
             return Ok(buffer);
         }
     }
+}
+
+/// A WebSocket handshake, which must reach the server intact instead of being
+/// flattened into a plain data-plane request.
+fn is_websocket_upgrade(request: &IncomingRequest) -> bool {
+    request.method == "GET"
+        && request.headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("upgrade")
+                && header.value.eq_ignore_ascii_case("websocket")
+        })
+        && request
+            .headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("sec-websocket-key"))
+}
+
+/// Unlike the single-request data path, an upgrade keeps its connection-management
+/// and `Sec-WebSocket-*` headers; only hop-by-hop credentials are replaced.
+fn upgrade_header_allowed(name: &str) -> bool {
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "x-opencodex-api-key"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+    )
+}
+
+fn upstream_upgrade_head(request: &IncomingRequest, endpoint: &Endpoint, key: &str) -> Vec<u8> {
+    let mut output = format!(
+        "{} {} {}\r\nHost: {}\r\n",
+        request.method,
+        request.target,
+        request.version,
+        authority(endpoint)
+    );
+    for header in &request.headers {
+        if upgrade_header_allowed(&header.name) {
+            output.push_str(&header.name);
+            output.push_str(": ");
+            output.push_str(&header.value);
+            output.push_str("\r\n");
+        }
+    }
+    output.push_str("X-OpenCodex-API-Key: ");
+    output.push_str(key);
+    output.push_str("\r\n\r\n");
+    output.into_bytes()
+}
+
+/// Carry one WebSocket session. A 101 switches to a bidirectional splice; anything
+/// else (the server's 426 when WebSockets are disabled) is forwarded as an ordinary
+/// single-request response so Codex can fall back to HTTP SSE.
+fn relay_websocket(
+    mut client: TcpStream,
+    mut upstream: TcpStream,
+    endpoint: &Endpoint,
+    request: IncomingRequest,
+    key: &str,
+) -> Result<(), String> {
+    let prepared = (|| -> Result<Vec<u8>, String> {
+        let head = upstream_upgrade_head(&request, endpoint, key);
+        upstream
+            .write_all(&head)
+            .map_err(|_| "Could not start the private OCX handshake")?;
+        copy_request_body(&mut client, &mut upstream, &request)?;
+        read_response_prefix(&mut upstream)
+    })();
+    let prefix = match prepared {
+        Ok(prefix) => prefix,
+        Err(error) if error == CLIENT_ABORTED => return Ok(()),
+        Err(error) => {
+            write_json_error(&mut client, 502, "data_transport_failed", &error);
+            return Ok(());
+        }
+    };
+    let (head, extra) = split_response_head(&prefix);
+    let switching_protocols = head_status(head) == Some(101);
+    let response_head = if switching_protocols {
+        head.to_vec()
+    } else {
+        client_response_head(head)
+    };
+    client
+        .write_all(&response_head)
+        .map_err(|_| "Could not start the private OCX response")?;
+    client
+        .write_all(extra)
+        .map_err(|_| "Could not start the private OCX response")?;
+    if !switching_protocols {
+        std::io::copy(&mut upstream, &mut client)
+            .map_err(|_| "The private OCX response stream ended unexpectedly")?;
+        return Ok(());
+    }
+    // A session outlives any request timeout: clear them so an idle WebSocket is not
+    // torn down mid-conversation.
+    let _ = client.set_read_timeout(None);
+    let _ = client.set_write_timeout(None);
+    let _ = upstream.set_read_timeout(None);
+    let _ = upstream.set_write_timeout(None);
+    let mut client_reader = client
+        .try_clone()
+        .map_err(|_| "Could not relay the WebSocket".to_string())?;
+    let mut upstream_writer = upstream
+        .try_clone()
+        .map_err(|_| "Could not relay the WebSocket".to_string())?;
+    let upload = thread::spawn(move || {
+        let _ = std::io::copy(&mut client_reader, &mut upstream_writer);
+    });
+    let _ = std::io::copy(&mut upstream, &mut client);
+    let _ = upload.join();
+    Ok(())
 }
 
 fn copy_request_body(
@@ -1456,6 +1608,7 @@ fn write_json_error(stream: &mut TcpStream, status: u16, code: &str, message: &s
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
+        426 => "Upgrade Required",
         502 => "Bad Gateway",
         _ => "Service Unavailable",
     };
@@ -1685,7 +1838,164 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let client = TcpStream::connect(address).unwrap();
         let (server, _) = listener.accept().unwrap();
+        for stream in [&client, &server] {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        }
         (client, server)
+    }
+
+    fn read_until(stream: &mut TcpStream, marker: &[u8]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 256];
+        while !buffer.windows(marker.len()).any(|window| window == marker) {
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "the stream ended before {marker:?}");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        buffer
+    }
+
+    fn upgrade_request() -> IncomingRequest {
+        parse_request_head(
+            "GET /v1/responses HTTP/1.1\r\nHost: relay\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13",
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_websocket_handshake_keeps_its_upgrade_headers() {
+        let request = upgrade_request();
+        assert!(is_websocket_upgrade(&request));
+        let endpoint = connection::parse_endpoint("http://100.120.114.62:10100").unwrap();
+
+        let head =
+            String::from_utf8(upstream_upgrade_head(&request, &endpoint, "vault-key")).unwrap();
+
+        assert!(head.starts_with("GET /v1/responses HTTP/1.1\r\n"));
+        assert!(head.contains("Host: 100.120.114.62:10100\r\n"));
+        assert!(head.contains("Upgrade: websocket\r\n"));
+        assert!(head.contains("Connection: Upgrade\r\n"));
+        assert!(head.contains("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"));
+        assert!(head.contains("Sec-WebSocket-Version: 13\r\n"));
+        assert!(head.contains("X-OpenCodex-API-Key: vault-key\r\n"));
+        // A plain data request is still flattened.
+        assert!(!is_websocket_upgrade(
+            &parse_request_head(
+                "POST /v1/responses HTTP/1.1\r\nContent-Length: 0",
+                Vec::new()
+            )
+            .unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_websocket_upgrade_is_spliced_after_101() {
+        let (mut client, relay_side) = socket_pair();
+        let listener = TcpListener::bind((RELAY_HOST, 0)).unwrap();
+        let upstream_address = listener.local_addr().unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut upstream, _) = listener.accept().unwrap();
+            let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+            let head = read_until(&mut upstream, b"\r\n\r\n");
+            let head = String::from_utf8_lossy(&head).to_string();
+            assert!(head.contains("Upgrade: websocket"), "{head}");
+            assert!(head.contains("X-OpenCodex-API-Key: vault-key"), "{head}");
+            upstream
+                .write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: abc\r\n\r\n",
+                )
+                .unwrap();
+            let mut payload = [0u8; 5];
+            upstream.read_exact(&mut payload).unwrap();
+            upstream.write_all(&payload).unwrap();
+            upstream.flush().unwrap();
+            // Hold the session open until the client goes away.
+            let mut sink = [0u8; 16];
+            let _ = upstream.read(&mut sink);
+        });
+        let upstream = TcpStream::connect(upstream_address).unwrap();
+        let endpoint = connection::parse_endpoint("http://100.120.114.62:10100").unwrap();
+        let relay = thread::spawn(move || {
+            relay_websocket(
+                relay_side,
+                upstream,
+                &endpoint,
+                upgrade_request(),
+                "vault-key",
+            )
+            .unwrap();
+        });
+
+        let head = read_until(&mut client, b"\r\n\r\n");
+        let head = String::from_utf8_lossy(&head).to_string();
+        assert!(
+            head.starts_with("HTTP/1.1 101 Switching Protocols"),
+            "{head}"
+        );
+        assert!(head.contains("Upgrade: websocket"), "{head}");
+        assert!(!head.contains("Connection: close"), "{head}");
+
+        client.write_all(b"hello").unwrap();
+        client.flush().unwrap();
+        let mut echo = [0u8; 5];
+        client.read_exact(&mut echo).unwrap();
+        assert_eq!(&echo, b"hello");
+
+        drop(client);
+        relay.join().unwrap();
+        upstream_thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_refused_upgrade_becomes_a_single_request_response() {
+        let (mut client, relay_side) = socket_pair();
+        let listener = TcpListener::bind((RELAY_HOST, 0)).unwrap();
+        let upstream_address = listener.local_addr().unwrap();
+        let upstream_thread = thread::spawn(move || {
+            let (mut upstream, _) = listener.accept().unwrap();
+            let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = read_until(&mut upstream, b"\r\n\r\n");
+            upstream
+                .write_all(
+                    b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nno",
+                )
+                .unwrap();
+        });
+        let upstream = TcpStream::connect(upstream_address).unwrap();
+        let endpoint = connection::parse_endpoint("http://100.120.114.62:10100").unwrap();
+        let relay = thread::spawn(move || {
+            relay_websocket(
+                relay_side,
+                upstream,
+                &endpoint,
+                upgrade_request(),
+                "vault-key",
+            )
+            .unwrap();
+        });
+
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            let read = client.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
+        }
+        let response = String::from_utf8_lossy(&response).to_string();
+        assert!(
+            response.starts_with("HTTP/1.1 426 Upgrade Required\r\n"),
+            "{response}"
+        );
+        assert!(response.contains("Connection: close\r\n"), "{response}");
+        assert!(!response.contains("keep-alive"), "{response}");
+        assert!(response.ends_with("no"), "{response}");
+
+        relay.join().unwrap();
+        upstream_thread.join().unwrap();
     }
 
     #[test]
