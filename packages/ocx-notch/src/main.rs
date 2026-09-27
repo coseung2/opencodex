@@ -3,6 +3,7 @@
 mod api;
 mod callback_relay;
 mod codex_connection;
+mod data_relay;
 mod model;
 mod models;
 mod subagents;
@@ -68,6 +69,7 @@ const KIRO_START_URL_EDIT_ID: i32 = 30_003;
 const KIRO_REGION_EDIT_ID: i32 = 30_004;
 const CONNECTION_URL_EDIT_ID: i32 = 30_005;
 const CONNECTION_TOKEN_EDIT_ID: i32 = 30_006;
+const CONNECTION_DATA_URL_EDIT_ID: i32 = 30_007;
 const DEFAULT_WIDTH: i32 = 640;
 const MIN_WIDTH: i32 = 320;
 const MAX_WIDTH: i32 = 1_200;
@@ -366,6 +368,8 @@ enum Update {
         system_memory: Option<SystemMemory>,
     },
     Health(Result<Health, String>),
+    /// Whether the loopback data relay is serving this machine's Codex routing.
+    Relay(Result<(), String>),
     MemoryDetails(Result<MemoryDetails, String>),
     Usage(Result<UsageResponse, String>),
     Logs(Result<RequestLogsResponse, String>),
@@ -405,6 +409,8 @@ struct ViewState {
     remote: bool,
     /// Why a stored remote connection is unusable, when it is.
     connection_error: Option<String>,
+    /// Why the loopback data relay is not serving Codex, when it is not.
+    relay_error: Option<String>,
     configs: Vec<ProviderConfig>,
     quotas: Vec<QuotaReport>,
     usage: Vec<UsageProvider>,
@@ -467,6 +473,7 @@ struct App {
     kiro_start_url_edit: Option<isize>,
     kiro_region_edit: Option<isize>,
     connection_url_edit: Option<isize>,
+    connection_data_url_edit: Option<isize>,
     connection_token_edit: Option<isize>,
     context_menu_open: bool,
     pause_overrides: HashMap<String, bool>,
@@ -519,6 +526,10 @@ impl App {
                         self.state.private_commit = 0;
                         self.state.status = error;
                     }
+                },
+                Update::Relay(result) => match result {
+                    Ok(()) => self.state.relay_error = None,
+                    Err(error) => self.state.relay_error = Some(error),
                 },
                 Update::MemoryDetails(result) => {
                     if let Ok(details) = result {
@@ -649,8 +660,12 @@ impl App {
     }
 
     fn desired_height(&self) -> i32 {
-        if self.provider_modal.is_some() {
-            return 560;
+        if let Some(modal) = &self.provider_modal {
+            return if matches!(modal, ProviderModal::Connection { .. }) {
+                660
+            } else {
+                560
+            };
         }
         if !self.expanded {
             return COLLAPSED_HEIGHT;
@@ -958,10 +973,24 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        Ok(Cli::Reconnect) => {
+        Ok(Cli::DataRelay) => {
+            if let Err(error) = data_relay::run() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Ok(Cli::Reconnect(data_origin)) => {
             let result = api::connection::saved_profile().and_then(|profile| {
                 let profile = profile.ok_or("No remote server is saved")?;
-                api::save_connection(Some(&profile.endpoint.base_url), Some(""))
+                let data_origin = data_origin
+                    .as_deref()
+                    .unwrap_or(&profile.data_endpoint.base_url);
+                api::save_connection(
+                    Some(&profile.endpoint.base_url),
+                    Some(""),
+                    Some(data_origin),
+                )
             });
             if let Err(error) = result {
                 eprintln!("{error}");
@@ -978,11 +1007,28 @@ fn main() {
             println!("Disconnected");
             return;
         }
-        Ok(Cli::Connect(base_url)) => {
+        Ok(Cli::Connect {
+            base_url,
+            data_origin,
+        }) => {
             // Token arrives on stdin, never on the command line, and is never echoed.
-            std::process::exit(match api::save_connection_from_stdin(&base_url) {
+            std::process::exit(
+                match api::save_connection_from_stdin(&base_url, data_origin.as_deref()) {
+                    Ok(()) => {
+                        println!("Connected to {}", api::connection_base_url());
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        1
+                    }
+                },
+            );
+        }
+        Ok(Cli::Local) => {
+            std::process::exit(match api::save_connection(None, None, None) {
                 Ok(()) => {
-                    println!("Connected to {}", api::connection_base_url());
+                    println!("Using the local OCX");
                     0
                 }
                 Err(error) => {
@@ -991,11 +1037,44 @@ fn main() {
                 }
             });
         }
-        Ok(Cli::Local) => {
-            std::process::exit(match api::save_connection(None, None) {
-                Ok(()) => {
-                    println!("Using the local OCX");
-                    0
+        Ok(Cli::SubagentCatalog(output_path)) => {
+            #[derive(Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct CatalogOutput {
+                schema_version: u8,
+                source: &'static str,
+                chosen: Vec<String>,
+                available: Vec<String>,
+                injection: InjectionModelResponse,
+            }
+
+            let result = (|| {
+                let models: SubagentModelsResponse = api::get_json("/api/subagent-models", 30_000)?;
+                let injection: InjectionModelResponse =
+                    api::get_json("/api/injection-model", 30_000)?;
+                serde_json::to_string(&CatalogOutput {
+                    schema_version: 1,
+                    source: if api::is_remote() { "remote" } else { "local" },
+                    chosen: models.chosen,
+                    available: models.available,
+                    injection,
+                })
+                .map_err(|error| format!("Could not encode the subagent catalog: {error}"))
+            })();
+            std::process::exit(match result {
+                Ok(json) => {
+                    match OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&output_path)
+                        .and_then(|mut file| file.write_all(json.as_bytes()))
+                    {
+                        Ok(()) => 0,
+                        Err(error) => {
+                            eprintln!("Could not write the subagent catalog: {error}");
+                            1
+                        }
+                    }
                 }
                 Err(error) => {
                     eprintln!("{error}");
@@ -1030,7 +1109,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: ocx-notch [--connect <http://host:port> | --local | --set-subagent-mode <v1|default|v2>]"
+                "usage: ocx-notch [--connect <management-url> [--data-origin <data-url>] | --reconnect [--data-origin <data-url>] | --disconnect | --local | --subagent-catalog-output <path> | --set-subagent-mode <v1|default|v2>]"
             );
             std::process::exit(2);
         }
@@ -1046,16 +1125,22 @@ fn main() {
 #[derive(Debug, PartialEq, Eq)]
 enum Cli {
     CodexToken(String),
-    Reconnect,
+    Reconnect(Option<String>),
     Disconnect,
+    DataRelay,
     Window,
     /// `--connect <base-url>`: read the OCX API key from stdin and store the
     /// remote profile.
-    Connect(String),
+    Connect {
+        base_url: String,
+        data_origin: Option<String>,
+    },
     /// `--local`: return to local mode and drop the stored credential.
     Local,
     /// Update the selected local or remote OCX through its management API.
     SetSubagentMode(subagents::MultiAgentMode),
+    /// Write the selected OCX instance's safe delegation catalog as JSON.
+    SubagentCatalog(PathBuf),
 }
 
 fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
@@ -1065,8 +1150,12 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
     };
     let mode = match first.as_str() {
         "--local" => Cli::Local,
-        "--reconnect" => Cli::Reconnect,
+        "--reconnect" => Cli::Reconnect(parse_data_origin(&mut args)?),
         "--disconnect" => Cli::Disconnect,
+        "--data-relay" => Cli::DataRelay,
+        "--subagent-catalog-output" => Cli::SubagentCatalog(PathBuf::from(
+            args.next().ok_or("Missing subagent catalog output path")?,
+        )),
         "--codex-token" => Cli::CodexToken(args.next().ok_or("Missing server origin")?),
         "--set-subagent-mode" => {
             let value = args.next().ok_or("Missing subagent mode")?;
@@ -1084,7 +1173,10 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
             let base_url = args
                 .next()
                 .ok_or_else(|| format!("{first} needs a server address"))?;
-            Cli::Connect(base_url)
+            Cli::Connect {
+                base_url,
+                data_origin: parse_data_origin(&mut args)?,
+            }
         }
         other => return Err(format!("Unknown option: {other}")),
     };
@@ -1092,6 +1184,18 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
         return Err("Too many arguments".into());
     }
     Ok(mode)
+}
+
+fn parse_data_origin(args: &mut impl Iterator<Item = String>) -> Result<Option<String>, String> {
+    let Some(option) = args.next() else {
+        return Ok(None);
+    };
+    if option != "--data-origin" {
+        return Err(format!("Unknown option: {option}"));
+    }
+    Ok(Some(
+        args.next().ok_or("--data-origin needs a server address")?,
+    ))
 }
 
 fn run() -> windows::core::Result<()> {
@@ -1202,6 +1306,7 @@ fn run() -> windows::core::Result<()> {
             kiro_start_url_edit: None,
             kiro_region_edit: None,
             connection_url_edit: None,
+            connection_data_url_edit: None,
             connection_token_edit: None,
             context_menu_open: false,
             pause_overrides: HashMap::new(),
@@ -1380,16 +1485,40 @@ fn start_workers(
     });
 
     let telemetry_tx = tx.clone();
-    thread::spawn(move || loop {
-        api::begin_poll();
-        if api::is_remote() && codex_connection::read_mode() != "disconnected" {
-            send_update(
-                hwnd,
-                &telemetry_tx,
-                Update::MemoryDetails(api::get_json("/api/system/memory", 8_000)),
-            );
+    thread::spawn(move || {
+        // Codex reaches the server through this loopback relay, so Notch owns
+        // keeping it alive: after a reboot or a crash config.toml still points at
+        // 127.0.0.1:10101, and without this supervision every Codex request fails
+        // until someone reconnects by hand.
+        let mut retry_at = Instant::now();
+        let mut relay_failure: Option<String> = None;
+        loop {
+            api::begin_poll();
+            if api::is_remote() && codex_connection::read_mode() != "disconnected" {
+                if Instant::now() >= retry_at {
+                    let relay = data_relay::ensure_running().map(|_| ());
+                    if relay.is_err() {
+                        // Back off so a relay that cannot start is not respawned
+                        // every few seconds.
+                        retry_at = Instant::now() + Duration::from_secs(15);
+                    }
+                    let failure = relay.as_ref().err().cloned();
+                    if failure != relay_failure {
+                        if let Some(error) = failure.as_ref() {
+                            append_diagnostic_log("data-relay", error);
+                        }
+                        relay_failure = failure;
+                    }
+                    send_update(hwnd, &telemetry_tx, Update::Relay(relay));
+                }
+                send_update(
+                    hwnd,
+                    &telemetry_tx,
+                    Update::MemoryDetails(api::get_json("/api/system/memory", 8_000)),
+                );
+            }
+            thread::sleep(Duration::from_secs(3));
         }
-        thread::sleep(Duration::from_secs(3));
     });
 
     thread::spawn(move || loop {
@@ -2533,6 +2662,7 @@ unsafe fn destroy_api_key_edit(app: &mut App) {
     // not linger in an edit control's buffer.
     for edit in [
         app.connection_url_edit.take(),
+        app.connection_data_url_edit.take(),
         app.connection_token_edit.take(),
     ]
     .into_iter()
@@ -2874,6 +3004,7 @@ fn connection_change_blocked(active_mutations: usize, login_waiting: bool) -> bo
 unsafe fn show_connection_modal(hwnd: HWND) {
     let remote = api::is_remote();
     let base_url = api::connection_base_url();
+    let saved_origins = api::saved_connection_origins();
     let busy = APP.get().is_some_and(|app| {
         let app = app.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         connection_change_busy(&app)
@@ -2894,13 +3025,19 @@ unsafe fn show_connection_modal(hwnd: HWND) {
             for (id, top, password, slot) in [
                 (
                     CONNECTION_URL_EDIT_ID,
-                    236,
+                    220,
                     false,
                     &mut app.connection_url_edit,
                 ),
                 (
+                    CONNECTION_DATA_URL_EDIT_ID,
+                    286,
+                    false,
+                    &mut app.connection_data_url_edit,
+                ),
+                (
                     CONNECTION_TOKEN_EDIT_ID,
-                    316,
+                    352,
                     true,
                     &mut app.connection_token_edit,
                 ),
@@ -2932,11 +3069,20 @@ unsafe fn show_connection_modal(hwnd: HWND) {
                 }
             }
             if let Some(edit) = app.connection_url_edit {
-                if remote {
+                if let Some((management_origin, _)) = saved_origins.as_ref() {
+                    let value: Vec<u16> = management_origin.encode_utf16().chain(Some(0)).collect();
+                    let _ = SetWindowTextW(HWND(edit as *mut _), PCWSTR(value.as_ptr()));
+                } else if remote {
                     let value: Vec<u16> = base_url.encode_utf16().chain(Some(0)).collect();
                     let _ = SetWindowTextW(HWND(edit as *mut _), PCWSTR(value.as_ptr()));
                 }
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(HWND(edit as *mut _));
+            }
+            if let (Some(edit), Some((_, data_origin))) =
+                (app.connection_data_url_edit, saved_origins.as_ref())
+            {
+                let value: Vec<u16> = data_origin.encode_utf16().chain(Some(0)).collect();
+                let _ = SetWindowTextW(HWND(edit as *mut _), PCWSTR(value.as_ptr()));
             }
         }
     });
@@ -3080,12 +3226,15 @@ unsafe fn submit_connection(hwnd: HWND, disconnect: bool) {
             submission = Some((None, app.modal_generation));
             return;
         }
-        let (Some(url_edit), Some(token_edit)) =
-            (app.connection_url_edit, app.connection_token_edit)
-        else {
+        let (Some(url_edit), Some(data_url_edit), Some(token_edit)) = (
+            app.connection_url_edit,
+            app.connection_data_url_edit,
+            app.connection_token_edit,
+        ) else {
             return;
         };
         let base_url = native_edit_text(url_edit);
+        let data_origin = native_edit_text(data_url_edit);
         let token = native_edit_text(token_edit);
         if base_url.trim().is_empty() {
             *error = Some("Enter the server address".into());
@@ -3093,7 +3242,7 @@ unsafe fn submit_connection(hwnd: HWND, disconnect: bool) {
         }
         *submitting = true;
         *error = None;
-        submission = Some((Some((base_url, token)), app.modal_generation));
+        submission = Some((Some((base_url, data_origin, token)), app.modal_generation));
     });
     let Some((remote, generation)) = submission else {
         return;
@@ -3112,12 +3261,13 @@ unsafe fn submit_connection(hwnd: HWND, disconnect: bool) {
             api::disconnect_codex()
         } else {
             match remote.as_mut() {
-                Some((base_url, token)) => {
-                    let outcome = api::save_connection(Some(base_url), Some(token));
+                Some((base_url, data_origin, token)) => {
+                    let outcome =
+                        api::save_connection(Some(base_url), Some(token), Some(data_origin));
                     token.as_bytes_mut().fill(0);
                     outcome
                 }
-                None => api::save_connection(None, None),
+                None => api::save_connection(None, None, None),
             }
         };
         drop(remote);
@@ -4728,7 +4878,11 @@ unsafe fn draw_app(dc: HDC, width: i32, height: i32, app: &mut App) {
         },
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
-    let ws = if app.state.working_set > 0 {
+    let ws = if let Some(error) = app.state.relay_error.as_ref().filter(|_| app.state.remote) {
+        // Codex cannot reach the server while the relay is down, so say that
+        // instead of reporting the remote process as merely unreachable.
+        format!("릴레이 끊김 · {error}")
+    } else if app.state.working_set > 0 {
         format!("WS {}", format_bytes(app.state.working_set))
     } else if codex_connection::read_mode() == "disconnected" {
         "연결 끊김".into()
@@ -7134,18 +7288,29 @@ unsafe fn draw_provider_modal(
                 set_text_color(dc, 0x009da3ad);
                 draw_text(
                     dc,
-                    "서버에서 발급받은 API 키를 입력하세요. 권한은 자동으로 인식됩니다. 같은 서버는 비워 두면 저장된 키를 사용합니다.",
-                    RECT { left: 60, top: 142, right: width - 60, bottom: 200 },
+                    "관리 주소는 Notch 화면에 사용하고, 데이터 주소는 Codex 요청에 사용합니다. 같은 서버는 API 키를 비워 두면 저장된 키를 사용합니다.",
+                    RECT { left: 60, top: 140, right: width - 60, bottom: 188 },
                     DT_LEFT | DT_WORDBREAK,
                 );
                 draw_text(
                     dc,
-                    "서버 주소 (예: https://ocx.example.com)",
+                    "관리 주소 (예: https://ocx.example.com)",
                     RECT {
                         left: 60,
-                        top: 210,
+                        top: 194,
                         right: width - 60,
-                        bottom: 234,
+                        bottom: 218,
+                    },
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                draw_text(
+                    dc,
+                    "데이터 주소 (비우면 관리 주소 사용)",
+                    RECT {
+                        left: 60,
+                        top: 260,
+                        right: width - 60,
+                        bottom: 284,
                     },
                     DT_LEFT | DT_SINGLELINE | DT_VCENTER,
                 );
@@ -7154,17 +7319,17 @@ unsafe fn draw_provider_modal(
                     "OCX API 키",
                     RECT {
                         left: 60,
-                        top: 290,
+                        top: 326,
                         right: width - 60,
-                        bottom: 314,
+                        bottom: 350,
                     },
                     DT_LEFT | DT_SINGLELINE | DT_VCENTER,
                 );
                 set_text_color(dc, 0x008e949e);
                 draw_text(
                     dc,
-                    "주소·인증·모델 목록을 함께 적용합니다. 실행 중인 Codex는 재시작해야 합니다. 접속 끊기는 VM을 종료하지 않습니다.",
-                    RECT { left: 60, top: 356, right: width - 60, bottom: 404 },
+                    "Codex는 이 PC의 압축 릴레이를 거쳐 데이터 주소로 연결됩니다. 실행 중인 Codex는 재시작해야 합니다.",
+                    RECT { left: 60, top: 394, right: width - 60, bottom: 434 },
                     DT_LEFT | DT_WORDBREAK,
                 );
             } else {
@@ -7178,9 +7343,9 @@ unsafe fn draw_provider_modal(
             }
             let save = RECT {
                 left: width - 174,
-                top: 412,
+                top: 500,
                 right: width - 60,
-                bottom: 448,
+                bottom: 536,
             };
             draw_native_button(
                 dc,
@@ -7196,9 +7361,9 @@ unsafe fn draw_provider_modal(
                 app.modal_hits.push((save, ModalHit::ConnectionSave));
                 let manage = RECT {
                     left: 60,
-                    top: 366,
+                    top: 448,
                     right: 196,
-                    bottom: 402,
+                    bottom: 484,
                 };
                 draw_native_button(dc, manage, "발급 키 관리", false);
                 app.modal_hits.push((manage, ModalHit::IssuedKeysOpen));
@@ -7220,9 +7385,9 @@ unsafe fn draw_provider_modal(
                     error,
                     RECT {
                         left: 60,
-                        top: 456,
+                        top: 544,
                         right: width - 60,
-                        bottom: 524,
+                        bottom: 624,
                     },
                     DT_LEFT | DT_WORDBREAK,
                 );
@@ -7909,7 +8074,7 @@ fn diagnostic_log_path() -> Option<PathBuf> {
         .map(|root| PathBuf::from(root).join("OCX Notch").join("ocx-notch.log"))
 }
 
-fn append_diagnostic_log(kind: &str, detail: &str) {
+pub(crate) fn append_diagnostic_log(kind: &str, detail: &str) {
     let Some(path) = diagnostic_log_path() else {
         return;
     };
@@ -8166,7 +8331,16 @@ mod account_control_tests {
         assert_eq!(parse_cli(Vec::<String>::new()).unwrap(), Cli::Window);
         assert_eq!(
             parse_cli(vec!["--reconnect".into()]).unwrap(),
-            Cli::Reconnect
+            Cli::Reconnect(None)
+        );
+        assert_eq!(
+            parse_cli(vec![
+                "--reconnect".into(),
+                "--data-origin".into(),
+                "http://100.120.114.62:10100".into()
+            ])
+            .unwrap(),
+            Cli::Reconnect(Some("http://100.120.114.62:10100".into()))
         );
         assert_eq!(
             parse_cli(vec!["--disconnect".into()]).unwrap(),
@@ -8183,6 +8357,15 @@ mod account_control_tests {
         );
         assert_eq!(parse_cli(vec!["--local".into()]).unwrap(), Cli::Local);
         assert_eq!(
+            parse_cli(vec![
+                "--subagent-catalog-output".into(),
+                "C:\\Temp\\catalog.json".into()
+            ])
+            .unwrap(),
+            Cli::SubagentCatalog(PathBuf::from("C:\\Temp\\catalog.json"))
+        );
+        assert!(parse_cli(vec!["--subagent-catalog-output".into()]).is_err());
+        assert_eq!(
             parse_cli(vec!["--set-subagent-mode".into(), "v1".into()]).unwrap(),
             Cli::SetSubagentMode(subagents::MultiAgentMode::V1)
         );
@@ -8193,7 +8376,23 @@ mod account_control_tests {
         assert!(parse_cli(vec!["--set-subagent-mode".into(), "v3".into()]).is_err());
         assert_eq!(
             parse_cli(vec!["--connect".into(), "http://10.0.0.5:10100".into()]).unwrap(),
-            Cli::Connect("http://10.0.0.5:10100".into())
+            Cli::Connect {
+                base_url: "http://10.0.0.5:10100".into(),
+                data_origin: None,
+            }
+        );
+        assert_eq!(
+            parse_cli(vec![
+                "--connect".into(),
+                "https://ocx.example.com".into(),
+                "--data-origin".into(),
+                "http://100.120.114.62:10100".into()
+            ])
+            .unwrap(),
+            Cli::Connect {
+                base_url: "https://ocx.example.com".into(),
+                data_origin: Some("http://100.120.114.62:10100".into()),
+            }
         );
         // A token passed on the command line is refused rather than accepted:
         // argv is readable by every process on the machine.
@@ -8204,6 +8403,12 @@ mod account_control_tests {
         ])
         .is_err());
         assert!(parse_cli(vec!["--connect".into()]).is_err());
+        assert!(parse_cli(vec![
+            "--connect".into(),
+            "https://ocx.example.com".into(),
+            "--data-origin".into(),
+        ])
+        .is_err());
         assert!(parse_cli(vec!["--token".into()]).is_err());
     }
 
@@ -8818,7 +9023,10 @@ mod account_control_tests {
             "2028.03.01 00:00 KST"
         );
         assert_eq!(format_credit_timestamp("unknown"), "unknown");
-        assert_eq!(format_credit_timestamp("2026-13-01T00:00:00Z"), "2026-13-01T00:00:00Z");
+        assert_eq!(
+            format_credit_timestamp("2026-13-01T00:00:00Z"),
+            "2026-13-01T00:00:00Z"
+        );
     }
 
     #[test]

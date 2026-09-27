@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 pub const FEATURED_MAX: usize = 5;
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SubagentModelsResponse {
     #[serde(default)]
     pub chosen: Vec<String>,
@@ -11,7 +11,7 @@ pub struct SubagentModelsResponse {
     pub available: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DelegationModelOption {
     #[serde(default)]
@@ -22,7 +22,7 @@ pub struct DelegationModelOption {
     pub namespaced: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InjectionModelResponse {
     #[serde(default = "default_true")]

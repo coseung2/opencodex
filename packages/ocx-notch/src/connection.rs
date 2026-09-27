@@ -1,10 +1,10 @@
 //! Remote connection profile for OCX Notch.
 //!
-//! One optional profile: a nonsecret management base URL plus the protected
-//! management credential. The credential never touches disk in plaintext — it
-//! lives in Windows Credential Manager (generic credential, per-user vault),
-//! which is why there is no JSON/file representation of it anywhere in this
-//! process. Absence of a profile means local mode, which stays the default.
+//! One optional profile: separate nonsecret management and data origins plus
+//! the protected management credential. The credential never touches disk in
+//! plaintext — it lives in Windows Credential Manager (generic credential,
+//! per-user vault). Absence of a profile means local mode, which stays the
+//! default.
 
 use super::wide;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -23,6 +23,7 @@ use windows::Win32::Security::Credentials::{
 
 /// Credential Manager target for the single connection profile.
 const CREDENTIAL_TARGET: &str = "OCX Notch:remote-connection";
+const DATA_ORIGIN_TARGET: &str = "OCX Notch:remote-data-origin";
 const CREDENTIAL_COMMENT: &str = "OCX Notch remote management connection";
 /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`: nothing stored yet, which is not a failure.
 const E_NOT_FOUND: i32 = -2147023728; // 0x80070490
@@ -47,7 +48,11 @@ pub struct Endpoint {
 /// path may format the token into a log line, window state, or error message.
 #[derive(Clone)]
 pub struct Profile {
+    /// Public management/API origin used by the Notch UI.
     pub endpoint: Endpoint,
+    /// Responses data origin used behind the local relay. It may be the same
+    /// as `endpoint` for legacy profiles, or a private/Tailscale origin.
+    pub data_endpoint: Endpoint,
     pub token: String,
 }
 
@@ -280,12 +285,12 @@ fn set_state(next: Connection) {
 /// profile in place, both on disk and in this process.
 pub fn commit(profile: Profile) -> Result<(), String> {
     let previous = saved_profile()?;
-    store_credential(&profile)?;
+    if let Err(error) = store_credential(&profile) {
+        let _ = restore_profile(previous.as_ref());
+        return Err(error);
+    }
     if let Err(error) = crate::codex_connection::write_mode("remote") {
-        let restored = match previous {
-            Some(previous) => store_credential(&previous),
-            None => delete_credential(),
-        };
+        let restored = restore_profile(previous.as_ref());
         return Err(if restored.is_err() {
             format!("{error}; could not restore the previous server credential")
         } else {
@@ -358,6 +363,18 @@ fn load_stored() -> Connection {
 /// remote mode stays selected and reports why, so no control silently reverts
 /// to the local process.
 fn interpret_stored(entry: StoredEntry) -> Connection {
+    let management_origin = entry.base_url.clone();
+    let data_origin = management_origin
+        .as_deref()
+        .map(read_data_origin)
+        .unwrap_or(Ok(None));
+    interpret_stored_with_data_origin(entry, data_origin)
+}
+
+fn interpret_stored_with_data_origin(
+    entry: StoredEntry,
+    data_origin: Result<Option<String>, String>,
+) -> Connection {
     let unusable =
         |base_url: Option<String>, reason: String| Connection::Unavailable { base_url, reason };
     let Some(base_url) = entry.base_url else {
@@ -385,7 +402,34 @@ fn interpret_stored(entry: StoredEntry) -> Connection {
     if validate_token(&token).is_err() {
         return unusable(stored_base_url, "The saved OCX API key is unusable".into());
     }
-    Connection::Remote(Profile { endpoint, token })
+    let data_endpoint = match data_origin {
+        Ok(Some(data_origin)) => match parse_endpoint(&data_origin) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return unusable(
+                    stored_base_url,
+                    format!("The saved data origin is invalid: {error}"),
+                )
+            }
+        },
+        Ok(None) => endpoint.clone(),
+        Err(reason) => return unusable(stored_base_url, reason),
+    };
+    Connection::Remote(Profile {
+        endpoint,
+        data_endpoint,
+        token,
+    })
+}
+
+fn read_data_origin(management_origin: &str) -> Result<Option<String>, String> {
+    let Some(entry) = read_named_credential(DATA_ORIGIN_TARGET)? else {
+        return Ok(None);
+    };
+    if entry.base_url.as_deref() != Some(management_origin) {
+        return Ok(None);
+    }
+    Ok(entry.token)
 }
 
 fn read_credential() -> Result<Option<StoredEntry>, String> {
@@ -440,7 +484,19 @@ fn store_credential(profile: &Profile) -> Result<(), String> {
         CREDENTIAL_TARGET,
         &profile.endpoint.base_url,
         &profile.token,
+    )?;
+    write_secret(
+        DATA_ORIGIN_TARGET,
+        &profile.endpoint.base_url,
+        &profile.data_endpoint.base_url,
     )
+}
+
+fn restore_profile(profile: Option<&Profile>) -> Result<(), String> {
+    match profile {
+        Some(profile) => store_credential(profile),
+        None => delete_credential(),
+    }
 }
 
 pub fn write_secret(name: &str, username: &str, secret: &str) -> Result<(), String> {
@@ -465,7 +521,9 @@ pub fn write_secret(name: &str, username: &str, secret: &str) -> Result<(), Stri
 }
 
 fn delete_credential() -> Result<(), String> {
-    delete_secret(CREDENTIAL_TARGET)
+    let management = delete_secret(CREDENTIAL_TARGET);
+    let data = delete_secret(DATA_ORIGIN_TARGET);
+    management.and(data)
 }
 
 pub fn delete_secret(name: &str) -> Result<(), String> {
@@ -589,6 +647,40 @@ mod tests {
             }),
             Connection::Remote(_)
         ));
+    }
+
+    #[test]
+    fn legacy_profiles_default_the_data_origin_to_management() {
+        let connection = interpret_stored_with_data_origin(
+            StoredEntry {
+                base_url: Some("https://ocx.example.com".into()),
+                token: Some("ocx_admin_abc".into()),
+            },
+            Ok(None),
+        );
+        let Connection::Remote(profile) = connection else {
+            panic!("legacy stored profile did not load");
+        };
+        assert_eq!(profile.data_endpoint, profile.endpoint);
+    }
+
+    #[test]
+    fn stored_data_origin_is_parsed_separately_from_management() {
+        let connection = interpret_stored_with_data_origin(
+            StoredEntry {
+                base_url: Some("https://ocx.example.com".into()),
+                token: Some("ocx_admin_abc".into()),
+            },
+            Ok(Some("http://100.120.114.62:10100".into())),
+        );
+        let Connection::Remote(profile) = connection else {
+            panic!("stored split profile did not load");
+        };
+        assert_eq!(profile.endpoint.base_url, "https://ocx.example.com");
+        assert_eq!(
+            profile.data_endpoint.base_url,
+            "http://100.120.114.62:10100"
+        );
     }
 
     #[test]

@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -84,6 +92,14 @@ describe("ocx-notch package staging", () => {
     expect(launcher).toContain('"ocx-notch.exe"');
     expect(launcher).toContain("@coseung2/opencodex");
     expect(launcher).toContain("OCX_PACKAGE_VERSION: packageVersion()");
+    expect(launcher).toContain('process.argv.includes("--subagent-catalog")');
+    expect(launcher).toContain('["--subagent-catalog-output", output]');
+    expect(launcher).toContain('mkdtempSync(join(tmpdir(), "ocx-notch-catalog-")');
+    expect(launcher).toContain("could not read the delegation catalog");
+    // The scratch directory must be removed before the process exits.
+    expect(launcher).toContain("maxRetries: 5");
+    expect(launcher).toContain("could not remove the scratch directory");
+    expect(launcher.indexOf("rmSync(scratch")).toBeLessThan(launcher.lastIndexOf("process.exit(status)"));
     expect(launcher).not.toContain("@coseung2/ocx-notch");
 
     const version = spawnSync(process.execPath, ["bin/ocx-notch.mjs", "--version"], {
@@ -93,6 +109,34 @@ describe("ocx-notch package staging", () => {
     expect(version.stdout.trim()).toBe(
       `ocx-notch 0.1.1 (bundled with @coseung2/opencodex ${pkg.version})`,
     );
+  });
+
+  test("catalog queries remove their scratch directory even when they fail", () => {
+    if (process.platform !== "win32") return; // the launcher ships for Windows only
+    const root = temporaryRoot();
+    const launcherPath = join(root, "bin", "ocx-notch.mjs");
+    const nativePath = join(root, "vendor", "ocx-notch", "win32-x64", "ocx-notch.exe");
+    const scratchRoot = join(root, "scratch");
+    mkdirSync(join(root, "bin"), { recursive: true });
+    mkdirSync(dirname(nativePath), { recursive: true });
+    mkdirSync(scratchRoot, { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ name: "@coseung2/opencodex", version: "0.0.0-test" }),
+    );
+    writeFileSync(launcherPath, readFileSync("bin/ocx-notch.mjs"));
+    // Any Windows executable stands in for the native companion: the behaviour
+    // under test is the cleanup around a failed query, not the query itself.
+    copyFileSync(process.execPath, nativePath);
+
+    const result = spawnSync(process.execPath, [launcherPath, "--subagent-catalog"], {
+      encoding: "utf8",
+      env: { ...process.env, TMPDIR: scratchRoot, TMP: scratchRoot, TEMP: scratchRoot },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("could not read the delegation catalog");
+    expect(readdirSync(scratchRoot)).toEqual([]);
   });
 
   test("native context menu keeps its foreground guard and Korean labels", () => {

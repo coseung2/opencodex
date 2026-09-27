@@ -41,6 +41,13 @@ struct Target {
     token: Option<String>,
 }
 
+fn data_target(profile: &Profile, key: String) -> Target {
+    Target {
+        endpoint: profile.data_endpoint.clone(),
+        token: Some(key),
+    }
+}
+
 fn direct_key_after_create_error(
     error: String,
     supplied_key: &str,
@@ -102,6 +109,14 @@ pub fn connection_base_url() -> String {
     }
 }
 
+/// The nonsecret management and data origins saved for the connection editor.
+pub fn saved_connection_origins() -> Option<(String, String)> {
+    connection::saved_profile()
+        .ok()
+        .flatten()
+        .map(|profile| (profile.endpoint.base_url, profile.data_endpoint.base_url))
+}
+
 /// Why a stored remote connection is unusable, when it is. `None` in local mode
 /// and when the profile loaded cleanly.
 pub fn connection_error() -> Option<String> {
@@ -116,11 +131,16 @@ pub fn connection_error() -> Option<String> {
 /// admin API key or the legacy server management token. A remote profile is
 /// probed before it is committed, so a failed update leaves the previous
 /// profile untouched.
-pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<(), String> {
+pub fn save_connection(
+    base_url: Option<&str>,
+    token: Option<&str>,
+    data_origin: Option<&str>,
+) -> Result<(), String> {
     let (Some(base_url), Some(token)) = (base_url, token) else {
-        if base_url.is_some() || token.is_some() {
+        if base_url.is_some() || token.is_some() || data_origin.is_some() {
             return Err("Remote mode needs both a server address and a token".into());
         }
+        let previous_profile = connection::saved_profile()?;
         let config_rollback = crate::codex_connection::configure(None, None)?;
         let environment = match crate::codex_connection::remove_owned_admission_environment() {
             Ok(environment) => environment,
@@ -133,9 +153,20 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
             rollback_codex_client_state(&config_rollback, &environment)?;
             return Err(error);
         }
+        if let Err(error) = crate::data_relay::stop() {
+            if let Some(profile) = previous_profile {
+                let _ = connection::commit(profile);
+            }
+            rollback_codex_client_state(&config_rollback, &environment)?;
+            return Err(error);
+        }
         return Ok(());
     };
     let endpoint = connection::parse_endpoint(base_url)?;
+    let data_endpoint = match data_origin.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(data_origin) => connection::parse_endpoint(data_origin)?,
+        None => endpoint.clone(),
+    };
     let explicit_token = !token.trim().is_empty();
     let token = if !explicit_token {
         connection::saved_profile()?
@@ -146,8 +177,14 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         token.trim().to_string()
     };
     connection::validate_token(&token)?;
-    let profile = Profile { endpoint, token };
+    let profile = Profile {
+        endpoint,
+        data_endpoint,
+        token,
+    };
     let previous_profile = connection::saved_profile()?;
+    let previous_connection_needed_relay =
+        previous_profile.is_some() && crate::codex_connection::read_mode() == "remote";
     probe_profile(&profile)?;
     let target = Target {
         endpoint: profile.endpoint.clone(),
@@ -169,10 +206,7 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
     };
     let stored = if let Some(key) = stored {
         connection::validate_token(&key.key)?;
-        let data = Target {
-            endpoint: profile.endpoint.clone(),
-            token: Some(key.key.clone()),
-        };
+        let data = data_target(&profile, key.key.clone());
         match request_to(&data, "GET", "/v1/models", None, 10_000) {
             Ok(_) => Some(key),
             Err(error) if is_http_status(&error, 401) => None,
@@ -201,10 +235,7 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         connection::validate_token(&key.key)?;
         (key, created)
     };
-    let data = Target {
-        endpoint: profile.endpoint.clone(),
-        token: Some(key.key.clone()),
-    };
+    let data = data_target(&profile, key.key.clone());
     connection::validate_token(data.token.as_deref().unwrap_or_default())?;
     if request_to(&data, "GET", "/v1/models", None, 10_000).is_err() {
         cleanup_new_server_key(&target, &key, created_this_attempt);
@@ -219,24 +250,33 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
             return Err("The server rejected the dedicated OCX Responses admission header".into());
         }
     }
-    let config_rollback = match crate::codex_connection::configure(Some(&origin), Some(&catalog)) {
-        Ok(config) => config,
+    let relay_started = match crate::data_relay::ensure_running() {
+        Ok(started) => started,
         Err(error) => {
             cleanup_new_server_key(&target, &key, created_this_attempt);
             return Err(error);
         }
     };
-    let previous_environment =
-        match crate::codex_connection::install_admission_environment(&key.key) {
-            Ok(environment) => environment,
-            Err(error) => {
-                let _ = crate::codex_connection::rollback_config_update(&config_rollback);
-                cleanup_new_server_key(&target, &key, created_this_attempt);
-                return Err(error);
-            }
-        };
+    let config_rollback = match crate::codex_connection::configure(Some(&origin), Some(&catalog)) {
+        Ok(config) => config,
+        Err(error) => {
+            stop_new_relay(relay_started, previous_connection_needed_relay);
+            cleanup_new_server_key(&target, &key, created_this_attempt);
+            return Err(error);
+        }
+    };
+    let previous_environment = match crate::codex_connection::remove_owned_admission_environment() {
+        Ok(environment) => environment,
+        Err(error) => {
+            let _ = crate::codex_connection::rollback_config_update(&config_rollback);
+            stop_new_relay(relay_started, previous_connection_needed_relay);
+            cleanup_new_server_key(&target, &key, created_this_attempt);
+            return Err(error);
+        }
+    };
     if let Err(error) = crate::codex_connection::save_key(&origin, &key) {
         let rollback = rollback_codex_client_state(&config_rollback, &previous_environment);
+        stop_new_relay(relay_started, previous_connection_needed_relay);
         cleanup_new_server_key(&target, &key, created_this_attempt);
         rollback?;
         return Err(error);
@@ -244,6 +284,7 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
     if let Err(error) = connection::commit(profile) {
         let routing_rollback = rollback_codex_client_state(&config_rollback, &previous_environment);
         let key_rollback = restore_saved_data_key(&origin, previous_key.as_ref());
+        stop_new_relay(relay_started, previous_connection_needed_relay);
         cleanup_new_server_key(&target, &key, created_this_attempt);
         routing_rollback?;
         key_rollback?;
@@ -267,6 +308,12 @@ pub fn save_connection(base_url: Option<&str>, token: Option<&str>) -> Result<()
         }
     }
     Ok(())
+}
+
+fn stop_new_relay(relay_started: bool, previous_connection_needed_relay: bool) {
+    if relay_started && !previous_connection_needed_relay {
+        let _ = crate::data_relay::stop();
+    }
 }
 
 fn rollback_codex_client_state(
@@ -317,8 +364,13 @@ pub fn disconnect_codex() -> Result<(), String> {
             return Err(error);
         }
     };
+    if let Err(error) = crate::data_relay::stop() {
+        let _ = rollback_codex_client_state(&config_rollback, &environment);
+        return Err(error);
+    }
     let key_target = crate::codex_connection::key_target(&profile.endpoint.base_url);
     if let Err(error) = connection::delete_secret(&key_target) {
+        let _ = crate::data_relay::ensure_running();
         let _ = rollback_codex_client_state(&config_rollback, &environment);
         return Err(error);
     }
@@ -326,6 +378,7 @@ pub fn disconnect_codex() -> Result<(), String> {
         if let Some(saved_key) = saved_key.as_ref() {
             let _ = crate::codex_connection::save_key(&profile.endpoint.base_url, saved_key);
         }
+        let _ = crate::data_relay::ensure_running();
         let _ = rollback_codex_client_state(&config_rollback, &environment);
         return Err(error);
     }
@@ -344,6 +397,7 @@ pub fn disconnect_codex() -> Result<(), String> {
                     let _ =
                         crate::codex_connection::save_key(&profile.endpoint.base_url, saved_key);
                 }
+                let _ = crate::data_relay::ensure_running();
                 let _ = rollback_codex_client_state(&config_rollback, &environment);
                 return Err(
                     "Could not revoke the Codex connection on the server; reconnect and retry"
@@ -371,7 +425,7 @@ pub fn sync_codex_catalog() -> Result<(), String> {
 
 /// Install a connection profile without ever placing the token on a command
 /// line: the caller passes the address, the token is read from stdin.
-pub fn save_connection_from_stdin(base_url: &str) -> Result<(), String> {
+pub fn save_connection_from_stdin(base_url: &str, data_origin: Option<&str>) -> Result<(), String> {
     let mut token = String::new();
     std::io::stdin()
         .read_to_string(&mut token)
@@ -380,7 +434,7 @@ pub fn save_connection_from_stdin(base_url: &str) -> Result<(), String> {
     if token.is_empty() {
         return Err("No token was supplied on stdin".into());
     }
-    save_connection(Some(base_url), Some(token))
+    save_connection(Some(base_url), Some(token), data_origin)
 }
 
 /// Confirm the endpoint answers and the credential is accepted before the
@@ -1193,8 +1247,10 @@ mod tests {
     }
 
     fn remote_profile(base_url: &str, token: &str) -> Profile {
+        let endpoint = connection::parse_endpoint(base_url).expect("endpoint");
         Profile {
-            endpoint: connection::parse_endpoint(base_url).expect("endpoint"),
+            data_endpoint: endpoint.clone(),
+            endpoint,
             token: token.to_string(),
         }
     }
@@ -1216,20 +1272,28 @@ mod tests {
     #[test]
     fn remote_requests_use_the_remote_origin_and_only_the_profile_credential() {
         let _guard = connection_guard();
-        connection::override_active(Connection::Remote(remote_profile(
-            "http://100.120.114.62:10100",
-            "ocx_admin_remote",
-        )));
+        let mut profile = remote_profile("https://ocx.example.com", "ocx_admin_remote");
+        profile.data_endpoint = connection::parse_endpoint("http://100.120.114.62:10100").unwrap();
+        connection::override_active(Connection::Remote(profile));
 
         assert!(is_remote());
-        assert_eq!(connection_base_url(), "http://100.120.114.62:10100");
+        assert_eq!(connection_base_url(), "https://ocx.example.com");
         let target = active_target().expect("remote target");
-        assert_eq!(target.endpoint.host, "100.120.114.62");
+        assert_eq!(target.endpoint.host, "ocx.example.com");
         assert_eq!(target.token.as_deref(), Some("ocx_admin_remote"));
         let headers = request_headers(&target, true);
-        assert!(headers.contains("Origin: http://100.120.114.62:10100\r\n"));
+        assert!(headers.contains("Origin: https://ocx.example.com\r\n"));
         assert!(headers.contains("X-OpenCodex-API-Key: ocx_admin_remote\r\n"));
         assert!(headers.contains("Content-Type: application/json\r\n"));
+
+        let active = connection::active();
+        let Connection::Remote(profile) = active else {
+            panic!("remote profile was not active");
+        };
+        let data = data_target(&profile, "ocx_data_remote".into());
+        assert_eq!(data.endpoint.host, "100.120.114.62");
+        assert_eq!(data.endpoint.port, 10_100);
+        assert_eq!(data.token.as_deref(), Some("ocx_data_remote"));
 
         connection::override_active(Connection::Local);
     }
@@ -1359,10 +1423,18 @@ mod tests {
     fn saving_a_connection_validates_before_it_touches_the_stored_profile() {
         let _guard = connection_guard();
 
-        assert!(save_connection(Some("http://10.0.0.5:10100/api"), Some("ocx_admin_abc")).is_err());
-        assert!(save_connection(Some("http://10.0.0.5:10100"), Some("bad\r\ntoken")).is_err());
-        assert!(save_connection(Some("http://10.0.0.5:10100"), None).is_err());
-        assert!(save_connection(None, Some("ocx_admin_abc")).is_err());
+        assert!(save_connection(
+            Some("http://10.0.0.5:10100/api"),
+            Some("ocx_admin_abc"),
+            None
+        )
+        .is_err());
+        assert!(
+            save_connection(Some("http://10.0.0.5:10100"), Some("bad\r\ntoken"), None).is_err()
+        );
+        assert!(save_connection(Some("http://10.0.0.5:10100"), None, None).is_err());
+        assert!(save_connection(None, Some("ocx_admin_abc"), None).is_err());
+        assert!(save_connection(None, None, Some("http://10.0.0.5:10100")).is_err());
         // A rejected update must not have switched this process to remote mode.
         assert!(!is_remote());
     }

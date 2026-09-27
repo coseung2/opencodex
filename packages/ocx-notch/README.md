@@ -72,7 +72,7 @@ server {
     ssl_certificate /etc/letsencrypt/live/ocx.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/ocx.example.com/privkey.pem;
 
-    client_max_body_size 64m;
+    client_max_body_size 100m;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -81,6 +81,7 @@ server {
     proxy_set_header Authorization $http_authorization;
     proxy_set_header Connection "";
     proxy_buffering off;
+    proxy_request_buffering off;
     proxy_cache off;
     proxy_read_timeout 600s;
     proxy_send_timeout 600s;
@@ -91,6 +92,28 @@ server {
     location / { return 404; }
 }
 ```
+
+`client_max_body_size` must cover the largest turn you expect to proxy. OCX accepts
+up to 256 MiB and enforces that ceiling itself, while Cloudflare applies a plan-specific
+upload limit before the request reaches the origin (currently 100 MB on Free and Pro,
+200 MB on Business, and up to 5 GB on Enterprise). A larger origin limit only raises
+the ceiling for clients that reach the origin directly. `proxy_request_buffering off`
+streams large request bodies straight to OCX instead of spooling them to disk first.
+
+For remote Codex clients that can join the server's private network, use the private
+OCX endpoint as the Responses data origin and keep the public HTTPS origin for Notch
+management and bounded fallback. Remote Notch keeps Codex on its built-in `openai`
+provider and points `openai_base_url` at an authenticated loopback relay. This retains
+Codex's native request compression for long image-heavy histories. The relay reads the
+client data key from Windows Credential Manager, forwards the encoded body to the
+private origin, and falls back to public HTTPS only when the encoded `Content-Length`
+is at most 90 MiB. The private listener must remain firewalled from the public Internet.
+
+The relay also publishes a per-user control token in Windows Credential Manager. Its
+control endpoints require the caller to prove possession of that token with a
+purpose-bound HMAC-SHA-256 proof, so another local account cannot probe, stop, or
+replace the relay. A listener that cannot prove ownership is reported to the user
+instead of being shut down.
 
 Run `sudo nginx -t` before reloading nginx. OCX validates every data key and
 independently authenticates management requests.
@@ -119,28 +142,45 @@ providers and enabled models must come from the server's own configuration.
 
 1. Launch Notch, right-click it, and open **연결 설정…** (Connection settings).
 2. Select **원격 서버** (Remote server).
-3. Enter your server origin, such as `https://ocx.example.com`, without `/v1`,
-   `/api`, query parameters, or a token in the URL.
+3. Enter the management origin, such as `https://ocx.example.com`, and the private
+   data origin, such as `http://100.64.12.34:10100`, without `/v1`, `/api`, query
+   parameters, or credentials in either URL.
 4. Enter an OCX API key with at least the `viewer` role and click **접속**
    (Connect). The legacy server management token remains supported. When
    reconnecting to the same saved address, leave the field empty to reuse the
    saved credential.
-5. Fully close and reopen Codex so it inherits the new user environment value.
-   Start a new conversation if an existing thread retains its previous provider,
+5. Start a new Codex conversation if an existing thread retains its previous route,
    then confirm that a new request appears in the VM's logs.
 
 Connect detects the key's effective permissions, downloads the server catalog,
 and checks Responses authentication before saving Codex routing. A `viewer` or
 `operator` key is reused directly because it cannot mint credentials. An admin
 key or legacy management token creates or reuses a client-specific data key.
-Credentials and ownership metadata live in Windows Credential Manager. Notch writes
-the admission key to the current Windows user's `OPENCODEX_NOTCH_API_AUTH_TOKEN`
-environment value; `config.toml` contains only an `env_http_headers` reference.
-The generated provider sets `requires_openai_auth = true`, so Codex keeps its own
-ChatGPT login and sends that bearer separately.
+Credentials and ownership metadata live in Windows Credential Manager. The admission
+key never enters `config.toml` or the user environment; the loopback relay injects it.
 
-Notch updates `CODEX_HOME/config.toml` (normally `%USERPROFILE%\.codex\config.toml`)
-and uses the `ocx-notch` provider with the downloaded `ocx-notch-catalog.json`.
+Automation can read the active local or remote delegation catalog without handling
+that credential directly:
+
+```powershell
+ocx-notch --subagent-catalog
+```
+
+The npm launcher asks the native companion to write into a private temporary
+directory, prints one versioned JSON object containing `chosen`, `available`, and
+the injection model and supported efforts, then removes the temporary directory.
+It uses Notch's current connection profile, writes no credential to stdout, and
+exits nonzero when the selected OCX instance cannot be queried.
+Codex's built-in OpenAI provider keeps its own ChatGPT login and sends that bearer
+separately through the relay.
+
+Notch updates `CODEX_HOME/config.toml` (normally `%USERPROFILE%\.codex\config.toml`),
+points the built-in `openai` provider at the loopback relay with the downloaded
+`ocx-notch-catalog.json`, and keeps the custom `ocx-notch` provider defined against
+that same relay so a conversation that pinned it before the relay existed still
+resumes. While Notch is open it keeps the relay running, so a reboot or a relay
+crash recovers without reconnecting by hand; Codex cannot reach the server while
+Notch is closed.
 Later model visibility changes refresh the root `model_catalog_json` path currently configured
 in Codex, including compatible pre-existing remote provider configurations.
 It preserves unrelated settings and saves `config.toml.before-notch` before the
@@ -176,8 +216,8 @@ keys to people who need Notch read access without server mutation rights.
 | --- | --- |
 | Could not reach OCX | DNS, trusted TLS certificate, HTTPS listener, and proxy-to-backend connectivity. |
 | OCX API key rejected | Use a key with at least `viewer` access. A data-plane-only `user` key cannot populate Notch. Check the allowed HTTPS origin. |
-| Responses admission 401 | Confirm the proxy preserves both `Authorization` and `X-OpenCodex-API-Key`, and restart Codex after Notch Connect. A successful `/v1/models` request alone does not prove Responses authentication works. |
-| ChatGPT login/logout is missing | Confirm the generated `ocx-notch` provider has `requires_openai_auth = true`, then fully restart Codex. |
+| Responses admission 401 | Confirm the relay is healthy on `127.0.0.1:10101`, its vault data key is current, and the server receives both `Authorization` and `X-OpenCodex-API-Key`. A successful `/v1/models` request alone does not prove Responses authentication works. |
+| ChatGPT login/logout is missing | Confirm `model_provider = "openai"` and `openai_base_url = "http://127.0.0.1:10101/v1"`, then fully restart Codex. |
 | Plugin or MCP reports a revoked OAuth token | Provider routing does not renew connector OAuth. Run `codex mcp list --json`, then `codex mcp logout <name>` and `codex mcp login <name>` for the affected server. |
 | `catalog not found` | Complete catalog setup under the server service's account and environment. |
 | VM logs remain old while local logs advance | An existing Codex process or thread is still using local OCX. Fully restart Codex and use a new conversation; verify a fresh VM log entry. |
@@ -188,7 +228,7 @@ See also the [remote connection reference](../../docs-site/src/content/docs/guid
 
 ## Data and polling
 
-- Remote Connect configures both Notch and Codex, storing the separate Codex data key and ownership metadata in Windows Credential Manager. Codex reads the admission key from `OPENCODEX_NOTCH_API_AUTH_TOKEN`, keeps its local ChatGPT bearer in `Authorization`, and uses the VM catalog. Restart existing Codex sessions after switching. Disconnect revokes this client's key, restores owned settings when unchanged, and suspends polling; Local PC is an explicit action. `--reconnect` and `--disconnect` expose the same actions for automation.
+- Remote Connect configures both Notch and Codex, storing the separate Codex data key, management/data origins, and ownership metadata in Windows Credential Manager. Codex keeps its local ChatGPT bearer in `Authorization` and sends compressed requests to the loopback relay, which injects the data key and uses the VM catalog. Disconnect revokes this client's key, restores owned settings when unchanged, stops the relay, and suspends polling; Local PC is an explicit action. `--reconnect`, `--data-origin`, and `--disconnect` expose the same actions for automation.
 - In remote mode, `/api/system/memory` polls independently every ~3 seconds. The header's VM CPU segmented meter uses deltas of cumulative host CPU counters; missing or reset counters show no percentage until two valid samples arrive. The lower segmented meter displays VM physical memory usage. No local CPU measurement is substituted.
 
 - `/healthz` supplies the OCX PID and online status every ~30 seconds.

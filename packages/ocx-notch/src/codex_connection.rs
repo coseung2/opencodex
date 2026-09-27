@@ -1,6 +1,6 @@
-//! Local Codex routing owned by Notch. Long-lived ownership metadata stays in
-//! the Windows vault; Codex receives the remote admission key through the
-//! current user's environment because it must keep its own ChatGPT bearer.
+//! Local Codex routing owned by Notch. Long-lived ownership metadata and the
+//! remote admission key stay in the Windows vault; the built-in OpenAI provider
+//! sends compressed requests through Notch's authenticated loopback relay.
 use crate::api::connection::{self, Profile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,7 +23,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const BEGIN: &str = "# BEGIN OCX NOTCH PROVIDER";
 const END: &str = "# END OCX NOTCH PROVIDER";
-const PROVIDER: &str = "ocx-notch";
+/// Custom provider kept for conversations that pinned it before the loopback
+/// relay existed. It points at the same relay, so an existing thread keeps
+/// working after the default provider moves to the built-in `openai` provider.
+const RELAY_PROVIDER: &str = "ocx-notch";
+const RELAY_BASE_URL: &str = "http://127.0.0.1:10101/v1";
 pub const ADMISSION_ENV_VAR: &str = "OPENCODEX_NOTCH_API_AUTH_TOKEN";
 const ENV_OWNERSHIP_TARGET: &str = "OCX Notch:codex-admission-environment";
 const CONFIG_OWNERSHIP_FILE: &str = "ocx-notch-config-state.json";
@@ -70,6 +74,12 @@ pub struct ConfigRestore {
 struct ConfigOwnership {
     before: String,
     installed: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedConfigProjection {
+    root_lines: Vec<String>,
+    fence_blocks: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -306,41 +316,6 @@ fn save_environment_ownership(value: Option<&str>) -> Result<(), String> {
     }
 }
 
-pub fn install_admission_environment(key: &str) -> Result<EnvironmentRollback, String> {
-    connection::validate_token(key)?;
-    let previous_value = read_user_environment_value()?;
-    let previous_ownership = connection::read_secret(ENV_OWNERSHIP_TARGET)?;
-    let preserved_baseline = previous_ownership
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<EnvironmentOwnership>(value).ok())
-        .filter(|ownership| {
-            previous_value.as_ref().map(|value| value.value.as_str())
-                == Some(ownership.installed.as_str())
-        })
-        .and_then(|ownership| ownership.previous);
-    let ownership = EnvironmentOwnership {
-        previous: preserved_baseline.or_else(|| previous_value.clone()),
-        installed: key.to_string(),
-    };
-    let installed = EnvironmentValue {
-        value: key.to_string(),
-        expandable: false,
-    };
-    write_user_environment_value(Some(&installed))?;
-    let encoded = serde_json::to_string(&ownership)
-        .map_err(|_| "Could not encode Codex admission ownership")?;
-    if let Err(error) = save_environment_ownership(Some(&encoded)) {
-        let _ = write_user_environment_value(previous_value.as_ref());
-        return Err(error);
-    }
-    Ok(EnvironmentRollback {
-        previous_value,
-        previous_ownership,
-        installed_value: Some(installed),
-        installed_ownership: Some(encoded),
-    })
-}
-
 pub fn rollback_admission_environment(rollback: &EnvironmentRollback) -> Result<(), String> {
     if read_user_environment_value()? != rollback.installed_value
         || connection::read_secret(ENV_OWNERSHIP_TARGET)? != rollback.installed_ownership
@@ -404,16 +379,159 @@ fn write_config_ownership(dir: &Path, ownership: &ConfigOwnership) -> Result<(),
     atomic_write(&config_ownership_path(dir), &encoded)
 }
 
+fn root_key(line: &str) -> Option<&str> {
+    line.split_once('=')
+        .map(|(key, _)| key.trim().trim_matches(['\'', '"']))
+}
+
+fn is_managed_root_line(line: &str) -> bool {
+    line == "# Auto-injected by opencodex"
+        || matches!(
+            root_key(line),
+            Some("openai_base_url" | "model_provider" | "model_catalog_json")
+        )
+}
+
+fn config_lines(input: &str) -> Vec<String> {
+    input
+        .replace("\r\n", "\n")
+        .split('\n')
+        .map(str::to_string)
+        .collect()
+}
+
+fn fence_ranges(lines: &[String]) -> Result<Vec<(usize, usize)>, String> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    for (index, line) in lines.iter().enumerate() {
+        if line == BEGIN {
+            if start.replace(index).is_some() {
+                return Err("Duplicate Notch provider block".into());
+            }
+        } else if line == END {
+            let Some(begin) = start.take() else {
+                return Err("Invalid Notch provider block".into());
+            };
+            ranges.push((begin, index));
+        }
+    }
+    if start.is_some() {
+        return Err("Incomplete Notch provider block".into());
+    }
+    Ok(ranges)
+}
+
+fn managed_config_projection(input: &str) -> Result<ManagedConfigProjection, String> {
+    let lines = config_lines(input);
+    let root_end = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let root_lines = lines[..root_end]
+        .iter()
+        .filter(|line| is_managed_root_line(line))
+        .cloned()
+        .collect();
+    let fence_blocks = fence_ranges(&lines)?
+        .into_iter()
+        .map(|(start, end)| lines[start..=end].to_vec())
+        .collect();
+    Ok(ManagedConfigProjection {
+        root_lines,
+        fence_blocks,
+    })
+}
+
+/// Reverse only the routing lines and fenced provider block installed by the
+/// previous Notch connection. Unrelated settings added while Notch was active
+/// are retained. Any edit to the owned projection still fails closed.
+fn restore_config_preserving_user_edits(
+    current: &str,
+    ownership: &ConfigOwnership,
+) -> Result<String, String> {
+    let current_projection = managed_config_projection(current)?;
+    let installed_projection = managed_config_projection(&ownership.installed)?;
+    if current_projection != installed_projection {
+        return Err("Codex settings owned by Notch changed after it connected; restore the Notch routing settings before reconnecting or disconnecting".into());
+    }
+
+    let baseline_projection = managed_config_projection(&ownership.before)?;
+    let lines = config_lines(current);
+    let root_end = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let current_ranges = fence_ranges(&lines)?;
+    let first_fence = current_ranges.first().map(|(start, _)| *start);
+    let mut output = Vec::with_capacity(lines.len());
+    let mut inserted_root = false;
+    let mut inserted_fences = false;
+    let mut range_index = 0usize;
+    let mut index = 0usize;
+    while index < lines.len() {
+        if let Some((start, end)) = current_ranges.get(range_index).copied() {
+            if index == start {
+                if baseline_projection.fence_blocks.is_empty()
+                    && output.last().is_some_and(String::is_empty)
+                    && lines.get(end + 1).is_some_and(String::is_empty)
+                {
+                    output.pop();
+                }
+                for block in &baseline_projection.fence_blocks {
+                    output.extend(block.iter().cloned());
+                }
+                inserted_fences = true;
+                range_index += 1;
+                index = end + 1;
+                continue;
+            }
+        }
+        if index < root_end && is_managed_root_line(&lines[index]) {
+            if !inserted_root {
+                output.extend(baseline_projection.root_lines.iter().cloned());
+                inserted_root = true;
+            }
+            index += 1;
+            continue;
+        }
+        output.push(lines[index].clone());
+        index += 1;
+    }
+    if !inserted_root && !baseline_projection.root_lines.is_empty() {
+        let insertion = output
+            .iter()
+            .position(|line| line.trim_start().starts_with('['))
+            .unwrap_or(output.len());
+        output.splice(insertion..insertion, baseline_projection.root_lines);
+    }
+    if !inserted_fences && !baseline_projection.fence_blocks.is_empty() {
+        if first_fence.is_none() && output.last().is_some_and(|line| !line.is_empty()) {
+            output.push(String::new());
+        }
+        for block in baseline_projection.fence_blocks {
+            output.extend(block);
+        }
+    }
+    let restored = output.join("\n");
+    Ok(if current.contains("\r\n") {
+        restored.replace('\n', "\r\n")
+    } else {
+        restored
+    })
+}
+
 fn preflight_config_restore_in(dir: &Path) -> Result<ConfigRestore, String> {
     let ownership =
         read_config_ownership(dir)?.ok_or("Notch has no saved Codex configuration to restore")?;
     let current = fs::read_to_string(dir.join("config.toml"))
         .map_err(|_| "Could not read Codex config.toml")?;
-    if current != ownership.installed {
-        return Err("Codex settings changed after Notch connected; reconnect or restore config.toml.before-notch before disconnecting".into());
-    }
+    let before = if current == ownership.installed {
+        ownership.before.clone()
+    } else {
+        restore_config_preserving_user_edits(&current, &ownership)?
+    };
     Ok(ConfigRestore {
-        before: ownership.before.clone(),
+        before,
         rollback: ConfigRollback {
             previous_config: current,
             previous_ownership: Some(ownership),
@@ -497,7 +615,7 @@ pub fn transform_config(
     if normalized.contains("\"\"\"") || normalized.contains("'''") {
         return Err("Multiline TOML strings require manual Codex connection configuration".into());
     }
-    let mut lines = Vec::new();
+    let mut lines: Vec<&str> = Vec::new();
     let mut owned = false;
     for line in normalized.lines() {
         if line == BEGIN {
@@ -520,6 +638,12 @@ pub fn transform_config(
     }
     if owned {
         return Err("Incomplete Notch provider block".into());
+    }
+    // The managed block sits at the end of the file behind one blank line. Drop
+    // the line breaks that belonged to it so reconnecting rewrites byte-identical
+    // settings instead of accumulating blank lines on every pass.
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
     }
     if lines.iter().any(|l| {
         l.chars()
@@ -560,18 +684,24 @@ pub fn transform_config(
     }
     let mut output = root.join("\n");
     let quote = |s: &str| serde_json::to_string(s).unwrap();
-    let provider = if origin.is_some() { PROVIDER } else { "openai" };
     output.push_str(&format!(
         "\nmodel_provider = {}\nmodel_catalog_json = {}\n",
-        quote(provider),
+        quote("openai"),
         quote(&catalog.to_string_lossy())
     ));
-    if origin.is_none() {
-        output.push_str("openai_base_url = \"http://127.0.0.1:10100/v1\"\n");
-    }
+    output.push_str(if origin.is_some() {
+        "openai_base_url = \"http://127.0.0.1:10101/v1\"\n"
+    } else {
+        "openai_base_url = \"http://127.0.0.1:10100/v1\"\n"
+    });
     output.push_str(&lines[root_end..].join("\n"));
-    if let Some(origin) = origin {
-        output.push_str(&format!("\n\n{BEGIN}\n[model_providers.{PROVIDER}]\nname = \"OCX Notch\"\nbase_url = {}\nwire_api = \"responses\"\nrequires_openai_auth = true\nenv_http_headers = {{ \"x-opencodex-api-key\" = \"{ADMISSION_ENV_VAR}\" }}\nsupports_websockets = false\n{END}\n", quote(&format!("{origin}/v1"))));
+    if origin.is_some() {
+        // New conversations use the built-in provider above, which keeps Codex's
+        // native request compression. Threads that already pinned the custom
+        // provider resolve to this definition instead of failing to start.
+        output.push_str(&format!(
+            "\n\n{BEGIN}\n[model_providers.{RELAY_PROVIDER}]\nname = \"OCX Notch\"\nbase_url = \"{RELAY_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nsupports_websockets = false\n{END}\n"
+        ));
     }
     Ok(if input.contains("\r\n") {
         output.replace('\n', "\r\n")
@@ -663,11 +793,13 @@ pub fn configure(origin: Option<&str>, catalog: Option<&Value>) -> Result<Config
     });
     let executable = std::env::current_exe().map_err(|_| "Could not locate Notch")?;
     let prior_ownership = read_config_ownership(&dir)?;
-    if let Some(ownership) = prior_ownership.as_ref() {
-        if before != ownership.installed {
-            return Err("Codex settings changed while managed by Notch; restore or disconnect them before reconnecting".into());
+    let preserved_before = match prior_ownership.as_ref() {
+        Some(ownership) if before != ownership.installed => {
+            restore_config_preserving_user_edits(&before, ownership)?
         }
-    }
+        Some(ownership) => ownership.before.clone(),
+        None => before.clone(),
+    };
     let after = transform_config(&before, origin, &catalog_path, &executable)?;
     if let Some(catalog) = catalog {
         validate_catalog(catalog)?;
@@ -686,9 +818,7 @@ pub fn configure(origin: Option<&str>, catalog: Option<&Value>) -> Result<Config
     atomic_write(&path, after.as_bytes())?;
     let installed_ownership = if origin.is_some() {
         let ownership = ConfigOwnership {
-            before: prior_ownership
-                .as_ref()
-                .map_or_else(|| before.clone(), |ownership| ownership.before.clone()),
+            before: preserved_before,
             installed: after.clone(),
         };
         if let Err(error) = write_config_ownership(&dir, &ownership) {
@@ -734,7 +864,7 @@ mod tests {
         assert!(restored.id.is_empty());
     }
     #[test]
-    fn routing_stays_at_root_and_preserves_other_settings() {
+    fn remote_routing_uses_the_builtin_openai_provider_and_loopback_relay() {
         let source = "model = \"test\"\n# Auto-injected by opencodex\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n[plugins.example]\nenabled = true\n";
         let output = transform_config(
             source,
@@ -745,9 +875,15 @@ mod tests {
         .unwrap();
         assert!(output.find("model_provider =").unwrap() < output.find("[plugins").unwrap());
         assert!(output.contains("[plugins.example]\nenabled = true"));
-        assert!(!output.contains("127.0.0.1"));
-        assert!(output.contains("requires_openai_auth = true"));
-        assert!(output.contains("OPENCODEX_NOTCH_API_AUTH_TOKEN"));
+        assert!(output.contains("model_provider = \"openai\""));
+        assert!(output.contains(&format!("openai_base_url = \"{RELAY_BASE_URL}\"")));
+        // The custom provider stays defined so a conversation that already pinned
+        // it still resolves; it must point at the relay and carry no secret
+        // reference, because the relay injects the admission header.
+        assert!(output.contains("[model_providers.ocx-notch]"));
+        assert!(output.contains(&format!("base_url = \"{RELAY_BASE_URL}\"")));
+        assert!(!output.contains("env_http_headers"));
+        assert!(!output.contains("OPENCODEX_NOTCH_API_AUTH_TOKEN"));
         assert!(!output.contains("--codex-token"));
         let again = transform_config(
             &output,
@@ -756,7 +892,7 @@ mod tests {
             Path::new("C:\\Notch\\ocx-notch.exe"),
         )
         .unwrap();
-        assert_eq!(again.matches("[model_providers.ocx-notch]").count(), 1);
+        assert_eq!(again, output);
         let local = transform_config(
             &again,
             None,
@@ -765,8 +901,76 @@ mod tests {
         )
         .unwrap();
         assert!(local.contains("model_provider = \"openai\""));
+        assert!(local.contains("openai_base_url = \"http://127.0.0.1:10100/v1\""));
+        assert!(!local.contains("[model_providers.ocx-notch]"));
+        assert!(!local.contains(BEGIN));
         assert!(!local.contains("--codex-token"));
     }
+
+    #[test]
+    fn reconnect_migrates_the_owned_custom_provider_block_to_the_relay() {
+        let source = format!(
+            "model_provider = \"ocx-notch\"\n\n{BEGIN}\n[model_providers.ocx-notch]\nname = \"OCX Notch\"\nbase_url = \"https://old.example/v1\"\nenv_http_headers = {{ \"x-opencodex-api-key\" = \"{ADMISSION_ENV_VAR}\" }}\n{END}\n"
+        );
+        let output = transform_config(
+            &source,
+            Some("https://new.example"),
+            Path::new("catalog.json"),
+            Path::new("notch.exe"),
+        )
+        .unwrap();
+
+        assert!(output.contains("model_provider = \"openai\""));
+        assert!(output.contains(&format!("openai_base_url = \"{RELAY_BASE_URL}\"")));
+        assert!(!output.contains("https://old.example"));
+        assert!(!output.contains(ADMISSION_ENV_VAR));
+        assert_eq!(output.matches(BEGIN).count(), 1);
+        assert_eq!(output.matches("[model_providers.ocx-notch]").count(), 1);
+        assert!(output.contains(&format!(
+            "[model_providers.ocx-notch]\nname = \"OCX Notch\"\nbase_url = \"{RELAY_BASE_URL}\""
+        )));
+    }
+    #[test]
+    fn remote_routing_stays_idempotent_for_root_only_and_crlf_configs() {
+        for source in [
+            "model = \"test\"\n",
+            "model = \"test\"",
+            "model = \"test\"\r\n",
+        ] {
+            let once = transform_config(
+                source,
+                Some("https://ocx.example.com"),
+                Path::new("catalog.json"),
+                Path::new("notch.exe"),
+            )
+            .unwrap();
+            let twice = transform_config(
+                &once,
+                Some("https://ocx.example.com"),
+                Path::new("catalog.json"),
+                Path::new("notch.exe"),
+            )
+            .unwrap();
+            let thrice = transform_config(
+                &twice,
+                Some("https://ocx.example.com"),
+                Path::new("catalog.json"),
+                Path::new("notch.exe"),
+            )
+            .unwrap();
+
+            assert_eq!(
+                twice, once,
+                "remote transform is not idempotent for {source:?}"
+            );
+            assert_eq!(thrice, twice, "remote transform accumulates for {source:?}");
+            assert_eq!(once.matches(BEGIN).count(), 1);
+            if source.contains("\r\n") {
+                assert!(once.contains("\r\n"));
+            }
+        }
+    }
+
     #[test]
     fn refuses_ambiguous_config_before_writing() {
         for source in [
@@ -786,7 +990,7 @@ mod tests {
         assert!(validate_catalog(&serde_json::json!({"models":[]})).is_err());
     }
     #[test]
-    fn config_restore_rejects_user_edits_and_can_roll_back_exactly() {
+    fn config_restore_preserves_unrelated_user_edits_and_can_roll_back_exactly() {
         let root = std::env::temp_dir().join(format!(
             "ocx-notch-config-ownership-{}-{}",
             std::process::id(),
@@ -797,12 +1001,27 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let ownership = ConfigOwnership {
-            before: "model = \"original\"\n".into(),
-            installed: "model_provider = \"ocx-notch\"\n".into(),
+            before: "model = \"original\"\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n".into(),
+            installed: format!(
+                "model = \"original\"\nmodel_provider = \"ocx-notch\"\n\n{BEGIN}\n[model_providers.ocx-notch]\nbase_url = \"https://old.example/v1\"\n{END}\n"
+            ),
         };
         write_config_ownership(&root, &ownership).unwrap();
-        fs::write(root.join("config.toml"), "model = \"user-edit\"\n").unwrap();
-        assert!(preflight_config_restore_in(&root).is_err());
+        let user_edited = ownership
+            .installed
+            .replace("model = \"original\"", "model = \"user-edit\"");
+        fs::write(root.join("config.toml"), &user_edited).unwrap();
+        let restore = preflight_config_restore_in(&root).unwrap();
+        let rollback = restore_owned_config_in(&root, &restore).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("config.toml")).unwrap(),
+            "model = \"user-edit\"\nopenai_base_url = \"http://127.0.0.1:10100/v1\"\n"
+        );
+        rollback_config_update_in(&root, &rollback).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("config.toml")).unwrap(),
+            user_edited
+        );
 
         fs::write(root.join("config.toml"), &ownership.installed).unwrap();
         let restore = preflight_config_restore_in(&root).unwrap();
@@ -832,6 +1051,20 @@ mod tests {
             "model = \"concurrent-edit\"\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_restore_rejects_edits_to_notch_owned_routing() {
+        let ownership = ConfigOwnership {
+            before: "model_provider = \"openai\"\n".into(),
+            installed: "model_provider = \"ocx-notch\"\n".into(),
+        };
+        for changed in [
+            "model_provider = \"other\"\n",
+            "model_provider = \"ocx-notch\"\nopenai_base_url = \"https://other.example/v1\"\n",
+        ] {
+            assert!(restore_config_preserving_user_edits(changed, &ownership).is_err());
+        }
     }
     #[test]
     fn catalog_sync_uses_the_configured_root_path() {

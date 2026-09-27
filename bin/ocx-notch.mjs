@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,8 +30,8 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(
-    "Usage: ocx-notch [--help] [--version]\n\n"
-    + "Launch the bundled Windows x64 Notch companion. The desktop application accepts no CLI options.",
+    "Usage: ocx-notch [--help] [--version] [--subagent-catalog]\n\n"
+    + "Launch the bundled Windows x64 Notch companion, or print the active OCX delegation catalog as JSON.",
   );
   process.exit(0);
 }
@@ -62,6 +63,39 @@ if (!existsSync(nativeBinary)) {
   fail(
     `native executable is missing at "${nativeBinary}"; reinstall ${PACKAGE_NAME}.`,
   );
+}
+
+if (process.argv.includes("--subagent-catalog")) {
+  if (process.argv.length !== 3) fail("--subagent-catalog cannot be combined with other options.");
+  const scratch = mkdtempSync(join(tmpdir(), "ocx-notch-catalog-"));
+  const output = join(scratch, "catalog.json");
+  let status = 0;
+  try {
+    const result = spawnSync(nativeBinary, ["--subagent-catalog-output", output], {
+      env: { ...process.env, OCX_PACKAGE_VERSION: packageVersion() },
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 35_000,
+    });
+    if (result.error) throw new Error(`could not query the delegation catalog: ${result.error.message}`);
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.trim() || `catalog query exited with code ${result.status}.`);
+    }
+    const catalog = JSON.parse(readFileSync(output, "utf8"));
+    console.log(JSON.stringify(catalog));
+  } catch (error) {
+    console.error(`ocx-notch: could not read the delegation catalog: ${error.message}`);
+    status = 1;
+  } finally {
+    // Runs before the process exits, so no scratch directory survives the query.
+    try {
+      rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      console.error(`ocx-notch: could not remove the scratch directory ${scratch}: ${error.message}`);
+      status = 1;
+    }
+  }
+  process.exit(status);
 }
 
 const child = spawn(nativeBinary, process.argv.slice(2), {
