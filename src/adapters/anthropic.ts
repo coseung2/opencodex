@@ -775,6 +775,12 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
 
       // Prompt caching: native Anthropic supports top-level automatic caching, which
       // follows the moving final block across turns. Keep one breakpoint slot free for it.
+      // Claude's feature/TTL beta flags travel with the request. Only this
+      // adapter consumes them; authentication remains provider-owned above.
+      const callerBeta = incoming?.headers.get("anthropic-beta");
+      if (callerBeta) headers["anthropic-beta"] = [...new Set(
+        [headers["anthropic-beta"], callerBeta].filter(Boolean).flatMap(value => value!.split(",").map(part => part.trim()).filter(Boolean)),
+      )].join(",");
       const cc = resolveCacheControl(cacheRetention);
       const automaticPromptCaching = cc && usesNativeAnthropicEndpoint(provider);
       if (automaticPromptCaching) body.cache_control = cc;

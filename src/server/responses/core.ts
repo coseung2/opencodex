@@ -1529,6 +1529,12 @@ async function handleResponsesInner(
     authCtx = finalAuth.authCtx;
     selectedForwardHeaders = finalAuth.headers;
   }
+  // Auth resolution deliberately filters caller headers. Restore only the
+  // Anthropic feature flags for an Anthropic destination, never its credential.
+  if (route.provider.adapter === "anthropic" && req.headers.has("anthropic-beta")) {
+    selectedForwardHeaders = new Headers(selectedForwardHeaders);
+    selectedForwardHeaders.set("anthropic-beta", req.headers.get("anthropic-beta")!);
+  }
 
   route.provider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
   logCtx.provider = formatCodexProviderForLog(route.providerName, codexLogAccountId(authCtx), config);

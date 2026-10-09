@@ -7,6 +7,7 @@
  * unchanged. The Responses output (SSE or JSON) is converted back to Anthropic shape.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
+import { claudeCacheRetention } from "../claude/cache-retention";
 import { bindCodexRoutingConfig } from "../codex/routing-config";
 import { enforceAnthropicImageLimits } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
@@ -49,9 +50,10 @@ function isRec(v: unknown): v is Rec {
 }
 
 /** Resolve Claude-only sidecar overrides without mutating the shared server config. */
-export function buildClaudeReplayConfig(config: OcxConfig, desktopServiceTier?: unknown): OcxConfig {
+export function buildClaudeReplayConfig(config: OcxConfig, desktopServiceTier?: unknown, anthropicBody?: unknown): OcxConfig {
   return bindCodexRoutingConfig({
     ...config,
+    cacheRetention: claudeCacheRetention(config, anthropicBody),
     // This value comes only from the validated Desktop alias translation. Keep the
     // shared config untouched; explicit picker choices win over the global toggle.
     ...(desktopServiceTier === "priority" || desktopServiceTier === "default" ? { fastMode: undefined } : {}),
@@ -673,6 +675,8 @@ async function handleClaudeMessagesWithBudget(
   } catch { /* unknown model: let handleResponses shape the 404 */ }
 
   const headers = new Headers({ "content-type": "application/json" });
+  const anthropicBeta = req.headers.get("anthropic-beta");
+  if (anthropicBeta) headers.set("anthropic-beta", anthropicBeta);
   for (const name of FORWARD_HEADERS) {
     // The caller's bearer is the proxy admission token (ocx claude placeholder), never a
     // ChatGPT credential — forwarding it upstream turns into {"detail":"Unauthorized"}.
@@ -727,7 +731,7 @@ async function handleClaudeMessagesWithBudget(
     nativeLogged = true;
     addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, meta);
   };
-  const upstream = await handleResponses(internalReq, buildClaudeReplayConfig(config, internalBody.service_tier), logCtx, {
+  const upstream = await handleResponses(internalReq, buildClaudeReplayConfig(config, internalBody.service_tier, anthropicBody), logCtx, {
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
     abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",

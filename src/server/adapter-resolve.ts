@@ -1,4 +1,5 @@
 import { createAnthropicAdapter } from "../adapters/anthropic";
+import { providerCacheRetention } from "../providers/cache-policy";
 import { createAzureAdapter } from "../adapters/azure";
 import { createCursorAdapter } from "../adapters/cursor";
 import { createGoogleAdapter } from "../adapters/google";
@@ -60,7 +61,7 @@ export function resolveAdapter(providerConfig: OcxProviderConfig, cacheRetention
     case "openai-chat":
       return createOpenAIChatAdapter(providerConfig);
     case "anthropic":
-      return createAnthropicAdapter(providerConfig, cacheRetention);
+      return createAnthropicAdapter(providerConfig, providerCacheRetention(providerConfig, cacheRetention));
     case "openai-responses":
       return createResponsesPassthroughAdapter(providerConfig);
     case "google":
