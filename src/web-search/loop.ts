@@ -16,6 +16,7 @@ import {
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
+import { mergeUsage } from "../server/responses/empty-completion-guard";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -263,11 +264,28 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   const messages: OcxMessage[] = [...parsed.context.messages];
   const loopT0 = Date.now();
   const allTools = parsed.context.tools ?? [];
+  // Kiro has no native forced-tool wire field. Fulfil forced hosted search in
+  // this loop, where the tool execution is observable, not by silently dropping
+  // the caller's requirement in the adapter.
+  const choice = parsed.options.toolChoice;
+  const kiroForcedSearch = adapter.name === "kiro" && (
+    choice === "required"
+    || (typeof choice === "object" && "name" in choice && choice.name === WEB_SEARCH_TOOL_NAME)
+    || (typeof choice === "object" && "allowedTools" in choice
+      && choice.mode === "required" && choice.allowedTools.includes(WEB_SEARCH_TOOL_NAME))
+  );
+  if (adapter.name === "kiro" && choice !== undefined && choice !== "auto" && choice !== "none" && !kiroForcedSearch) {
+    return jsonError(400, "Kiro cannot enforce this tool choice; only forced hosted web_search is supported by the search loop.");
+  }
+  if (kiroForcedSearch && (maxSearches < 1 || !allTools.some(tool => tool.webSearch))) {
+    return jsonError(400, "Forced web search requires an available search tool and a positive search budget.");
+  }
   // For the forced-answer pass we drop the synthetic web_search tool so the model MUST answer from the
-  // results already in `messages` (can't search again) — this guarantees a non-empty final answer.
+  // results already in `messages` (can't search again). Completion still needs validation below.
   const toolsNoWebSearch = allTools.filter(t => !t.webSearch);
   let searchesExecuted = 0;
   let executedSearchCount = 0;
+  let successfulSearchCount = 0;
   // Queries whose search already failed this turn — repeats are short-circuited so a model that keeps
   // re-asking the same failing query doesn't burn the whole search budget on it.
   const failedQueries = new Set<string>();
@@ -284,7 +302,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   const signal = internalAbort.signal;
 
   // Hard iteration bound (termination safety net); forceAnswer normally ends the loop sooner.
-  const HARD_CAP = maxSearches + 2;
+  const HARD_CAP = maxSearches + 3 + (kiroForcedSearch ? 1 : 0);
   const connectTimeoutMs = deps.connectTimeoutMs ?? 200_000;
   const routedModelStallTimeoutMs = deps.routedModelStallTimeoutMs ?? 200_000;
 
@@ -303,12 +321,18 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     // ignores what the search found, which reads to the user as "the search did nothing". Nudge it
     // (iteration-locally — never mutate the shared `messages`) to actually use the gathered results.
     // Only when a REAL search ran (executedSearchCount, not empty-query/limit/repeat placeholders).
-    const iterMessages: OcxMessage[] = forceAnswer && executedSearchCount > 0
+    const needsForcedSearch = kiroForcedSearch && executedSearchCount === 0;
+    const iterMessages: OcxMessage[] = needsForcedSearch
+      ? [...messages, { role: "user", content: [{ type: "text", text: "Call web_search now with a non-empty query for the user's request. Do not answer or call another tool before the search has executed." }], timestamp: Date.now() }]
+      : forceAnswer && executedSearchCount > 0
       ? [...messages, forcedAnswerNudge()]
       : messages;
     const iterParsed: OcxParsedRequest = {
       ...parsed, stream: true,
-      context: { ...parsed.context, messages: iterMessages, tools: forceAnswer ? toolsNoWebSearch : allTools },
+      ...(kiroForcedSearch ? { options: { ...parsed.options, toolChoice: "auto" as const } } : {}),
+      context: { ...parsed.context, messages: iterMessages, tools: needsForcedSearch
+        ? allTools.filter(tool => tool.webSearch)
+        : forceAnswer ? toolsNoWebSearch : allTools },
     };
     // One cumulative header deadline spans every pool-key 429 rotation in this model iteration.
     // clear() stops only its timer after final headers; the direct turn signal remains attached to
@@ -435,7 +459,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         // Codex show only `Working` until both Kiro attempts had finished (often 30-40 seconds).
         // Tool events remain buffered below, so the decision to invoke the hosted sidecar is still
         // atomic and no search call can escape before its stream has validated successfully.
-        else if (event.type === "text_delta" && event.phase === "commentary") yield event;
+        else if (event.type === "text_delta" && event.phase === "commentary" && !(kiroForcedSearch && executedSearchCount === 0)) yield event;
         else events.push(event);
       }
     } catch (error) {
@@ -514,6 +538,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         searchesExecuted++;
         executedSearchCount++;
         if (outcome.error) failedQueries.add(normalizeQuery(query));
+        else successfulSearchCount++;
       }
       results.push({ query, outcome });
     }
@@ -590,9 +615,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   // (search cell BEFORE the assistant message). Iteration 2+ failures surface as an in-stream error.
   async function* produce(): AsyncGenerator<AdapterEvent> {
     let prepared = firstPrepared;
+    let recoveringEmptyAnswer = false;
+    let emptyAnswerUsage: OcxUsage | undefined;
+    let forcedSearchRetries = 0;
     try {
       for (let i = 0; i < HARD_CAP; i++) {
-        const forceAnswer = searchesExecuted >= maxSearches;
+        const forceAnswer = recoveringEmptyAnswer || searchesExecuted >= maxSearches;
         try {
           // First loop turn reuses the eager HEADERS. Subsequent header acquisitions run here.
           if (i > 0) {
@@ -601,12 +629,58 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           }
           // Raw-byte progress heartbeats reach the bridge; semantic events remain buffered.
           const split = yield* consumeIterationEvents(prepared);
+          const searchTerminal = split.passthrough.at(-1);
+          if (kiroForcedSearch && executedSearchCount === 0
+            && (split.hasRealToolCall || !split.calls.some(call => call.queries.length > 0)
+              || searchTerminal?.type !== "done" || searchTerminal.stopReason === "max_tokens"
+              || searchTerminal.stopReason === "content_filter")) {
+            const terminal = split.passthrough.at(-1);
+            if (terminal?.type === "done" || terminal?.type === "incomplete") {
+              emptyAnswerUsage = mergeUsage(emptyAnswerUsage, terminal.usage);
+            }
+            if (terminal?.type === "done" && terminal.stopReason !== "max_tokens"
+              && terminal.stopReason !== "content_filter" && forcedSearchRetries++ === 0) continue;
+            yield { type: "error", status: 422, errorType: "invalid_request_error",
+              code: "forced_web_search_not_executed",
+              message: "Kiro did not call the required web search tool. No unsearched answer was returned.",
+              ...(emptyAnswerUsage ? { usage: emptyAnswerUsage } : {}) };
+            return;
+          }
 
           // Loop (search + re-ask) ONLY when the model's actionable output is purely web_search. A real
           // tool call (e.g. shell/apply_patch) means this turn is terminal for Codex — finalize so those
           // calls reach Codex. forceAnswer also finalizes.
           const shouldLoop = split.calls.length > 0 && !split.hasRealToolCall && !forceAnswer;
           if (!shouldLoop) {
+            const terminal = split.passthrough.at(-1);
+            // Search cells prove only that retrieval finished. A reasoning-only/blank
+            // model reply afterwards must not become a successful, answerless turn.
+            // Retry once from the saved tool results, without re-running the searches
+            // or replaying the abandoned reasoning. Real client tools remain available.
+            const emptyAnswer = executedSearchCount > 0
+              && terminal?.type === "done"
+              && terminal.stopReason !== "max_tokens"
+              && terminal.stopReason !== "content_filter"
+              && !split.hasRealToolCall
+              && !split.passthrough.some(event => event.type === "text_delta" && event.text.trim().length > 0);
+            if (emptyAnswer) {
+              emptyAnswerUsage = mergeUsage(emptyAnswerUsage, terminal.usage);
+              if (!recoveringEmptyAnswer) {
+                recoveringEmptyAnswer = true;
+                console.warn("[web-search-loop] empty post-search answer; retrying once with saved results");
+                continue;
+              }
+              yield {
+                type: "error", status: 502, errorType: "upstream_error",
+                code: "web_search_empty_completion",
+                message: "The model returned no answer after web search, including one recovery attempt.",
+                ...(emptyAnswerUsage ? { usage: emptyAnswerUsage } : {}),
+              };
+              return;
+            }
+            if (emptyAnswerUsage && terminal && (terminal.type === "done" || terminal.type === "incomplete")) {
+              terminal.usage = mergeUsage(emptyAnswerUsage, terminal.usage);
+            }
             if (executedSearchCount > 0) {
               const failedCount = failedQueries.size;
               console.warn(
@@ -620,8 +694,17 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           }
           // The thinking that led to the search belongs to the FIRST call's assistant replay turn.
           const iterationThinking = extractIterationThinking(split.passthrough);
-          for (const [callIndex, call] of split.calls.entries()) {
+          // An empty sibling call must not spend the budget before the valid
+          // required search, allowing a later forceAnswer pass to skip retrieval.
+          const searchCalls = kiroForcedSearch && executedSearchCount === 0
+            ? split.calls.filter(call => call.queries.length > 0) : split.calls;
+          for (const [callIndex, call] of searchCalls.entries()) {
             yield* runSearchCall(call, callIndex === 0 ? iterationThinking : []);
+          }
+          if (kiroForcedSearch && executedSearchCount > 0 && successfulSearchCount === 0) {
+            yield { type: "error", status: 424, errorType: "upstream_error",
+              code: "forced_web_search_failed", message: "The required web search failed; no verified search results are available." };
+            return;
           }
         } catch (e) {
           if (isTranslatorBudgetExceededError(e)) {

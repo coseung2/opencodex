@@ -29,6 +29,10 @@ When Codex requests hosted `web_search` for a non-passthrough routed model, open
    (default 3), then removes the search tool and forces a final answer. Real client tools such as
    `apply_patch` or shell finalize the turn so those calls reach Codex.
 
+If a model finishes after searching without an answer or a client tool call, opencodex asks it
+once more using the same search results. Searches are not repeated. If the second reply is also
+empty, the turn reports `web_search_empty_completion` instead of silently completing.
+
 Every routed-model iteration requests upstream `stream: true`, but opencodex fully buffers semantic
 events internally before deciding whether to search or return the final answer. Only the first
 iteration's final headers/status and 429 key rotations are acquired eagerly. Thus synthetic search

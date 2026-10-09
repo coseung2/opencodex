@@ -67,6 +67,10 @@ header/status와 429 key rotation만 미리 가져옵니다. 따라서 합성 �
 stall은 전체 생성 timeout이 아닙니다. SSE가 시작되기 전 실패는 2xx가 아닌 JSON으로 반환하고,
 응답 header가 시작된 뒤의 생성 실패는 `response.failed` SSE로 전달합니다.
 
+검색 후 모델이 답변이나 실행할 도구 호출 없이 종료하면, 이미 받은 검색 결과로 답변을 한 번
+더 요청합니다. 검색 자체는 반복하지 않습니다. 다시 빈 답변이 오면 조용히 완료 처리하지 않고
+`web_search_empty_completion` 오류를 표시합니다.
+
 ## 비전 사이드카
 
 라우팅 모델이 해당 프로바이더의 `noVisionModels`에 있고 요청에 이미지가 들어오면, opencodex는

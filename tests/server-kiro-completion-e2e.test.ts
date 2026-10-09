@@ -130,6 +130,32 @@ function anthropicEvents(sse: string): Array<{ name: string; data: Record<string
 }
 
 describe("Kiro completion through public server endpoints", () => {
+  test.each(["CONTENT_FILTERED", "GUARDRAIL_INTERVENED"])(
+    "/v1/responses reports %s as an explicit failure without retry",
+    async stopReason => {
+      const upstream = scriptedKiroUpstream([[eventFrame("metadataEvent", { stopReason })]]);
+      saveConfig(kiroConfig(upstream.server.url.toString()));
+      const proxy = startServer(0);
+      try {
+        const response = await originalFetch(new URL("/v1/responses", proxy.url), {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "kiro-test/gpt-5.6-sol", input: "Inspect the workspace", stream: true,
+            tools: [{ type: "function", name: "bash", parameters: { type: "object" } }],
+          }),
+        });
+        const events = responseEvents(await response.text());
+        expect(events.at(-1)?.name).toBe("response.failed");
+        expect(events.at(-1)?.data.response.error).toMatchObject({ code: "content_filter" });
+        expect(events.some(event => event.name === "response.incomplete" || event.name === "response.completed")).toBe(false);
+        expect(upstream.requests).toHaveLength(1);
+      } finally {
+        proxy.stop(true);
+        upstream.server.stop(true);
+      }
+    },
+  );
+
   test("/v1/responses keeps progress nonterminal and lets only the bounded fallback complete", async () => {
     const upstream = scriptedKiroUpstream([
       [textFrame("Checking the workspace.")],

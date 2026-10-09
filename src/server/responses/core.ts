@@ -2601,7 +2601,11 @@ async function handleResponsesInner(
     return wsResponse;
   }
 
-  const emptyCompletionGuardEnabled = emptyCompletionRetryEnabled(config)
+  const deepSeekFinishlessEofRetry = route.providerName === "opencode-go"
+    && route.provider.adapter === "openai-chat"
+    && process.env.OCX_EMPTY_COMPLETION_RETRY !== "0"
+    && /^deepseek-v4\.1-flash$/i.test(route.modelId);
+  const emptyCompletionGuardEnabled = (emptyCompletionRetryEnabled(config) || deepSeekFinishlessEofRetry)
     && !options.comboAttempt
     && !routedCompaction;
 
@@ -3354,6 +3358,10 @@ async function handleResponsesInner(
       ? guardEmptyCompletionEventStream({
           firstEvents: eventStream,
           continuation: fetchGuardedEmptyCompletionRetry,
+          ...(deepSeekFinishlessEofRetry ? {
+            retryOnEmptyUpstreamError: true,
+            retryEmptyCompletions: emptyCompletionRetryEnabled(config),
+          } : {}),
         })
       : eventStream;
     const { toolNsMap, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;

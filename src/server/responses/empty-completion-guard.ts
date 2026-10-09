@@ -146,6 +146,9 @@ export interface EmptyCompletionGuardOptions {
   continuation: () => AsyncIterable<AdapterEvent> | Promise<AsyncIterable<AdapterEvent>>;
   /** How many times an empty completion is retried; default 1 (the router's single retry). */
   maxRetries?: number;
+  retryOnEmptyUpstreamError?: boolean;
+  /** Enable EOF recovery without enabling the separate empty-success retry policy. */
+  retryEmptyCompletions?: boolean;
 }
 
 /**
@@ -203,6 +206,11 @@ export async function* guardEmptyCompletionEventStream(
         continue;
       }
       if (event.type === "done") {
+        if (options.retryEmptyCompletions === false) {
+          yield* releaseHeld();
+          yield withUsage(event);
+          return;
+        }
         usage = mergeUsage(usage, event.usage);
         if (event.stopReason !== undefined && VISIBLE_INCOMPLETE_STOP_REASONS.has(event.stopReason)) {
           // Rendered as response.incomplete: a stated failure, not the silent
@@ -230,6 +238,26 @@ export async function* guardEmptyCompletionEventStream(
         return;
       }
       if (event.type === "error") {
+        const retryableEmptyEof = options.retryOnEmptyUpstreamError === true
+          && retries < maxRetries
+          && event.retryable !== false
+          && (event.status === undefined || event.status === 502)
+          && /upstream stream ended without a terminal signal/i.test(event.message);
+        if (retryableEmptyEof) {
+          usage = mergeUsage(usage, event.usage);
+          // The abandoned attempt's reasoning is not the successful answer's reasoning.
+          // Nothing in this bounded prefix has reached the client yet.
+          releaseHeld();
+          retries += 1;
+          try {
+            source = await options.continuation();
+          } catch {
+            yield emptyCompletionRetryFailedEvent(usage, true);
+            return;
+          }
+          terminalSeen = true;
+          break;
+        }
         if (retries > 0 && event.status !== 499) {
           // The retry failed upstream. Its body cannot reach the client (the
           // 200 head went out with the first attempt), so state the failure in

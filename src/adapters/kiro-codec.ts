@@ -1418,6 +1418,24 @@ async function* parseKiroAttemptEvents(
     // text is a final answer. Kiro has emitted END_TURN for progress prose, so tool-enabled turns
     // still require the private completion call to distinguish commentary from completion (#531).
     const normalizedStopReason = stopReason?.trim().toUpperCase();
+    // A provider rejection is not a broken stream or a retryable empty response.
+    // Apply this before completion-mode branches, which otherwise hide filtering
+    // behind a success/empty-fallback terminal. Do not re-ask a filtered request.
+    if (normalizedStopReason === "CONTENT_FILTERED" || normalizedStopReason === "GUARDRAIL_INTERVENED") {
+      return {
+        assistantText,
+        sawReasoning,
+        terminal: {
+          type: "error" as const,
+          status: 400,
+          errorType: "invalid_request_error",
+          code: "content_filter",
+          message: "Kiro blocked this response with its content filter. Automatic retry is disabled; review the request before trying again.",
+          retryable: false,
+          usage: finalUsage,
+        },
+      };
+    }
     const nativeCompletionStop = (normalizedStopReason === KIRO_END_TURN_STOP_REASON
       || normalizedStopReason === "STOP_SEQUENCE")
       && sawText
@@ -1559,9 +1577,6 @@ async function* parseKiroAttemptEvents(
         };
       }
       if (normalizedStopReason === "MAX_TOKENS") return incomplete("max_output_tokens", true);
-      if (normalizedStopReason === "CONTENT_FILTERED" || normalizedStopReason === "GUARDRAIL_INTERVENED") {
-        return incomplete("content_filter", false);
-      }
       if (normalizedStopReason === "MALFORMED_TOOL_USE") return incomplete("kiro_malformed_tool_use", false);
       if (normalizedStopReason === "MALFORMED_MODEL_OUTPUT") return incomplete("kiro_malformed_model_output", false);
       // TOOL_USE here means Kiro claimed a tool call it never emitted.

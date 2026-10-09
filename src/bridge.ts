@@ -69,6 +69,14 @@ function responseError(status: number, type: string, message: string): OcxErrorP
   return classifyError(status, type, message);
 }
 
+function contentFilterError(): OcxErrorPayload {
+  return {
+    type: "invalid_request_error",
+    code: "content_filter",
+    message: "The upstream provider blocked this response with its content filter. Automatic retry is disabled; review the request before trying again.",
+  };
+}
+
 /**
  * Whether assembled function-call arguments are usable JSON.
  * An empty buffer is valid (no-arg tools send no deltas). Non-empty must parse —
@@ -1024,7 +1032,7 @@ export function bridgeToResponsesSSE(
               // After every close above, so the blob lands AFTER the assistant message it belongs
               // to and the parser's backwards pairing finds it.
               flushKiroRedactedReasoning();
-              if (options?.compaction) {
+              if (options?.compaction && !event.stopReason) {
                 // Exactly one compaction item per turn; codex-rs takes the first and fatals on 0.
                 const item = {
                   type: "compaction", id: `cmp_${uuid()}`,
@@ -1034,7 +1042,23 @@ export function bridgeToResponsesSSE(
                 retainFinishedItem(item as OutputItem, compactionTextBytes);
                 outputIndex++;
               }
-              if (event.stopReason === "max_tokens" || event.stopReason === "content_filter") {
+              if (event.stopReason === "content_filter") {
+                // A provider content filter is an explicit request rejection, not an EOF.
+                // Treating it as `response.incomplete` makes clients report a disconnected
+                // stream and some adapters remap it to a generic 502. Preserve the provider
+                // reason while returning the stable non-retryable 400 contract.
+                const error = contentFilterError();
+                const response = {
+                  ...responseSnapshot("failed", finishedItems, event.endTurn),
+                  usage: responsesUsage(event.usage),
+                  error,
+                  last_error: error,
+                  retryable: false,
+                };
+                options?.onUsage?.(event.usage);
+                emit("response.failed", { response });
+                reportTerminal("failed");
+              } else if (event.stopReason === "max_tokens") {
                 // Upstream stopped before a normal completion. Surface as incomplete so the
                 // client can distinguish a truncated/filtered turn from a finished one.
                 const response = {
@@ -1598,7 +1622,7 @@ export function buildResponseJSON(
         endTurn = e.endTurn;
         cleanDone = e.stopReason === undefined;
         if (e.providerState) options?.onProviderState?.(e.providerState);
-        // Match streaming: max_tokens and content_filter both terminate as incomplete.
+        // Retain the stop reason: token limits are incomplete; filtering is a failure.
         if (e.stopReason === "max_tokens" || e.stopReason === "content_filter") stopReason = e.stopReason;
         break;
     }
@@ -1631,7 +1655,7 @@ export function buildResponseJSON(
   }
 
   const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;
-  const status = errorEvent
+  const status = errorEvent || stopReason === "content_filter"
     ? "failed"
     : incompleteEvent || stopReason === "max_tokens" || stopReason === "content_filter"
       ? "incomplete"
@@ -1645,7 +1669,11 @@ export function buildResponseJSON(
     ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
     ...(failure ? { error: failure.error, last_error: failure.error } : {}),
     ...(errorEvent?.retryable !== undefined ? { retryable: errorEvent.retryable } : {}),
-    ...(incompleteEvent ? {
+    ...(stopReason === "content_filter" ? {
+      error: contentFilterError(),
+      last_error: contentFilterError(),
+      retryable: false,
+    } : incompleteEvent ? {
       incomplete_details: {
         reason: incompleteEvent.reason,
         ...(incompleteEvent.message ? { message: incompleteEvent.message } : {}),
@@ -1653,8 +1681,6 @@ export function buildResponseJSON(
       },
     } : stopReason === "max_tokens" ? {
       incomplete_details: { reason: "max_output_tokens" },
-    } : stopReason === "content_filter" ? {
-      incomplete_details: { reason: "content_filter" },
     } : {}),
     usage: responsesUsage(incompleteEvent?.usage ?? usage),
   };

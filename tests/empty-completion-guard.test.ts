@@ -282,6 +282,26 @@ describe("empty-completion guard retry", () => {
     expect(error).toEqual([{ type: "error", status: 401, message: "bad key" }]);
   });
 
+  test("an opted-in pre-content finishless upstream EOF retries once", async () => {
+    let continuations = 0;
+    const events = await collect(guardEmptyCompletionEventStream({
+      firstEvents: eventsOf(
+        { type: "reasoning_raw_delta", text: "partial" },
+        { type: "error", message: "upstream stream ended without a terminal signal ([DONE] or finish_reason) — possible truncation" },
+      ),
+      retryOnEmptyUpstreamError: true,
+      continuation: () => {
+        continuations += 1;
+        return eventsOf({ type: "text_delta", text: "recovered" }, { type: "done" });
+      },
+    }));
+    expect(continuations).toBe(1);
+    expect(withoutHeartbeats(events)).toEqual([
+      { type: "text_delta", text: "recovered" },
+      { type: "done" },
+    ]);
+  });
+
   test("maxRetries 0 (kill-switch behavior) surfaces the failure immediately", async () => {
     let continuations = 0;
     const events = await collect(guardEmptyCompletionEventStream({

@@ -685,13 +685,38 @@ describe("kiro adapter — parseStream", () => {
     });
   });
 
-  test("content filtering surfaces as a filtered incomplete", async () => {
+  test("content filtering surfaces as a non-retryable provider rejection", async () => {
     expect(await terminalForStopReason("CONTENT_FILTERED")).toMatchObject({
-      type: "incomplete",
-      reason: "content_filter",
+      type: "error",
+      status: 400,
+      code: "content_filter",
       retryable: false,
     });
   });
+
+  test.each(["disabled", "required", "text_fallback"] as const)(
+    "filter rejection stays explicit in completion mode %s",
+    async mode => {
+      for (const stopReason of ["CONTENT_FILTERED", "GUARDRAIL_INTERVENED"]) {
+        const budget = createTranslatorBudget();
+        let retries = 0;
+        try {
+          const events = await collectAdapterEvents(parseKiroStream(
+            new Response(streamOf(eventFrame({ stopReason }, "metadataEvent"))),
+            budget, "claude-opus-5.5", 0, undefined, undefined, undefined, mode,
+            async () => { retries++; throw new Error("must not retry a filtered request"); },
+          ));
+          expect(events.at(-1)).toMatchObject({
+            type: "error", status: 400, errorType: "invalid_request_error",
+            code: "content_filter", retryable: false,
+          });
+          expect(retries).toBe(0);
+          const response = buildResponseJSON(events, "claude-opus-5.5");
+          expect(response).toMatchObject({ status: "failed", error: { code: "content_filter" } });
+        } finally { budget.dispose(); }
+      }
+    },
+  );
 
   test("an unknown future stop reason is reported rather than retried", async () => {
     expect(await terminalForStopReason("MAX_TIME")).toMatchObject({

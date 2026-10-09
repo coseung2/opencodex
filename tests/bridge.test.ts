@@ -962,16 +962,17 @@ describe("Responses bridge stopReason threading (issue #246)", () => {
     expect(frames.find(f => f.event === "response.completed")).toBeUndefined();
   });
 
-  test("done with stopReason content_filter emits response.incomplete", async () => {
+  test("done with stopReason content_filter emits a non-retryable response.failed", async () => {
     const frames = await collectSse(bridgeToResponsesSSE(replay([
       { type: "text_delta", text: "partial" },
       { type: "done", stopReason: "content_filter" },
     ]), "routed/model"));
-    const terminal = frames.find(f => f.event === "response.incomplete");
+    const terminal = frames.find(f => f.event === "response.failed");
     expect(terminal).toBeDefined();
     const response = terminal!.data.response as Record<string, unknown>;
-    expect(response.status).toBe("incomplete");
-    expect(response.incomplete_details).toEqual({ reason: "content_filter" });
+    expect(response.status).toBe("failed");
+    expect(response.error).toMatchObject({ type: "invalid_request_error", code: "content_filter" });
+    expect(response.retryable).toBe(false);
     expect(frames.find(f => f.event === "response.completed")).toBeUndefined();
   });
 
@@ -1002,13 +1003,14 @@ describe("Responses bridge stopReason threading (issue #246)", () => {
     expect(json.incomplete_details).toEqual({ reason: "max_output_tokens" });
   });
 
-  test("batch buildResponseJSON with stopReason content_filter returns incomplete status", () => {
+  test("batch buildResponseJSON with stopReason content_filter returns failed status", () => {
     const json = buildResponseJSON([
       { type: "text_delta", text: "partial" },
       { type: "done", stopReason: "content_filter" },
     ], "routed/model", { compaction: true });
-    expect(json.status).toBe("incomplete");
-    expect(json.incomplete_details).toEqual({ reason: "content_filter" });
+    expect(json.status).toBe("failed");
+    expect(json.error).toMatchObject({ type: "invalid_request_error", code: "content_filter" });
+    expect(json.retryable).toBe(false);
     // Truncated turns must not install a compaction replacement (#422).
     expect((json.output as Record<string, unknown>[]).some(item => item.type === "compaction")).toBe(false);
   });

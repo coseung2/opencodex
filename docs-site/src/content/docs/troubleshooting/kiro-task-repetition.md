@@ -35,6 +35,10 @@ Assistant messages marked `phase: "commentary"` are preserved in the Kiro histor
 
 The adapter tests reproduce missing-output guidance, catalog eviction, commentary loss, and compaction-context loss deterministically; they do not prove that every model-generated repetition has the same cause. If repetition persists after deploying the corrected build, distinguish whether the preceding output was empty, an error, a successful result, an already-delivered final answer, or a compaction boundary. Record the running version and sanitized request identifiers, not credentials or raw private prompts.
 
+## Content-filter rejection
+
+When Kiro returns `CONTENT_FILTERED` or `GUARDRAIL_INTERVENED`, OpenCodex reports an explicit, non-retryable `content_filter` failure instead of a disconnected/incomplete stream or an empty-response retry. This is a provider rejection, not a network failure. The proxy does not automatically retry or change models to bypass it. Review the request before trying again; this error-handling fix does not remove the provider's filter.
+
 ## Upstream references
 
 The fork adaptation is based on [#2819: empty exec output and final-answer reopening](https://github.com/lidge-jun/opencodex/pull/2819), [#2475: tool-search result priority](https://github.com/lidge-jun/opencodex/pull/2475), and [#2750: code-mode discovery and execution-path reservation](https://github.com/lidge-jun/opencodex/pull/2750). The already-present completion fixes include [#3012](https://github.com/lidge-jun/opencodex/pull/3012), [#3031](https://github.com/lidge-jun/opencodex/pull/3031), and the adjacent-result ownership fix [#3750](https://github.com/lidge-jun/opencodex/pull/3750).

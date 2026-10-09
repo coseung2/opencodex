@@ -60,7 +60,7 @@ describe("openai-chat stream EOF fail-closed", () => {
     expect(events.some(e => e.type === "error")).toBe(false);
   });
 
-  test("EOF carries content_filter through the bridge as incomplete", async () => {
+  test("EOF carries content_filter through the bridge as an explicit failure", async () => {
     const response = new Response(
       'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"content_filter"}]}\n\n',
     );
@@ -72,8 +72,9 @@ describe("openai-chat stream EOF fail-closed", () => {
       adapter.parseStream(response),
       "openai-chat/test-model",
     )).text();
-    expect(text).toContain("event: response.incomplete");
-    expect(text).toContain('"incomplete_details":{"reason":"content_filter"}');
+    expect(text).toContain("event: response.failed");
+    expect(text).toContain('"code":"content_filter"');
+    expect(text).toContain('"retryable":false');
     expect(text).not.toContain("event: response.completed");
   });
 

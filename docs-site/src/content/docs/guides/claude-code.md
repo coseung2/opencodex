@@ -326,6 +326,12 @@ entirely). The stub keeps tool call/result pairing intact.
 
 Lookup order: discovery alias → exact id → id with date suffix stripped (`-20250514`) → passthrough.
 
+## Kiro forced web search
+
+When Claude forces a hosted web search on a Kiro model, OpenCodex offers only the search tool until a real search runs. If the model skips the search, OpenCodex retries once, then reports `forced_web_search_not_executed` instead of returning an unsearched answer. If retrieval fails, it reports `forced_web_search_failed`. These failures are not provider-capacity errors and should not trigger repeated overload retries. Other forced client tools remain unsupported by Kiro.
+
+This compatibility fix requires the updated proxy runtime; restarting Claude alone does not update the proxy.
+
 ## Sidecar matrix: web search and image understanding
 
 Routed models do not all have the same hosted tools or image support. opencodex fills those gaps
