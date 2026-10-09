@@ -53,6 +53,7 @@ describe("usageFromResponsesPayload", () => {
     expect(usage).toEqual({
       inputTokens: 100,
       outputTokens: 23,
+      cacheTelemetry: { inputIncludesCache: true, readReported: true, writeReported: true },
       totalTokens: 150,
       cachedInputTokens: 7,
       cacheReadInputTokens: 7,
@@ -72,6 +73,7 @@ describe("usageFromResponsesPayload", () => {
     expect(usage).toEqual({
       inputTokens: 42,
       outputTokens: 7,
+      cacheTelemetry: { inputIncludesCache: true, readReported: true, writeReported: true },
       totalTokens: 60,
       cachedInputTokens: 11,
       cacheReadInputTokens: 11,
@@ -84,6 +86,7 @@ describe("usageFromResponsesPayload", () => {
     expect(usageFromResponsesPayload({ prompt_tokens: 5, completion_tokens: 2 })).toEqual({
       inputTokens: 5,
       outputTokens: 2,
+      cacheTelemetry: { inputIncludesCache: true, readReported: false, writeReported: false },
     });
   });
 
@@ -94,6 +97,10 @@ describe("usageFromResponsesPayload", () => {
       prompt_tokens: 999,
       completion_tokens: 999,
     });
-    expect(usage).toEqual({ inputTokens: 1, outputTokens: 2 });
+    expect(usage).toEqual({
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheTelemetry: { inputIncludesCache: true, readReported: false, writeReported: false },
+    });
   });
 });
