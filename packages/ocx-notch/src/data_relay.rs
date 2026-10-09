@@ -759,11 +759,54 @@ fn relay_plain_http(
     client
         .write_all(&client_response_head(head))
         .map_err(|_| "Could not start the private OCX response")?;
-    client
-        .write_all(body)
-        .map_err(|_| "Could not start the private OCX response")?;
-    std::io::copy(&mut upstream, &mut client)
-        .map_err(|_| "The private OCX response stream ended unexpectedly")?;
+    copy_response_body(head, body, &mut upstream, &mut client, request.method == "HEAD")?;
+    Ok(())
+}
+
+// Preserve encoded bytes but stop at the HTTP message boundary, not socket EOF.
+// In particular, a refused WebSocket upgrade can leave the upstream keep-alive.
+fn copy_response_body(
+    head: &[u8], prefix: &[u8], upstream: &mut impl Read, client: &mut impl Write,
+    head_request: bool,
+) -> Result<(), String> {
+    let status = head_status(head).unwrap_or(0);
+    if head_request || status == 204 || status == 304 || (100..200).contains(&status) {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(head);
+    let mut lengths = Vec::new();
+    let mut transfer = Vec::new();
+    for line in text.split("\r\n").skip(1) {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                for value in value.split(',') {
+                    let value = value.trim();
+                    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err("Invalid upstream response length".into());
+                    }
+                    lengths.push(value.parse::<u64>().map_err(|_| "Invalid upstream response length")?);
+                }
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                transfer.extend(value.split(',').map(|v| v.trim().to_ascii_lowercase()));
+            }
+        }
+    }
+    let mut reader = Cursor::new(prefix).chain(upstream);
+    if !transfer.is_empty() {
+        if transfer.last().map(String::as_str) == Some("chunked") {
+            return copy_chunked_body(&mut reader, client)
+                .map_err(|_| "The upstream chunked response was incomplete or invalid".into());
+        }
+    } else if let Some(length) = lengths.first() {
+        if lengths.iter().any(|other| other != length) {
+            return Err("Conflicting upstream response lengths".into());
+        }
+        return copy_exact(&mut reader, client, *length)
+            .map_err(|_| "The upstream response body ended before Content-Length".into());
+    }
+    std::io::copy(&mut reader, client)
+        .map_err(|_| "The private OCX response stream ended unexpectedly".to_string())?;
     Ok(())
 }
 
@@ -880,14 +923,11 @@ fn relay_websocket(
     client
         .write_all(&response_head)
         .map_err(|_| "Could not start the private OCX response")?;
-    client
-        .write_all(extra)
-        .map_err(|_| "Could not start the private OCX response")?;
     if !switching_protocols {
-        std::io::copy(&mut upstream, &mut client)
-            .map_err(|_| "The private OCX response stream ended unexpectedly")?;
+        copy_response_body(head, extra, &mut upstream, &mut client, request.method == "HEAD")?;
         return Ok(());
     }
+    client.write_all(extra).map_err(|_| "Could not start the private OCX response")?;
     // A session outlives any request timeout: clear them so an idle WebSocket is not
     // torn down mid-conversation.
     let _ = client.set_read_timeout(None);
@@ -1996,6 +2036,37 @@ mod tests {
 
         relay.join().unwrap();
         upstream_thread.join().unwrap();
+    }
+
+    #[test]
+    fn completed_response_does_not_wait_for_upstream_eof() {
+        struct MustNotRead;
+        impl Read for MustNotRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("read past complete HTTP body; a keep-alive socket would block here")
+            }
+        }
+        for (head, body) in [
+            (&b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 2\r\n\r\n"[..], &b"no"[..]),
+            (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"[..], &b"2\r\nok\r\n0\r\n\r\n"[..]),
+        ] {
+            let mut output = Vec::new();
+            copy_response_body(head, body, &mut MustNotRead, &mut output, false).unwrap();
+            assert_eq!(output, body);
+        }
+    }
+
+    #[test]
+    fn response_framing_does_not_launder_truncation_or_trailing_bytes() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n";
+        let mut output = Vec::new();
+        copy_response_body(head, b"okEXTRA", &mut std::io::empty(), &mut output, false).unwrap();
+        assert_eq!(output, b"ok");
+        assert!(copy_response_body(head, b"o", &mut std::io::empty(), &mut Vec::new(), false).is_err());
+        assert!(copy_response_body(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"2\r\nok\r\n", &mut std::io::empty(), &mut Vec::new(), false,
+        ).is_err());
     }
 
     #[test]

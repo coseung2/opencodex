@@ -255,7 +255,7 @@ describe("bridge stream lifecycle (RC1 / RC2)", () => {
       if (value) text += dec.decode(value, { stream: true });
     }
     await reader.cancel();
-    expect(text).toContain(": opencodex heartbeat");
+    expect(text).toContain("response.in_progress");
     expect(text).not.toContain("response.heartbeat");
   });
 

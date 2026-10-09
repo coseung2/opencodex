@@ -785,7 +785,7 @@ describe("Responses bridge reasoning and usage parity", () => {
     expect(frames.some(f => f.data.type === "heartbeat")).toBe(false);
   });
 
-  test("wire keepalive comment keeps firing while only adapter heartbeats flow", async () => {
+  test("wire keepalive event keeps firing while only adapter heartbeats flow", async () => {
     // Issue #521: web-search buffers semantic events and yields invisible adapter heartbeats from
     // raw-byte progress. Those must not suppress wire keepalives, or Codex Desktop idle-timeouts
     // (~5 min) while OCX still considers the upstream alive. Comments never become Responses
@@ -846,7 +846,7 @@ describe("Responses bridge reasoning and usage parity", () => {
     }
 
     const rawText = await rawTextPromise;
-    const keepaliveCount = (rawText.match(/^: opencodex heartbeat$/gm) ?? []).length;
+    const keepaliveCount = (rawText.match(/response\.in_progress/g) ?? []).length;
     expect(keepaliveCount).toBeGreaterThan(1);
     expect(rawText).toContain("response.completed");
     expect(rawText).not.toContain("upstream_stall_timeout");

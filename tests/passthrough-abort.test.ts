@@ -114,7 +114,7 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     expect(ac.signal.aborted).toBe(false);
   });
 
-  test("SSE passthrough emits heartbeat comments while upstream is silent", async () => {
+  test("SSE passthrough emits Responses progress while upstream is silent", async () => {
     const ac = new AbortController();
     const body = new ReadableStream<Uint8Array>({ pull() { return new Promise<void>(() => {}); } });
     const relayed = relaySseWithHeartbeat(body, ac, 5)!;
@@ -125,7 +125,7 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     ]);
 
     expect(first.done).toBe(false);
-    expect(new TextDecoder().decode(first.value)).toBe(": opencodex keepalive\n\n");
+    expect(new TextDecoder().decode(first.value)).toContain("event: response.in_progress");
 
     await reader.cancel("client gone");
     expect(ac.signal.aborted).toBe(true);

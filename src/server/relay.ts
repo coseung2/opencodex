@@ -1,6 +1,7 @@
 import type { ResponsesTerminalStatus } from "../bridge";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { isUsageDebugEnabled } from "../usage/debug";
+import { responsesProgressFrame } from "./sse-keepalive";
 import {
   addRequestLog,
   addFinalRequestLog,
@@ -496,7 +497,7 @@ export function relaySseWithHeartbeat(
 ): ReadableStream<Uint8Array> | null {
   if (!body) return null;
   const reader = body.getReader();
-  const heartbeat = new TextEncoder().encode(": opencodex keepalive\n\n");
+  let heartbeatSequence = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
   let clientCancelled = false;
@@ -525,7 +526,7 @@ export function relaySseWithHeartbeat(
       timer = setInterval(() => {
         if (closed) return;
         try {
-          controller.enqueue(heartbeat);
+          controller.enqueue(responsesProgressFrame(heartbeatSequence++));
         } catch {
           cleanup();
         }

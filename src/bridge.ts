@@ -3,6 +3,7 @@ import { adapterFailureFromMessage, classifyError, CYBER_POLICY_ERROR_CODE, isCy
 import { encodeCompactionSummary } from "./responses/compaction";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "./responses/reasoning-envelope";
 import { resolveStallTimeoutSec } from "./stall-timeout";
+import { responsesProgressFrame } from "./server/sse-keepalive";
 import { usageDisplayTotalTokens } from "./usage/totals";
 import {
   isTranslatorBudgetExceededError,
@@ -336,7 +337,7 @@ export function bridgeToResponsesSSE(
         ...(endTurn !== undefined ? { end_turn: endTurn } : {}),
       });
 
-      const heartbeatFrame = encoder.encode(": opencodex heartbeat\n\n");
+      const heartbeatFrame = () => responsesProgressFrame(seq++, responseId, modelId);
       let stallTicks = 0;
       const stallSec = resolveStallTimeoutSec(options?.stallTimeoutSec);
       const maxStallTicks = Math.ceil((stallSec * 1000) / heartbeatMs);
@@ -1245,7 +1246,7 @@ export function bridgeToResponsesSSE(
             return;
           }
           try {
-            controller.enqueue(heartbeatFrame);
+            controller.enqueue(heartbeatFrame());
             emittedFrames++;
           } catch {
             closed = true;
