@@ -25,6 +25,50 @@ let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
 const originalFetch = globalThis.fetch;
 
+test("Desktop speed selection reaches OpenAI per request, overriding global Fast without affecting other sessions", async () => {
+  const captured: Array<Record<string, any>> = [];
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    captured.push(await req.json() as Record<string, any>);
+    return new Response([
+      `event: response.created\ndata: ${JSON.stringify({ response: { id: "resp_speed", status: "in_progress" } })}\n\n`,
+      `event: response.output_text.delta\ndata: ${JSON.stringify({ delta: "Hello" })}\n\n`,
+      `event: response.completed\ndata: ${JSON.stringify({ response: { status: "completed", usage: { input_tokens: 10, output_tokens: 2 } } })}\n\n`,
+    ].join(""), { headers: { "Content-Type": "text/event-stream" } });
+  } });
+  const { generateDesktop3pModels, activeDesktop3pAlias } = await import("../src/claude/desktop-3p");
+  const { desktopFastModelId } = await import("../src/claude/desktop-speed");
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname === "chatgpt.com") return originalFetch(new URL("/responses", upstream.url), init);
+    return originalFetch(input, init);
+  }) as typeof globalThis.fetch;
+  writeFileSync(join(isolatedCodexHome!.path, "auth.json"), JSON.stringify({
+    tokens: { access_token: "test-speed-access", account_id: "test-speed-account" },
+  }));
+  for (const fastMode of [true, false]) {
+    saveConfig({ port: 0, defaultProvider: "openai", fastMode, openaiProviderTierVersion: 2, providers: {
+      openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "direct" },
+    } } as OcxConfig);
+    const server = startServer(0);
+    try {
+      generateDesktop3pModels(["gpt-5.6-sol"], []);
+      const normal = activeDesktop3pAlias("native", "gpt-5.6-sol");
+      const fast = activeDesktop3pAlias("native", desktopFastModelId("gpt-5.6-sol"));
+      for (const [model, tier] of [[normal, "default"], [fast, "priority"], [normal, "default"], ["openai/gpt-5.6-sol", fastMode ? "priority" : undefined]] as const) {
+        const response = await fetch(new URL("/v1/messages", server.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          model, max_tokens: 64, messages: [{ role: "user", content: "hi" }], output_config: { effort: "high" },
+        }) });
+        expect(response.status).toBe(200);
+        await response.text();
+        expect(captured.at(-1)?.model).toBe("gpt-5.6-sol");
+        expect(captured.at(-1)?.service_tier).toBe(tier);
+        expect(captured.at(-1)?.reasoning?.effort).toBe("high");
+      }
+    } finally { server.stop(true); }
+  }
+  upstream.stop(true);
+}, 30_000);
+
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-claude-endpoint-");

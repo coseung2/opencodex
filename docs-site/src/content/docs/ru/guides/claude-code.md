@@ -277,12 +277,12 @@ Claude Code — это лишь учётные данные для доступ�
 | Вход Messages | Выход Responses |
 | --- | --- |
 | `system` верхнего уровня | `instructions` (текстовые блоки объединяются через `\n\n`) |
-| `messages[].role: "system"` | Также сворачивается в `instructions` |
+| `messages[].role: "system"` | Элемент `developer` на исходном месте в диалоге |
 | Текст / изображение пользователя | `input_text` / `input_image` (base64 → data URL) |
 | Текст ассистента | `output_text` |
 | `tool_use` ассистента | `function_call` (`input` → `arguments` в виде JSON-строки) |
 | `tool_result` пользователя | `function_call_output` (`is_error` → префикс `[tool error]`) |
-| Повтор `thinking` / `redacted_thinking` | Отбрасывается |
+| Повтор `thinking` / `redacted_thinking` | Элементы reasoning с сохранением подписей и непрозрачных данных |
 | Function-инструменты | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, именованный→`{type:"function",name}` |
 | `max_tokens` | `max_output_tokens` |
@@ -299,7 +299,7 @@ id/name; именованный `tool_choice` без имени.
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | Текстовые дельты | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
-| Резюме/текст рассуждений | Блок `thinking` с синтетической подписью |
+| Резюме/текст рассуждений | Блок `thinking` с исходной подписью, если она доступна; иначе синтетическая |
 | Кадры function-call | Блок `tool_use` с `input_json_delta` |
 | Завершающее событие | `message_delta` → `message_stop` |
 | EOF до завершающего события | `api_error` в стиле 502 |

@@ -49,9 +49,12 @@ function isRec(v: unknown): v is Rec {
 }
 
 /** Resolve Claude-only sidecar overrides without mutating the shared server config. */
-export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
+export function buildClaudeReplayConfig(config: OcxConfig, desktopServiceTier?: unknown): OcxConfig {
   return bindCodexRoutingConfig({
     ...config,
+    // This value comes only from the validated Desktop alias translation. Keep the
+    // shared config untouched; explicit picker choices win over the global toggle.
+    ...(desktopServiceTier === "priority" || desktopServiceTier === "default" ? { fastMode: undefined } : {}),
     webSearchSidecar: {
       ...config.webSearchSidecar,
       ...config.claudeCode?.webSearchSidecar,
@@ -719,7 +722,7 @@ async function handleClaudeMessagesWithBudget(
     nativeLogged = true;
     addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, meta);
   };
-  const upstream = await handleResponses(internalReq, buildClaudeReplayConfig(config), logCtx, {
+  const upstream = await handleResponses(internalReq, buildClaudeReplayConfig(config, internalBody.service_tier), logCtx, {
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
     abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",

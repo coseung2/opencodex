@@ -18,6 +18,7 @@
 import { catalogModelEfforts, nativeEffortClamp, nativeOpenAiContextWindow, type CatalogModel } from "../codex/catalog";
 import { claudeCodeAlias, claudeCodeNativeAlias } from "./alias";
 import { desktop3pAlias } from "./desktop-3p";
+import { desktopFastModelId, supportsDesktopFast } from "./desktop-speed";
 import { AUTO_CONTEXT_OFF, shouldMarkOneMillion, type AutoContextMode } from "./context-windows";
 
 const MODEL_INFO_CREATED_AT = "2026-01-01T00:00:00Z";
@@ -111,6 +112,11 @@ export function buildAnthropicModelInfos(
 ): AnthropicModelInfo[] {
   const out: AnthropicModelInfo[] = [];
   const seen = new Set<string>();
+  const fastVariants: Array<{ base: AnthropicModelInfo; provider: string; modelId: string }> = [];
+  const addFastVariant = (base: AnthropicModelInfo, provider: string, modelId: string) => {
+    if (idStyle !== "desktop3p" || !supportsDesktopFast(provider, modelId)) return;
+    fastVariants.push({ base, provider, modelId });
+  };
   // [1m] picker variant (devlog 260712 B1): Claude Code accounts exactly 1M for ids
   // carrying the marker (2.1.207 binary: /\[1m\]/i → 1e6, compaction preserved), so
   // models with an authoritative >=1M window get a second selectable row. In
@@ -134,6 +140,7 @@ export function buildAnthropicModelInfos(
     const info = modelInfo(id, `${slug} (native)`, nativeEffectiveLadder(slug), true);
     out.push(info);
     push1mVariant(info, nativeOpenAiContextWindow(slug));
+    addFastVariant(info, "native", slug);
   }
   for (const m of routedModels) {
     const id = idStyle === "readable" ? claudeCodeAlias(m.provider, m.id) : aliasForRoute(m.provider, m.id);
@@ -146,6 +153,17 @@ export function buildAnthropicModelInfos(
     // Anthropic passthrough guard (audit 021 #3): never auto-widen canonical claude
     // routes — only a genuine >=1M window earns the variant row there.
     push1mVariant(info, m.contextWindow, m.provider === "anthropic" ? AUTO_CONTEXT_OFF : auto);
+    addFastVariant(info, m.provider, m.id);
+  }
+  for (const { base, provider, modelId } of fastVariants) {
+    const id = aliasForRoute(provider, desktopFastModelId(modelId));
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const info = { ...base, id, display_name: `${base.display_name} - Fast` };
+    out.push(info);
+    // Match the ordinary model's context-marker variants without changing its capabilities.
+    const variant = out.find(m => m.id === `${base.id}[1m]`);
+    if (variant) out.push({ ...variant, id: `${info.id}[1m]`, display_name: `${variant.display_name} - Fast` });
   }
   return out;
 }

@@ -83,8 +83,8 @@ describe("anthropic-flavor ModelInfo discovery entries (devlog 130 B4b)", () => 
   test("[1m] variants cover all >=1M NATIVES (audit R1#1)", () => {
     const infos = buildAnthropicModelInfos(["gpt-5.4", "gpt-5.6-sol"], []);
     const variants = infos.filter(i => i.id.endsWith("[1m]"));
-    expect(variants).toHaveLength(2); // gpt-5.4 (1M) + measured gpt-5.6-sol (1.05M)
-    expect(variants.every(v => v.display_name.endsWith("· 1M"))).toBe(true);
+    expect(variants).toHaveLength(3); // gpt-5.4 + Sol ordinary/Fast
+    expect(variants.every(v => v.display_name.includes("· 1M"))).toBe(true);
     expect(variants.every(v => v.max_input_tokens === 1_000_000)).toBe(true);
   });
 

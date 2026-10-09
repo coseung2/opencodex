@@ -256,12 +256,12 @@ Claude Code 的 `/effort` 设置会完整保留并传递给适配器：
 | Messages 输入 | Responses 输出 |
 | --- | --- |
 | 顶层 `system` | `instructions`（文本块以 `\n\n` 连接） |
-| `messages[].role: "system"` | 同样合并到 `instructions` |
+| `messages[].role: "system"` | 保持对话顺序的 `developer` 项 |
 | 用户文本 / 图像 | `input_text` / `input_image`（base64 → data URL） |
 | Assistant 文本 | `output_text` |
 | Assistant `tool_use` | `function_call`（`input` → JSON 字符串化的 `arguments`） |
 | 用户 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 前缀） |
-| 重放 `thinking` / `redacted_thinking` | 丢弃 |
+| 重放 `thinking` / `redacted_thinking` | 通过 reasoning 项保留签名和不透明数据 |
 | Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定名称→`{type:"function",name}` |
 | `max_tokens` | `max_output_tokens` |
@@ -278,7 +278,7 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | `response.created` | `message_start` + `ping` |
 | 心跳 | `ping` |
 | 文本增量 | `content_block_start` → `content_block_delta`（文本）→ `content_block_stop` |
-| 推理摘要/文本 | 带合成签名的 `thinking` 块 |
+| 推理摘要/文本 | 保留原始签名的 `thinking` 块；无原始签名时使用合成值 |
 | Function-call 帧 | 带 `input_json_delta` 的 `tool_use` 块 |
 | 终止事件 | `message_delta` → `message_stop` |
 | 在终止事件前 EOF | 502 风格的 `api_error` |

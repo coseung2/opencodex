@@ -200,6 +200,15 @@ If Claude Desktop's footer picker does not change the model for an already-runni
 conversation, use `/model <id>` in that conversation. OpenCodex cannot observe picker state; it
 routes the model id carried by each request. Confirm the result under **Logs → requestedModel**.
 
+For OpenAI models whose catalog advertises Priority support, Desktop offers the ordinary entry
+and a **- Fast** entry. The ordinary entry requests default speed; **- Fast** requests Priority
+processing, which can increase usage or cost. Both use the same model and preserve the selected
+reasoning effort. These choices override the gateway's global Fast setting for that request only;
+other sessions keep their own choices. Unsupported models and GPT models on other providers do
+not receive a Fast entry. Refresh or reapply a saved static Desktop model list after updating the
+gateway; a running app may need to be reopened to load the new entries. Claude Code CLI and Codex
+catalogs are unchanged.
+
 Models with an authoritative 1M context window get an extra `…[1m]` picker row: selecting it makes
 Claude Code account a full 1M context for that model (auto-compaction stays on) — the proxy strips
 the marker before routing.

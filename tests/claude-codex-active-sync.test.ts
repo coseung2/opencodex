@@ -88,8 +88,8 @@ describe("Claude replay Codex active state", () => {
     const shared = config();
     quota("a", 100);
     quota("b", 20);
-    const replay = buildClaudeReplayConfig(shared);
-    expect(replay.fastMode).toBe(true);
+    const replay = buildClaudeReplayConfig(shared, "default");
+    expect(replay.fastMode).toBeUndefined();
     expect(replay.webSearchSidecar?.model).toBe("claude-search");
     expect(resolveCodexAccountForThreadDetailed("thread", replay, Date.now(), "shared"))
       .toEqual({ status: "selected", accountId: "b" });
@@ -128,7 +128,7 @@ describe("Claude replay Codex active state", () => {
     const shared = config();
     quota("a", 10);
     quota("b", 20);
-    const replay = buildClaudeReplayConfig(shared);
+    const replay = buildClaudeReplayConfig(shared, "default");
     recordCodexUpstreamOutcome(replay, "a", 429, { modelId: "gpt-6-astra", promoteAccountId: "b" });
     expect(getEffectiveActiveCodexAccountId(shared)).toBe("b");
     expect(shared.activeCodexAccountId).toBe("b");

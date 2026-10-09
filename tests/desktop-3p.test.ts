@@ -90,6 +90,13 @@ describe("Claude Desktop 3P models", () => {
         labelOverride: "GLM 5.2 (opencode-go)",
         anthropicFamilyTier: "opus",
       },
+      {
+        name: "claude-opus-4-8-usz",
+        labelOverride: "GPT 5.6 Sol - Fast (native)",
+        anthropicFamilyTier: "opus",
+        supports1m: true,
+        prefer1m: true,
+      },
     ]);
   });
 
@@ -169,6 +176,7 @@ describe("Claude Desktop 3P models", () => {
       "claude-opus-4-8-ncb",
       "claude-opus-4-6",
       desktop3pAlias("cursor", "gpt-5.6-luna"),
+      "claude-opus-4-8-usz",
     ]);
     // supports1m ONLY where an authoritative contextWindow >= 1M was provided.
     const byName = new Map(reparsed.inferenceModels.map((m: { name: string }) => [m.name, m]));
@@ -182,7 +190,7 @@ describe("Claude Desktop 3P models", () => {
     const config = generateDesktop3pConfig(4096, ["gpt-5.6-sol"], [], "test-key", "hybrid");
     const reparsed = JSON.parse(JSON.stringify(config));
     expect(reparsed.modelDiscoveryEnabled).toBe(true);
-    expect(reparsed.inferenceModels.map((m: { name: string }) => m.name)).toEqual(["claude-opus-4-8-ncb"]);
+    expect(reparsed.inferenceModels.map((m: { name: string }) => m.name)).toEqual(["claude-opus-4-8-ncb", "claude-opus-4-8-usz"]);
   });
 
   test("generates a discovery-only config with --discovery-only", () => {
@@ -223,6 +231,7 @@ describe("Claude Desktop 3P models", () => {
     expect(reparsed.inferenceModels.map((model: { name: string }) => model.name)).toEqual([
       "claude-opus-4-8-ncb",
       "claude-opus-4-6",
+      "claude-opus-4-8-usz",
     ]);
     // Static generation also refreshes the decode registry (new + legacy aliases).
     expect(resolveDesktop3pAlias("claude-opus-4-8-ncb")).toBe("native/gpt-5.6-sol");

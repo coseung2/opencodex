@@ -12,6 +12,7 @@ import {
 } from "./desktop-profile";
 import { nativeOpenAiContextWindow } from "../codex/catalog";
 import { assertDesktop3pModelsValid } from "./desktop-3p-guard";
+import { desktopBaseModelId, desktopFastModelId, supportsDesktopFast } from "./desktop-speed";
 
 export interface Desktop3pModelEntry {
   name: string;
@@ -134,6 +135,7 @@ export function legacyDesktop3pAlias(provider: string, modelId: string): string 
 }
 
 function displayModelId(modelId: string): string {
+  if (desktopBaseModelId(modelId) !== modelId) return `${displayModelId(desktopBaseModelId(modelId))} - Fast`;
   return modelId
     // Capability markers like [1m] are not name text: strip the brackets so the label
     // reads "K3 1M", never "K3[1m]".
@@ -165,6 +167,9 @@ function collectDesktop3pModels(
     }),
     ...routedModels,
   ];
+  // Append variants after all ordinary entries so existing aliases/defaults keep priority.
+  candidates.push(...candidates.filter(m => supportsDesktopFast(m.provider, m.id))
+    .map(m => ({ ...m, id: desktopFastModelId(m.id) })));
 
   if (profile) {
     const profileModels = candidates.map(({ provider, id, contextWindow }) => ({
@@ -172,7 +177,11 @@ function collectDesktop3pModels(
       label: `${displayModelId(id)} (${provider})`,
       ...(typeof contextWindow === "number" ? { contextWindow } : {}),
     } satisfies DesktopProfileModel));
-    const reconciled = reconcileDesktopProfile(profile, profileModels);
+    // Allocate ordinary rows first: adding Fast must not take a date slot from an
+    // existing ordinary row that has not yet been persisted by an explicit apply.
+    const ordinaryProfile = reconcileDesktopProfile(profile, profileModels.filter(m =>
+      desktopBaseModelId(m.route) === m.route));
+    const reconciled = reconcileDesktopProfile(ordinaryProfile, profileModels);
     const rendered = renderDesktopProfile(reconciled, profileModels);
     const aliasesByRoute = new Map<string, string>();
     for (const model of rendered) {

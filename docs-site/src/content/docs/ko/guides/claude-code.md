@@ -307,12 +307,12 @@ Claude Code의 `/effort` 설정은 어댑터에서도 유지돼요.
 | Messages 입력 | Responses 출력 |
 | --- | --- |
 | 최상위 `system` | `instructions`(텍스트 블록을 `\n\n`으로 연결) |
-| `messages[].role: "system"` | `instructions`에도 합쳐요 |
+| `messages[].role: "system"` | 대화 순서대로 `developer` 항목에 유지해요 |
 | 사용자 텍스트 / 이미지 | `input_text` / `input_image`(base64 → data URL) |
 | Assistant 텍스트 | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 문자열로 변환한 `arguments`) |
 | 사용자 `tool_result` | `function_call_output`(`is_error` → `[tool error]` 접두사) |
-| `thinking` / `redacted_thinking` 재생 | 버려요 |
+| `thinking` / `redacted_thinking` 재생 | 서명과 불투명 데이터를 보존하는 reasoning 항목 |
 | Function 도구 | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, 이름 지정→`{type:"function",name}` |
 | `max_tokens` | `max_output_tokens` |
@@ -328,7 +328,7 @@ role, `tool_use_id` 없는 `tool_result`, id/name 없는 `tool_use`, name 없는
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | 텍스트 delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
-| 추론 요약/텍스트 | 합성 signature가 있는 `thinking` 블록 |
+| 추론 요약/텍스트 | 실제 signature를 보존하는 `thinking` 블록; 없으면 합성 값 사용 |
 | Function-call 프레임 | `input_json_delta`가 있는 `tool_use` 블록 |
 | 종료 이벤트 | `message_delta` → `message_stop` |
 | 종료 전에 EOF | 502 형식 `api_error` |

@@ -13,6 +13,7 @@ import type { OcxClaudeCodeConfig } from "../types";
 import { resolveAlias } from "./alias";
 import { stripOneMillionMarker } from "./context-windows";
 import { resolveDesktop3pAlias } from "./desktop-3p";
+import { desktopBaseModelId, desktopRouteSpeed } from "./desktop-speed";
 import { createHash } from "node:crypto";
 
 export class AnthropicRequestError extends Error {}
@@ -36,8 +37,10 @@ export function resolveInboundModel(model: string, cc?: OcxClaudeCodeConfig): st
   if (desktop3p) {
     // Native pseudo-provider returns bare slug; routed returns provider/model
     const sep = desktop3p.indexOf("/");
-    if (sep > 0 && desktop3p.slice(0, sep) === "native") return desktop3p.slice(sep + 1);
-    return desktop3p;
+    const baseModel = desktopRouteSpeed(desktop3p) === "priority"
+      ? desktopBaseModelId(desktop3p.slice(sep + 1)) : desktop3p.slice(sep + 1);
+    if (sep > 0 && desktop3p.slice(0, sep) === "native") return baseModel;
+    return `${desktop3p.slice(0, sep)}/${baseModel}`;
   }
   const map = cc?.modelMap ?? {};
   const exact = map[model];
@@ -443,6 +446,10 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
     store: false,
     stream: raw.stream === true,
   };
+
+  const desktopRoute = resolveDesktop3pAlias(stripOneMillionMarker(raw.model));
+  const speed = desktopRoute ? desktopRouteSpeed(desktopRoute) : undefined;
+  if (speed) body.service_tier = speed;
 
   if (systemParts.length > 0) body.instructions = systemParts.join("\n\n");
 
