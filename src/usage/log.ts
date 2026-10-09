@@ -191,6 +191,9 @@ function normalizeUsageValue(usage: OcxUsage | undefined): OcxUsage | undefined 
     ...(typeof usage.cachedInputTokens === "number" ? { cachedInputTokens: usage.cachedInputTokens } : {}),
     ...(typeof usage.cacheReadInputTokens === "number" ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
     ...(typeof usage.cacheCreationInputTokens === "number" ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
+    // The cache-write lifetime the provider named (Bedrock cacheDetails.ttl). Persisted so the
+    // recorded lifetime survives to the cache summary instead of being re-inferred from config.
+    ...(usage.cacheWriteTtl === "5m" || usage.cacheWriteTtl === "1h" ? { cacheWriteTtl: usage.cacheWriteTtl } : {}),
     ...(typeof usage.reasoningOutputTokens === "number" ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
     ...(usage.estimated ? { estimated: true } : {}),
   };

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { summarizeClaudeCache } from "../src/usage/cache-summary";
+import { summarizeCacheEffectiveness, summarizeClaudeCache } from "../src/usage/cache-summary";
 import type { OcxConfig } from "../src/types";
 import type { PersistedUsageEntry } from "../src/usage/log";
 const config = { providers: {} } as OcxConfig;
@@ -21,5 +21,40 @@ describe("Claude cache observations", () => {
   test("excludes other surfaces and never exposes private fields", () => {
     expect(summarizeClaudeCache([entry({ surface: "claude-desktop" })], config).rows).toHaveLength(0);
     expect(JSON.stringify(summarizeClaudeCache([entry({ conversationId: "private", apiKeyId: "secret" })], config))).not.toContain("private");
+  });
+});
+describe("cache effectiveness", () => {
+  const tel = { readReported: true, writeReported: false, inputIncludesCache: true } as const;
+  test("aggregates a hit rate across rows, not just the latest", () => {
+    const rows = summarizeCacheEffectiveness([
+      entry({ timestamp: 1, usage: { inputTokens: 100, outputTokens: 1, cachedInputTokens: 80, cacheTelemetry: tel } }),
+      entry({ timestamp: 2, usage: { inputTokens: 100, outputTokens: 1, cachedInputTokens: 0, cacheTelemetry: tel } }),
+    ], config, 2000).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].samples).toBe(2);
+    expect(rows[0].reportedSamples).toBe(2);
+    expect(rows[0].hitRatio).toBeCloseTo(0.4, 5);
+    expect(rows[0].status).toBe("hit");
+  });
+  test("a silent provider is unreported, never a fabricated 0%", () => {
+    const row = summarizeCacheEffectiveness([
+      entry({ provider: "kiro", timestamp: 1, usage: { inputTokens: 220, outputTokens: 40, contextTotalTokens: 100_000 } }),
+      entry({ provider: "kiro", timestamp: 2, usage: { inputTokens: 300, outputTokens: 40, contextTotalTokens: 100_300 } }),
+    ], config, 2000).rows[0];
+    expect(row.status).toBe("unreported");
+    expect(row.hitRatio).toBeNull();
+    expect(row.observedTtl).toBeUndefined();
+    expect(row.estimatedReuseRatio).toBeGreaterThan(0.99);
+  });
+  test("the longest cache-write TTL the provider named survives", () => {
+    const withTtl = (timestamp: number, cacheWriteTtl: "5m" | "1h") =>
+      entry({ timestamp, usage: { inputTokens: 50, outputTokens: 1, cachedInputTokens: 10, cacheCreationInputTokens: 4, cacheWriteTtl, cacheTelemetry: { readReported: true, writeReported: true, inputIncludesCache: true } } });
+    const row = summarizeCacheEffectiveness([withTtl(1, "5m"), withTtl(2, "1h")], config, 2000).rows[0];
+    expect(row.observedTtl).toBe("1h");
+    expect(row.writeTokens).toBe(8);
+  });
+  test("covers every surface and never exposes private fields", () => {
+    expect(summarizeCacheEffectiveness([entry({ surface: "claude-desktop" })], config).rows).toHaveLength(1);
+    expect(JSON.stringify(summarizeCacheEffectiveness([entry({ conversationId: "private", apiKeyId: "secret" })], config))).not.toContain("private");
   });
 });

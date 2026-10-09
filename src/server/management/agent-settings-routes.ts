@@ -781,6 +781,15 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     return jsonResponse(summarizeRecordedCachePolicies(readRecentUsageEntries(2000)));
   }
 
+  // Per provider+model cache EFFECTIVENESS (a hit rate, not just the latest request) across
+  // every surface. A provider that never names a cache read stays "unreported" — never a
+  // fabricated 0% — with a labelled reuse estimate only when it exposes a context checkpoint.
+  if (url.pathname === "/api/cache-effectiveness" && req.method === "GET") {
+    const { readRecentUsageEntries } = await import("../../usage/log");
+    const { summarizeCacheEffectiveness } = await import("../../usage/cache-summary");
+    return jsonResponse(summarizeCacheEffectiveness(readRecentUsageEntries(2000), config));
+  }
+
   // Claude Code inbound settings (GUI "Claude ON" toggle + Claude page).
   if (url.pathname === "/api/claude-code" && req.method === "GET") {
     const models = await fetchAllModels(config);

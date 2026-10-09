@@ -343,6 +343,12 @@ export interface OcxUsage {
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  /**
+   * TTL of the cache write this request performed, when the provider names it — the Bedrock /
+   * CodeWhisperer `usage.cacheDetails[].ttl` (`"5m" | "1h"`). The longest TTL wins when one
+   * request writes both. Absent means "not reported", never "no lifetime".
+   */
+  cacheWriteTtl?: "5m" | "1h";
   reasoningOutputTokens?: number;
   estimated?: boolean;
 }

@@ -66,17 +66,53 @@ function tokenCount(eventType: string, obj: Record<string, unknown>, key: string
   return value;
 }
 
+/**
+ * The cache WRITE TTL a metadata event reports, from the Bedrock Converse `cacheDetails`
+ * array (`[{ inputTokens, ttl: "5m" | "1h" }]`, sorted longest-first). Returns the longest
+ * TTL written, or undefined when the field is absent or empty — a request that wrote nothing
+ * carries no lifetime, so this never invents one. A malformed entry is refused rather than
+ * guessed at, the same discipline as the token counts beside it.
+ */
+function parseCacheWriteTtl(eventType: string, value: unknown): "5m" | "1h" | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return malformed(eventType, "cacheDetails must be an array");
+  if (value.length === 0) return undefined;
+  let saw1h = false;
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return malformed(eventType, "cacheDetails entry must be an object");
+    }
+    const detail = entry as Record<string, unknown>;
+    if (detail.ttl !== "5m" && detail.ttl !== "1h") {
+      return malformed(eventType, "cacheDetails.ttl must be 5m or 1h");
+    }
+    tokenCount(eventType, detail, "inputTokens", true);
+    if (detail.ttl === "1h") saw1h = true;
+  }
+  return saw1h ? "1h" : "5m";
+}
+
 function parseTokenUsage(eventType: string, value: unknown): OcxUsage | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "object" || Array.isArray(value)) {
     return malformed(eventType, "tokenUsage must be an object");
   }
   const usage = value as Record<string, unknown>;
-  const uncached = tokenCount(eventType, usage, "uncachedInputTokens", true);
+  // Kiro names the uncached remainder `uncachedInputTokens`; the Bedrock Converse schema it
+  // mirrors names it `inputTokens`. Accept either so a Bedrock-shaped frame parses instead of
+  // throwing — a throw here escapes parseKiroEvent and fails the whole request as a protocol
+  // error (kiro-codec.ts). The Kiro-native key wins when both appear.
+  const uncached = tokenCount(
+    eventType,
+    usage,
+    usage.uncachedInputTokens !== undefined ? "uncachedInputTokens" : "inputTokens",
+    true,
+  );
   const cacheRead = tokenCount(eventType, usage, "cacheReadInputTokens", false);
   const cacheWrite = tokenCount(eventType, usage, "cacheWriteInputTokens", false);
   const outputTokens = tokenCount(eventType, usage, "outputTokens", true);
   const totalTokens = tokenCount(eventType, usage, "totalTokens", true);
+  const cacheWriteTtl = parseCacheWriteTtl(eventType, usage.cacheDetails);
   const inputTokens = uncached + cacheRead + cacheWrite;
   if (!Number.isSafeInteger(inputTokens)) return malformed(eventType, "input token usage overflowed");
   return {
@@ -91,6 +127,7 @@ function parseTokenUsage(eventType: string, value: unknown): OcxUsage | undefine
     cachedInputTokens: cacheRead,
     cacheReadInputTokens: cacheRead,
     cacheCreationInputTokens: cacheWrite,
+    ...(cacheWriteTtl !== undefined ? { cacheWriteTtl } : {}),
   };
 }
 
