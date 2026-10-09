@@ -129,18 +129,10 @@ function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderCon
   const toolCatalogNudge = shouldInjectNonOpenAIToolCatalogNudge(provider)
     ? buildNonOpenAIToolCatalogNudgeForTools(context.tools, options.toolChoice)
     : undefined;
-  // Chat templates used by LM Studio, llama.cpp, and other strict OpenAI-compatible
-  // backends require every system instruction to precede conversation history. Codex can
-  // append developer reminders after user turns, so fold text-only developer messages into
-  // the single leading system message instead of emitting role:"system" in place. Developer
-  // messages with images cannot be represented as system content and remain user-compatible
-  // vision messages at their original position below.
-  const developerSystemParts = context.messages
-    .map(developerSystemText)
-    .filter((part): part is string => part !== undefined && part.length > 0);
+  // Only genuinely leading instructions belong here. Mid-conversation developer
+  // notices retain their position below, preserving the cached conversation prefix.
   const systemParts = [
     ...(context.systemPrompt ?? []),
-    ...developerSystemParts,
     ...(toolCatalogNudge ? [toolCatalogNudge] : []),
   ];
   if (systemParts.length > 0) {
@@ -158,9 +150,15 @@ function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderCon
       case "developer": {
         const parts = typeof msg.content === "string" ? undefined : msg.content as OcxContentPart[];
         const hasImages = parts?.some(p => p.type === "image") ?? false;
-        if (msg.role === "developer" && !hasImages) break;
         let chatMsg: Record<string, unknown>;
-        if (typeof msg.content === "string") {
+        if (msg.role === "developer" && !hasImages) {
+          const text = developerSystemText(msg);
+          if (!text) break;
+          // Keep chronology (upstream #5213). System is the compatible role for
+          // gateways which do not accept developer; pending tool rounds still
+          // defer this barrier below, so tool_call/tool_result adjacency survives.
+          chatMsg = { role: "system", content: text };
+        } else if (typeof msg.content === "string") {
           chatMsg = { role: "user", content: msg.content };
         } else {
           if (!hasImages) {

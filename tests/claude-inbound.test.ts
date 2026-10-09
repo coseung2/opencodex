@@ -144,7 +144,7 @@ describe("claude inbound translation", () => {
       .toEqual({ type: "function", name: "Read" });
   });
 
-  test("system role messages fold into instructions (real Claude Code sends them; native backend rejects system items)", () => {
+  test("system role messages stay chronological as developer items", () => {
     const body = anthropicToResponsesBody({
       model: "m", max_tokens: 10,
       system: "top-level",
@@ -154,11 +154,10 @@ describe("claude inbound translation", () => {
         { role: "user", content: "hi" },
       ],
     }) as any;
-    expect(body.instructions).toBe("top-level\n\nbe terse\n\nblock form");
+    expect(body.instructions).toBe("top-level");
     // No system message items in input — native ChatGPT backend 400s on them.
     expect((body.input as any[]).every(item => item.role !== "system")).toBe(true);
-    expect(body.input).toHaveLength(1);
-    expect(body.input[0].role).toBe("user");
+    expect(body.input.map((item: any) => item.role)).toEqual(["developer", "developer", "user"]);
     expect(() => responsesRequestSchema.parse(body)).not.toThrow();
     expect(() => parseRequest(body)).not.toThrow();
   });

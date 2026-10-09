@@ -19,7 +19,7 @@ function buildMessages(context: OcxParsedRequest["context"]): Array<Record<strin
 }
 
 describe("openai-chat system message ordering", () => {
-  test("folds interleaved developer reminders into one leading system message", () => {
+  test("keeps interleaved developer reminders chronological without rewriting the leading system", () => {
     const messages = buildMessages({
       systemPrompt: ["base instructions"],
       messages: [
@@ -42,10 +42,9 @@ describe("openai-chat system message ordering", () => {
 
     expect(messages[0]).toEqual({
       role: "system",
-      content: "base instructions\n\nfirst reminder\n\nsecond reminder",
+      content: "base instructions",
     });
-    expect(messages.slice(1).map(message => message.role)).toEqual(["user", "assistant", "user"]);
-    expect(messages.slice(1).some(message => message.role === "system")).toBe(false);
+    expect(messages.slice(1).map(message => message.role)).toEqual(["user", "system", "assistant", "system", "user"]);
   });
 
   test("keeps tool calls and results adjacent when a developer reminder follows the call", () => {
@@ -70,9 +69,9 @@ describe("openai-chat system message ordering", () => {
       ],
     });
 
-    expect(messages[0]).toEqual({ role: "system", content: "remember the policy" });
-    expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool"]);
-    expect(messages[3]).toMatchObject({ role: "tool", tool_call_id: "call_1" });
+    expect(messages.at(-1)).toEqual({ role: "system", content: "remember the policy" });
+    expect(messages.map(message => message.role)).toEqual(["user", "assistant", "tool", "system"]);
+    expect(messages[2]).toMatchObject({ role: "tool", tool_call_id: "call_1" });
   });
 
   test("keeps developer vision content as a user-compatible message in place", () => {

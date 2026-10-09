@@ -243,10 +243,8 @@ function blockedSkillCallIds(messages: readonly unknown[], blocked: readonly str
 
 /**
  * Claude Code (observed 2026-07-11, real CLI smoke) sends `role:"system"` entries in
- * `messages` despite the published API having no system role. Map them to Responses
- * instructions text: the native ChatGPT backend rejects system message items in
- * `input` ("System messages are not allowed", verified live), so folding into
- * `instructions` is the only shape that works on every route.
+ * `messages`. Keep them chronological as developer items: native ChatGPT rejects
+ * system input items, while hoisting them into instructions breaks prompt caching.
  */
 function systemMessageText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -256,6 +254,12 @@ function systemMessageText(content: unknown): string {
     if (isRec(raw) && raw.type === "text" && typeof raw.text === "string") parts.push(raw.text);
   }
   return parts.join("\n\n");
+}
+
+/** Token accounting belongs to the client, not a synthetic model-facing user turn. */
+function isTokenAccountingNotice(text: string): boolean {
+  const notice = text.trim().replace(/^<system-reminder>\s*([\s\S]*?)\s*<\/system-reminder>$/, "$1").trim();
+  return /^<total_tokens>\s*\d+\s+tokens left\s*<\/total_tokens>$/.test(notice);
 }
 
 function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION): void {
@@ -435,7 +439,8 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
     else if (msg.role === "assistant") assistantMessageToItems(msg.content, input);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
-      if (text.length > 0) systemParts.push(text);
+      // Upstream #4161: chronological notices must not rewrite the prompt head.
+      if (text.length > 0 && !isTokenAccountingNotice(text)) input.push({ type: "message", role: "developer", content: [{ type: "input_text", text }] });
     }
     else throw new AnthropicRequestError(`unsupported message role: ${String(msg.role)}`);
   }

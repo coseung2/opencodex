@@ -400,7 +400,7 @@ The proxy translates every Anthropic Messages API request into the Codex Respons
 | Messages input | Responses output |
 | --- | --- |
 | Top-level `system` | `instructions` (text blocks joined with `\n\n`) |
-| `messages[].role: "system"` | Also folded into `instructions` |
+| `messages[].role: "system"` | Chronological `developer` items; standalone token accounting notices are omitted |
 | User text / image | `input_text` / `input_image` (base64 → data URL) |
 | Assistant text | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringified `arguments`) |
