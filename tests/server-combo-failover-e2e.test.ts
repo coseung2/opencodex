@@ -940,7 +940,10 @@ describe("server combo failover 030 activation matrix", () => {
     expect(ordinaryBody).not.toHaveProperty("usage");
     expect(ordinaryReads).toBe(1);
     expect((await latestAttemptReceipts(ordinaryConfig)).usage.attempts?.[0]?.usage)
-      .toEqual({ inputTokens: 11, outputTokens: 2, totalTokens: 13 });
+      .toEqual({
+        inputTokens: 11, outputTokens: 2, totalTokens: 13,
+        cacheTelemetry: { inputIncludesCache: true, readReported: false, writeReported: false },
+      });
   });
 
   test("captures passthrough failed usage from its original bounded body exactly once", async () => {
@@ -977,7 +980,10 @@ describe("server combo failover 030 activation matrix", () => {
     expect(passthroughResponses).toBe(1);
     expect(passthroughReads).toBe(1);
     expect((await latestAttemptReceipts(passthroughConfig)).usage.attempts?.[0]?.usage)
-      .toEqual({ inputTokens: 17, outputTokens: 3, totalTokens: 20 });
+      .toEqual({
+        inputTokens: 17, outputTokens: 3, totalTokens: 20,
+        cacheTelemetry: { inputIncludesCache: true, readReported: false, writeReported: false },
+      });
   });
 
   test("provider-local retry keeps one attempt, two sends, recovery kind, and latest estimate", async () => {
