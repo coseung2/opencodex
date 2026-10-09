@@ -113,6 +113,7 @@ enum ContentTab {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ModelHit {
+    Sync,
     ToggleProvider(String),
     SetProviderVisibility {
         provider: String,
@@ -3317,7 +3318,9 @@ unsafe fn submit_connection(hwnd: HWND, disconnect: bool) {
                         "Using the local OCX".into()
                     };
                     if app.modal_generation == generation {
-                        destroy_api_key_edit(app);
+                        // This completion runs on a worker. DestroyWindow must run
+                        // on the creating UI thread: keep edit handles for WM_DATA
+                        // cleanup below instead of losing them after a failed destroy.
                         app.provider_modal = None;
                         app.modal_generation = app.modal_generation.wrapping_add(1);
                     }
@@ -5564,7 +5567,63 @@ unsafe fn draw_content_tabs(dc: HDC, width: i32, app: &App, font: HFONT) {
     );
 }
 
+fn sync_claude_labels() -> Result<(), String> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let executable = PathBuf::from(std::env::var_os("SystemRoot").ok_or("Windows path unavailable")?)
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut child = Command::new(executable)
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"])
+        .env("OCX_CLAUDE_GATEWAY_ORIGIN", if api::is_remote() {
+            format!("http://{}:{}", data_relay::RELAY_HOST, data_relay::RELAY_PORT)
+        } else {
+            api::connection_base_url()
+        })
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW prevents a console being created.
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|_| "Could not start Claude sync")?;
+    let mut input = child.stdin.take().ok_or("Could not open sync input")?;
+    input.write_all(include_str!("../assets/sync-claude-models.ps1").as_bytes())
+        .map_err(|_| "Could not send sync script")?;
+    input.write_all(b"\n").map_err(|_| "Could not finish sync script")?;
+    drop(input);
+    if !child.wait().map_err(|_| "Could not wait for Claude sync")?.success() {
+        return Err("Claude sync failed; check the gateway and applied profile".into());
+    }
+    Ok(())
+}
+
 fn handle_model_action(hwnd: HWND, action: ModelHit) {
+    if action == ModelHit::Sync {
+        let mut started = false;
+        with_app(|app| {
+            if app.state.models.mutating.is_empty() {
+                app.state.models.mutating.insert("__manual_sync".into());
+                app.state.models.message = Some("동기화 중…".into());
+                started = true;
+            }
+        });
+        if !started { return; }
+        unsafe { let _ = InvalidateRect(hwnd, None, false); }
+        let hwnd_value = hwnd.0 as isize;
+        thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                api::sync_codex_catalog()?;
+                sync_claude_labels()?;
+                Ok(())
+            })();
+            with_app(|app| {
+                app.state.models.mutating.remove("__manual_sync");
+                app.state.models.message = Some(match result {
+                    Ok(()) => "동기화 완료 · Claude 앱을 다시 열면 반영됩니다".into(),
+                    Err(error) => format!("동기화 실패: {error}"),
+                });
+            });
+            unsafe { let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0)); }
+        });
+        return;
+    }
     let mut mutation = None;
     with_app(|app| {
         let (provider, rows, enabled) = match &action {
@@ -5600,7 +5659,7 @@ fn handle_model_action(hwnd: HWND, action: ModelHit) {
                 }
                 (provider.clone(), rows, *enabled)
             }
-            ModelHit::ToggleProvider(_) => return,
+            ModelHit::ToggleProvider(_) | ModelHit::Sync => return,
         };
         let keys = rows
             .iter()
@@ -5783,7 +5842,7 @@ unsafe fn draw_models(
     set_text_color(dc, 0x008e949e);
     draw_text(
         dc,
-        "Visible models appear in the OCX and Codex catalog",
+        "모델 목록",
         RECT {
             left,
             top: y + 4,
@@ -5811,6 +5870,14 @@ unsafe fn draw_models(
         return;
     }
 
+    let sync_rect = RECT { left: right - 96, right, top: y - 40, bottom: y - 8 };
+    if visible(&sync_rect) {
+        fill_solid(dc, sync_rect, 0x003a322d);
+        set_text_color(dc, 0x00f0ece8);
+        draw_text(dc, if state.mutating.contains("__manual_sync") { "동기화 중" } else { "동기화" },
+            sync_rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        if state.mutating.is_empty() { app.model_hits.push((sync_rect, ModelHit::Sync)); }
+    }
     let mut provider = "";
     for row in &state.rows {
         if row.provider != provider {

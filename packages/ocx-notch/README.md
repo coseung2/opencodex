@@ -9,6 +9,12 @@ for removal. A confirmation names the provider before submitting the deletion.
 The server prevents removing the last default provider or a provider used by a
 combo; deleting the current default selects another enabled provider. After
 removal, use **동기화** in the Models tab to update Claude's saved model list.
+The manual sync updates the Codex catalog and the applied Claude Desktop gateway
+profile without opening a console or restarting either app. It uses that profile's
+gateway origin, checks it against the active OCX connection, and preserves the
+existing list if discovery fails or returns no models. Reopen Claude Desktop to
+load changed labels. The standalone helper accepts `-ConfigLibrary` and
+`-GatewayOrigin` for installations using a different profile directory or port.
 
 ## Build and run
 
@@ -179,6 +185,7 @@ It uses Notch's current connection profile, writes no credential to stdout, and
 exits nonzero when the selected OCX instance cannot be queried. The current native
 export also includes an allowlisted `claudeCode` policy object for agent generation;
 no admission credentials or authentication diagnostics are exported.
+
 Provider quota consumers can use `ocx-notch --provider-quotas` (native equivalent:
 `--provider-quotas-output <new-file>`). This read-only query reuses the selected
 protected connection and `/api/provider-quotas`; it never falls back from a broken
