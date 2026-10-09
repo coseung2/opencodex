@@ -9812,8 +9812,57 @@ unsafe fn show_pool_policy_menu(hwnd: HWND, provider: &str) {
     let _ = InvalidateRect(hwnd, None, false);
 }
 
+fn launch_provider_delete(hwnd: HWND, provider: String) {
+    let prompt: Vec<u16> = format!("{provider}\n\n이 프로바이더를 삭제할까요? 해당 모델을 더 이상 선택할 수 없습니다. 기본 프로바이더라면 다른 활성 프로바이더로 변경됩니다.")
+        .encode_utf16().chain(Some(0)).collect();
+    if unsafe { MessageBoxW(hwnd, PCWSTR(prompt.as_ptr()), w!("프로바이더 삭제"),
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) } != IDYES { return; }
+    let key = format!("provider-delete:{provider}");
+    let mut started = false;
+    with_app(|app| {
+        if app.account_mutations.insert(key.clone()) {
+            app.state.status = format!("{provider} 삭제 중…");
+            started = true;
+        }
+    });
+    if !started { return; }
+    unsafe { let _ = InvalidateRect(hwnd, None, false); }
+    let hwnd_value = hwnd.0 as isize;
+    thread::spawn(move || {
+        let result = api::delete_provider(&provider);
+        with_app(|app| {
+            app.account_mutations.remove(&key);
+            match result {
+                Ok(()) => {
+                    app.state.configs.retain(|config| config.name != provider);
+                    app.state.pools.retain(|pool| pool.provider != provider);
+                    app.state.models.rows.retain(|row| row.provider != provider);
+                    app.expanded_providers.remove(&provider);
+                    app.expanded_model_providers.remove(&provider);
+                    app.rebuild_provider_views();
+                    app.state.status = format!("{provider} 삭제 완료 · 모델 탭에서 동기화하세요");
+                    app.force_refresh.store(true, Ordering::Release);
+                }
+                Err(error) => app.state.status = format!("프로바이더 삭제 실패: {error}"),
+            }
+        });
+        unsafe { let _ = PostMessageW(HWND(hwnd_value as *mut _), WM_DATA, WPARAM(0), LPARAM(0)); }
+    });
+}
+
 unsafe fn show_context_menu(hwnd: HWND) {
     let menu = CreatePopupMenu().unwrap_or_default();
+    let mut providers = Vec::new();
+    with_app(|app| providers = app.state.configs.iter().map(|config| config.name.clone()).collect());
+    providers.sort();
+    providers.dedup();
+    let delete_menu = CreatePopupMenu().unwrap_or_default();
+    for (index, provider) in providers.iter().enumerate() {
+        let label: Vec<u16> = provider.replace('&', "&&").encode_utf16().chain(Some(0)).collect();
+        let _ = AppendMenuW(delete_menu, MF_STRING, 10_000 + index, PCWSTR(label.as_ptr()));
+    }
+    let _ = AppendMenuW(menu, MF_POPUP | if providers.is_empty() { MF_GRAYED } else { MF_STRING },
+        delete_menu.0 as usize, w!("프로바이더 삭제"));
     let _ = AppendMenuW(menu, MF_STRING, MENU_PROVIDER_ADD, w!("프로바이더 추가..."));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, MENU_CONNECTION, w!("연결 설정..."));
@@ -9825,9 +9874,14 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let _ = GetCursorPos(&mut point);
     let _ = SetForegroundWindow(hwnd);
     with_app(|app| app.context_menu_open = true);
-    let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, None);
+    let command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, point.x, point.y, 0, hwnd, None).0 as usize;
     with_app(|app| app.context_menu_open = false);
     let _ = DestroyMenu(menu);
+    if let Some(provider) = command.checked_sub(10_000).and_then(|index| providers.get(index)) {
+        launch_provider_delete(hwnd, provider.clone());
+    } else if command != 0 {
+        let _ = SendMessageW(hwnd, WM_COMMAND, WPARAM(command), LPARAM(0));
+    }
     resize_for_state(hwnd);
     let _ = InvalidateRect(hwnd, None, false);
 }

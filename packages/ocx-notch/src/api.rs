@@ -524,6 +524,29 @@ pub fn delete_issued_api_key(id: &str) -> Result<(), String> {
     request("DELETE", "/api/keys", Some(&body), 10_000).map(|_| ())
 }
 
+fn provider_delete_path(name: &str) -> Result<String, String> {
+    if name.trim().is_empty() { return Err("Provider name is missing".into()); }
+    let encoded: String = name.bytes().map(|byte| {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            (byte as char).to_string()
+        } else {
+            format!("%{byte:02X}")
+        }
+    }).collect();
+    Ok(format!("/api/providers?name={encoded}"))
+}
+
+pub fn delete_provider(name: &str) -> Result<(), String> {
+    request("DELETE", &provider_delete_path(name)?, None, 30_000).map(|_| ())
+}
+
+#[test]
+fn provider_deletion_encodes_exact_query_target() {
+    assert_eq!(provider_delete_path("google-antigravity").unwrap(), "/api/providers?name=google-antigravity");
+    assert_eq!(provider_delete_path("name&other=value").unwrap(), "/api/providers?name=name%26other%3Dvalue");
+    assert!(provider_delete_path(" ").is_err());
+}
+
 pub fn put_json<T: DeserializeOwned>(
     path: &str,
     value: &impl serde::Serialize,

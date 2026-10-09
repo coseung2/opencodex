@@ -4,6 +4,12 @@ OCX Notch is a Windows native widget for managing OCX accounts, models, subagent
 usage and request logs. It can use a local OCX or connect Notch and Codex to your own
 remote server. Start and Stop control the local OCX only.
 
+Right-click Notch and choose **프로바이더 삭제** to select a configured provider
+for removal. A confirmation names the provider before submitting the deletion.
+The server prevents removing the last default provider or a provider used by a
+combo; deleting the current default selects another enabled provider. After
+removal, use **동기화** in the Models tab to update Claude's saved model list.
+
 ## Build and run
 
 Requires a current stable Rust toolchain and Windows 10 or later.
