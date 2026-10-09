@@ -77,6 +77,27 @@ struct ModelRoute {
     label: String,
 }
 
+/// One provider's confirmed prompt-cache policy, as the proxy recorded it while the
+/// request ran. Projected like every other field: unknown keys are dropped, so a
+/// future server field never reaches the plugin file unannounced.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachePolicyRow {
+    provider: String,
+    model: String,
+    control: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_retention: Option<String>,
+    last_observed_at: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachePolicyResponse {
+    #[serde(default)]
+    rows: Vec<CachePolicyRow>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudePolicy {
@@ -92,6 +113,9 @@ struct Export {
     connection_origin: String,
     model_routes: Vec<ModelRoute>,
     model_map: std::collections::BTreeMap<String, String>,
+    /// Confirmed per-provider prompt-cache policy. Additive under schemaVersion 1:
+    /// a consumer that predates it ignores the key rather than failing.
+    cache_policy: Vec<CachePolicyRow>,
     #[serde(flatten)]
     quotas: QuotaResponse,
 }
@@ -107,6 +131,10 @@ pub fn write(path: &Path) -> Result<(), &'static str> {
         .map(|state| state.rendered).unwrap_or_default();
     let model_map = crate::api::get_json::<ClaudePolicy>("/api/claude-code", 8_000)
         .map(|policy| policy.model_map).unwrap_or_default();
+    // Optional on servers that predate the endpoint: an empty list is "not recorded",
+    // never "no caching", and the plugin shows the policy it can confirm.
+    let cache_policy = crate::api::get_json::<CachePolicyResponse>("/api/cache-policy", 20_000)
+        .map(|response| response.rows).unwrap_or_default();
     if origin != crate::api::connection_base_url()
         || crate::api::poll_generation() != crate::api::connection::generation()
     {
@@ -118,6 +146,7 @@ pub fn write(path: &Path) -> Result<(), &'static str> {
         connection_origin: origin,
         model_routes,
         model_map,
+        cache_policy,
         quotas,
     }).map_err(|_| "Could not encode provider quotas")?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)
@@ -156,6 +185,34 @@ mod tests {
         let out = serde_json::to_string(&state.rendered).unwrap();
         assert!(out.contains("native/gpt-6.1-sol"));
         assert!(!out.contains("private"));
+    }
+
+    #[test]
+    fn cache_policy_projection_keeps_only_read_only_metadata() {
+        let input = serde_json::json!({
+            "generatedAt": 1000, "apiKey": "private",
+            "rows": [{"provider": "opencode-go", "model": "deepseek-v4.1-flash",
+                "control": "unknown", "requestedRetention": "long",
+                "lastObservedAt": 1000, "accountId": "private"}]
+        });
+        let response: CachePolicyResponse = serde_json::from_value(input).unwrap();
+        let out = serde_json::to_string(&response).unwrap();
+        assert!(out.contains("\"control\":\"unknown\""));
+        assert!(out.contains("\"requestedRetention\":\"long\""));
+        assert!(!out.contains("private"));
+        assert!(!out.contains("accountId"));
+    }
+
+    #[test]
+    fn cache_policy_without_rows_is_empty_not_an_error() {
+        let response: CachePolicyResponse =
+            serde_json::from_value(serde_json::json!({"generatedAt": 1})).unwrap();
+        assert!(response.rows.is_empty());
+        let without_retention: CachePolicyResponse = serde_json::from_value(serde_json::json!({
+            "rows": [{"provider": "anthropic", "model": "claude-opus-5.5",
+                "control": "anthropic-breakpoints", "lastObservedAt": 5}]
+        })).unwrap();
+        assert!(without_retention.rows[0].requested_retention.is_none());
     }
 
     #[test]
