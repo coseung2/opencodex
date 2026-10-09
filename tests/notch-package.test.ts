@@ -137,6 +137,17 @@ describe("ocx-notch package staging", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("could not read the delegation catalog");
     expect(readdirSync(scratchRoot)).toEqual([]);
+
+    const quotas = spawnSync(process.execPath, [launcherPath, "--provider-quotas"], {
+      encoding: "utf8",
+      env: { ...process.env, TMPDIR: scratchRoot, TMP: scratchRoot, TEMP: scratchRoot },
+    });
+    expect(quotas.status).not.toBe(0);
+    expect(quotas.stderr).toContain("could not read provider quotas on the selected connection");
+    expect(readdirSync(scratchRoot)).toEqual([]);
+    const conflict = spawnSync(process.execPath, [launcherPath, "--provider-quotas", "--local"], { encoding: "utf8" });
+    expect(conflict.status).not.toBe(0);
+    expect(conflict.stderr).toContain("cannot be combined");
   });
 
   test("native context menu keeps its foreground guard and Korean labels", () => {

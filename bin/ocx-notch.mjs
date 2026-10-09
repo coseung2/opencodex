@@ -30,7 +30,7 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(
-    "Usage: ocx-notch [--help] [--version] [--subagent-catalog]\n\n"
+    "Usage: ocx-notch [--help] [--version] [--subagent-catalog] [--provider-quotas]\n\n"
     + "Launch the bundled Windows x64 Notch companion, or print the active OCX delegation catalog as JSON.",
   );
   process.exit(0);
@@ -63,6 +63,36 @@ if (!existsSync(nativeBinary)) {
   fail(
     `native executable is missing at "${nativeBinary}"; reinstall ${PACKAGE_NAME}.`,
   );
+}
+
+if (process.argv.includes("--provider-quotas")) {
+  if (process.argv.length !== 3) fail("--provider-quotas cannot be combined with other options.");
+  const scratch = mkdtempSync(join(tmpdir(), "ocx-notch-quotas-"));
+  let status = 0;
+  try {
+    const output = join(scratch, "quotas.json");
+    const result = spawnSync(nativeBinary, ["--provider-quotas-output", output], {
+      env: { ...process.env, OCX_PACKAGE_VERSION: packageVersion() },
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 65_000,
+    });
+    if (result.error || result.status !== 0) throw new Error("Selected connection quota query failed");
+    const quotas = JSON.parse(readFileSync(output, "utf8"));
+    if (quotas.schemaVersion !== 1 || !Array.isArray(quotas.reports)) throw new Error("Invalid quota response");
+    console.log(JSON.stringify(quotas));
+  } catch {
+    console.error("ocx-notch: could not read provider quotas on the selected connection");
+    status = 1;
+  } finally {
+    try {
+      rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      console.error("ocx-notch: could not remove quota query scratch directory");
+      status = 1;
+    }
+  }
+  process.exit(status);
 }
 
 if (process.argv.includes("--subagent-catalog")) {

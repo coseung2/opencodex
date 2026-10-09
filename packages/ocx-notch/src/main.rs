@@ -6,6 +6,7 @@ mod codex_connection;
 mod data_relay;
 mod model;
 mod models;
+mod quota_export;
 mod subagents;
 
 use crate::callback_relay::CallbackRelay;
@@ -1037,6 +1038,15 @@ fn main() {
                 }
             });
         }
+        Ok(Cli::ProviderQuotas(output_path)) => {
+            std::process::exit(match quota_export::write(&output_path) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            });
+        }
         Ok(Cli::SubagentCatalog(output_path)) => {
             #[derive(Serialize)]
             #[serde(rename_all = "camelCase")]
@@ -1113,7 +1123,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: ocx-notch [--connect <management-url> [--data-origin <data-url>] | --reconnect [--data-origin <data-url>] | --disconnect | --local | --subagent-catalog-output <path> | --set-subagent-mode <v1|default|v2>]"
+                "usage: ocx-notch [--connect <management-url> [--data-origin <data-url>] | --reconnect [--data-origin <data-url>] | --disconnect | --local | --subagent-catalog-output <path> | --provider-quotas-output <path> | --set-subagent-mode <v1|default|v2>]"
             );
             std::process::exit(2);
         }
@@ -1145,6 +1155,8 @@ enum Cli {
     SetSubagentMode(subagents::MultiAgentMode),
     /// Write the selected OCX instance's safe delegation catalog as JSON.
     SubagentCatalog(PathBuf),
+    /// Write public quota windows through the selected protected connection.
+    ProviderQuotas(PathBuf),
 }
 
 fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
@@ -1159,6 +1171,9 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
         "--data-relay" => Cli::DataRelay,
         "--subagent-catalog-output" => Cli::SubagentCatalog(PathBuf::from(
             args.next().ok_or("Missing subagent catalog output path")?,
+        )),
+        "--provider-quotas-output" => Cli::ProviderQuotas(PathBuf::from(
+            args.next().ok_or("Missing provider quota output path")?,
         )),
         "--codex-token" => Cli::CodexToken(args.next().ok_or("Missing server origin")?),
         "--set-subagent-mode" => {
@@ -8411,6 +8426,12 @@ mod account_control_tests {
             Cli::SubagentCatalog(PathBuf::from("C:\\Temp\\catalog.json"))
         );
         assert!(parse_cli(vec!["--subagent-catalog-output".into()]).is_err());
+        assert_eq!(
+            parse_cli(vec!["--provider-quotas-output".into(), "quotas.json".into()]).unwrap(),
+            Cli::ProviderQuotas(PathBuf::from("quotas.json"))
+        );
+        assert!(parse_cli(vec!["--provider-quotas-output".into()]).is_err());
+        assert!(parse_cli(vec!["--provider-quotas-output".into(), "quotas.json".into(), "--local".into()]).is_err());
         assert_eq!(
             parse_cli(vec!["--set-subagent-mode".into(), "v1".into()]).unwrap(),
             Cli::SetSubagentMode(subagents::MultiAgentMode::V1)

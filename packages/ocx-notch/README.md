@@ -173,6 +173,17 @@ It uses Notch's current connection profile, writes no credential to stdout, and
 exits nonzero when the selected OCX instance cannot be queried. The current native
 export also includes an allowlisted `claudeCode` policy object for agent generation;
 no admission credentials or authentication diagnostics are exported.
+Provider quota consumers can use `ocx-notch --provider-quotas` (native equivalent:
+`--provider-quotas-output <new-file>`). This read-only query reuses the selected
+protected connection and `/api/provider-quotas`; it never falls back from a broken
+remote profile to local mode. The versioned response includes the nonsecret
+connection origin, source, timestamps, and reported 5-hour, weekly, monthly and
+custom windows. Missing periods are absent, not zero. Account aggregation,
+account identifiers and unknown authentication fields are excluded recursively.
+Reset timestamps may be epoch seconds or milliseconds; consumers must normalize
+before calculating countdowns. The native destination must not already exist.
+The npm wrapper cleans its temporary output on both success and failure.
+
 ### Claude Code native agents with a remote Notch profile
 
 The VM's roster save writes agent definitions on the VM, not on the Windows client.
