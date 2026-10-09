@@ -21,6 +21,10 @@ A skipped replacement does not bypass file-protection requirements. Symlink leav
 
 ## Troubleshooting
 
+An OpenAI-compatible provider's explicit `content_filter` finish reason is reported as a non-retryable failure with code `content_filter`, rather than an incomplete/disconnected stream. It is not a successful completion. A stream that ends without a terminal signal remains a separate upstream failure; the proxy does not classify every HTTP 502 as filtering or blindly repeat partially delivered work.
+
+Thinking-mode providers can reject a follow-up with HTTP 400 when prior assistant `reasoning_content` is missing. OpenCodex preserves raw reasoning in the Responses replay envelope for both visible and hidden reasoning, including streaming responses. Clients must retain the reasoning item's `encrypted_content` when replaying history; display text alone is not a reliable continuation record. This change preserves future responses but cannot reconstruct reasoning already lost from an older conversation.
+
 Large image data URLs in new spill snapshots share a content-addressed SQLite image store rather than being copied into every response file. Keep `responses-state-spill/images.sqlite` with the spill files when backing up continuation state. Older inline snapshots remain readable and expire normally; they are not rewritten during an active session. Removing a snapshot releases only its own image references.
 
 Spill admission has a 2 GiB directory budget; the shared image database is separately capped at 512 MiB. Existing referenced snapshots are not deleted to make room. An admission failure remains an explicit unavailable-continuation error rather than silently dropping part of the conversation. SQLite can retain freed pages for reuse, so deleting expired references need not immediately shrink its file.

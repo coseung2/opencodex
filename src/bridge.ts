@@ -500,9 +500,12 @@ export function bridgeToResponsesSSE(
 
       const closeCurrentRawReasoning = () => {
         if (!currentRawReasoning) return;
+        // Clients may omit display-only reasoning content when replaying history.
+        // Keep the original text in the same replay envelope used for hidden reasoning.
         const item = {
           type: "reasoning", id: currentRawReasoning.itemId, summary: [],
           content: [{ type: "reasoning_text", text: currentRawReasoning.text }],
+          encrypted_content: encodeReasoningEnvelope({ txt: currentRawReasoning.text }),
         };
         emit("response.output_item.done", { output_index: currentRawReasoning.outputIndex, item });
         retainFinishedItem(item as OutputItem, currentRawReasoning.textBytes, "reasoning");
@@ -1402,6 +1405,7 @@ export function buildResponseJSON(
     pushOutput({
       type: "reasoning", id: `rs_${uuid()}`, summary: [],
       content: [{ type: "reasoning_text", text: currentRawReasoning }],
+      encrypted_content: encodeReasoningEnvelope({ txt: currentRawReasoning }),
     }, currentRawReasoningBytes, "reasoning");
     currentRawReasoning = "";
     currentRawReasoningBytes = 0;

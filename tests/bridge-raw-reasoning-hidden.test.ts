@@ -32,6 +32,37 @@ async function collectSse(stream: ReadableStream<Uint8Array>): Promise<{ event?:
 const sseOpts = (hide: boolean) => ({ hideThinkingSummary: hide });
 
 describe("hidden raw reasoning (hideThinkingSummary parity for reasoning_raw_delta)", () => {
+  test.each([true, false])("visible reasoning survives content-less client replay (stream=%s)", async stream => {
+    const events: AdapterEvent[] = [
+      { type: "reasoning_raw_delta", text: "Inspect first.\nThen answer." },
+      { type: "tool_call_start", id: "call_replay", name: "read_file" },
+      { type: "tool_call_delta", arguments: "{}" },
+      { type: "tool_call_end" },
+      { type: "done" },
+    ];
+    const response = stream
+      ? (await collectSse(bridgeToResponsesSSE(replay(events), "deepseek-v4.1-flash")))
+        .find(frame => frame.event === "response.completed")!.data.response
+      : buildResponseJSON(events, "deepseek-v4.1-flash", {});
+    const output = (response as { output: Record<string, unknown>[] }).output;
+    const input = output.map(item => {
+      if (item.type !== "reasoning") return item;
+      // Codex persists the replay envelope, not necessarily the display-only content.
+      const { content, ...persisted } = item;
+      return persisted;
+    });
+    const parsed = parseRequest({ model: "deepseek-v4.1-flash", input: [
+      { role: "user", content: "inspect" }, ...input,
+      { type: "function_call_output", call_id: "call_replay", output: "file contents" },
+    ] });
+    const body = JSON.parse(createOpenAIChatAdapter({
+      adapter: "openai-chat", baseUrl: "https://example.invalid/v1",
+      preserveReasoningContentModels: ["deepseek-v4.1-flash"],
+    }).buildRequest(parsed).body);
+    expect(body.messages.find((msg: Record<string, unknown>) => msg.tool_calls)?.reasoning_content)
+      .toBe("Inspect first.\nThen answer.");
+  });
+
   test("streamed hidden: no reasoning_text deltas, envelope-only item, tool calls untouched", async () => {
     const frames = await collectSse(bridgeToResponsesSSE(replay([
       { type: "reasoning_raw_delta", text: "chain " },
