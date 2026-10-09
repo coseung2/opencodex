@@ -5,8 +5,11 @@ import { resolveGithubCopilotTransport } from "./github-copilot-transport";
 export const XAI_GROK_CLI_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 
 export const XAI_GROK_COMPATIBILITY = {
-  version: "0.2.93",
-  userAgent: "opencodex-grok/0.2.93",
+  // Must stay at or above the minimum `cli-chat-proxy.grok.com` accepts: it gates on this
+  // header and answers a too-old value with 426 Upgrade Required, which surfaces as a
+  // provider error even though the request never leaves the proxy legitimately.
+  version: "1.0.13",
+  userAgent: "opencodex-grok/1.0.13",
   headers: {
     clientIdentifier: "x-grok-client-identifier",
     clientVersion: "x-grok-client-version",
