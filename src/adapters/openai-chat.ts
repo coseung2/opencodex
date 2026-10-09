@@ -188,7 +188,11 @@ function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderCon
           chatMsg.content = textParts.map(p => p.text).join("");
         }
         const reasoningContent = thinkingParts.map(p => p.thinking).join("");
-        if (reasoningContent.length > 0 && modelInList(provider.preserveReasoningContentModels, parsed.modelId)) {
+        // A tool-only thinking-mode turn can legitimately have no reasoning text.
+        // Replay the empty field too: strict gateways distinguish it from missing
+        // reasoning_content. Never fabricate text or borrow another turn's reasoning.
+        if ((reasoningContent.length > 0 || toolCalls.length > 0)
+          && modelInList(provider.preserveReasoningContentModels, parsed.modelId)) {
           chatMsg.reasoning_content = reasoningContent;
         }
         // Skip empty assistant messages: chat APIs like DeepSeek reject an assistant message
@@ -244,6 +248,7 @@ function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderCon
           out.push({
             role: "assistant",
             content: emptyAssistantContent(provider),
+            ...(modelInList(provider.preserveReasoningContentModels, parsed.modelId) ? { reasoning_content: "" } : {}),
             tool_calls: [{
               id: toolCallId,
               type: "function",
