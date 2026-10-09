@@ -1467,6 +1467,17 @@ export const de: Record<TKey, string> = {
   "codexAuth.resetCreditsAria": "{count} Reset-Guthaben",
   "claude.pageTitle": "Claude Code",
   "claude.workspace.settings": "Einstellungen",
+  "claude.cache.title": "Cache-Treffer & TTL",
+  "claude.cache.hint": "Die angeforderte TTL garantiert keine Ablaufzeit. Fehlende Zähler sind unbekannt, keine Cache-Misses.",
+  "claude.cache.empty": "Noch keine Claude-Code-Cache-Beobachtungen.",
+  "claude.cache.hit": "Treffer",
+  "claude.cache.miss": "Gemeldeter Lesewert 0",
+  "claude.cache.unreported": "Nicht gemeldet",
+  "claude.cache.retention": "Angeforderte TTL",
+  "claude.cache.unknown": "Unbekannt / vom Anbieter verwaltet",
+  "claude.cache.stale": "Alte Beobachtung",
+  "claude.cache.read": "Cache-Lesen / Schreiben",
+  "claude.cache.observed": "Letzte Beobachtung",
 
   // Combos workspace
   "cws.loading": "Combos werden geladen…",

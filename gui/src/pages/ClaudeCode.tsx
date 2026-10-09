@@ -17,6 +17,7 @@ import {
 import { serializeSidecarOverride } from "./claude-code-sidecar";
 import { formatCompactWindow, newClientId, type ClaudeCodeState, type MapRow } from "./claude-code-types";
 import { SmallFastModelSetting } from "./claude-code-settings";
+import { ClaudeCodeCache } from "./claude-code-cache";
 
 export { AutoConnectSetting, SmallFastModelSetting } from "./claude-code-settings";
 
@@ -151,6 +152,11 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
 
   const sections: Array<{ id: string; label: string; meta?: string; body: ReactNode }> = [
     {
+      id: "cache",
+      label: t("claude.cache.title"),
+      body: <ClaudeCodeCache apiBase={apiBase} active={active && selectedSection === "cache"} />,
+    },
+    {
       id: "settings",
       label: t("claude.workspace.settings"),
       body: (
@@ -195,7 +201,7 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
       body: <ClaudeCodeAliasesSection aliases={state.aliases} />,
     },
   ];
-  const selected = sections.find(s => s.id === selectedSection) ?? sections[0]!;
+  const selected = sections.find(s => s.id === selectedSection) ?? sections.find(s => s.id === "settings")!;
   const sectionEditable = selectedSection === "settings"
     || selectedSection === "smallFast"
     || selectedSection === "modelMap";

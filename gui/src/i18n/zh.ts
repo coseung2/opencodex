@@ -1487,6 +1487,17 @@ export const zh: Record<TKey, string> = {
   "codexAuth.resetCreditsAria": "{count} 个重置额度",
   "claude.pageTitle": "Claude Code",
   "claude.workspace.settings": "设置",
+  "claude.cache.title": "缓存命中与TTL",
+  "claude.cache.hint": "请求TTL不保证到期时间。上游未报告计数表示未知，而非未命中。",
+  "claude.cache.empty": "暂无Claude Code缓存观测。",
+  "claude.cache.hit": "命中",
+  "claude.cache.miss": "报告读取为0",
+  "claude.cache.unreported": "未报告",
+  "claude.cache.retention": "请求TTL",
+  "claude.cache.unknown": "未知 / 上游管理",
+  "claude.cache.stale": "旧观测",
+  "claude.cache.read": "缓存读取 / 写入",
+  "claude.cache.observed": "最后观测",
 
   // Combos workspace
   "cws.loading": "正在加载组合…",

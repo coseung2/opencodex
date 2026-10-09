@@ -1494,6 +1494,17 @@ export const ko: Record<TKey, string> = {
   "codexAuth.resetCreditsAria": "리셋 크레딧 {count}개",
   "claude.pageTitle": "Claude Code",
   "claude.workspace.settings": "설정",
+  "claude.cache.title": "캐시 히트·TTL",
+  "claude.cache.hint": "요청 TTL은 만료 보장이 아닙니다. 상류 수치 미보고는 miss가 아니라 미확인입니다.",
+  "claude.cache.empty": "아직 Claude Code 캐시 관측이 없습니다.",
+  "claude.cache.hit": "히트",
+  "claude.cache.miss": "읽기 0 보고",
+  "claude.cache.unreported": "미보고",
+  "claude.cache.retention": "요청 TTL",
+  "claude.cache.unknown": "미확인 / 상류 관리",
+  "claude.cache.stale": "오래된 관측",
+  "claude.cache.read": "캐시 읽기 / 쓰기",
+  "claude.cache.observed": "마지막 관측",
 
   // Combos workspace
   "cws.loading": "콤보 불러오는 중…",

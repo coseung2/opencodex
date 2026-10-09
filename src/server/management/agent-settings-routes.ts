@@ -765,6 +765,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
   }
 
+  if (url.pathname === "/api/claude-code/cache" && req.method === "GET") {
+    const { readRecentUsageEntries } = await import("../../usage/log");
+    const { summarizeClaudeCache } = await import("../../usage/cache-summary");
+    return jsonResponse(summarizeClaudeCache(readRecentUsageEntries(2000), config));
+  }
+
   // Claude Code inbound settings (GUI "Claude ON" toggle + Claude page).
   if (url.pathname === "/api/claude-code" && req.method === "GET") {
     const models = await fetchAllModels(config);
