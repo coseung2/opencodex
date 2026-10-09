@@ -42,15 +42,15 @@ describe("buildClaudeAgentDefs (devlog 070 + audit 071)", () => {
     for (const d of defs) expect(d.description).toContain("`model` argument is ignored");
   });
 
-  test("placeholder guidance recommends haiku, never sonnet (issue #252)", () => {
+  test("dispatch guidance omits misleading placeholders and labels the target model", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "settings.json"), JSON.stringify({ model: "claude-ocx-native--gpt-5.6-sol" }));
     const defs = buildClaudeAgentDefs(cfg({ subagentModels: ["gpt-5.6-sol"] }), {}, dir);
     expect(defs.length).toBeGreaterThan(0);
     for (const d of defs) {
-      // A sonnet-labeled placeholder is indistinguishable from a genuine Sonnet
-      // call in the Claude Code UI; guidance must steer to the haiku placeholder.
-      expect(d.description).toContain('model: "haiku"');
+      expect(d.description).toContain("Omit the optional Agent model argument");
+      expect(d.description).toContain("Prefix the Agent description with the target model id");
+      expect(d.description).not.toContain('model: "haiku"');
       expect(d.description).not.toContain('model: "sonnet"');
     }
   });

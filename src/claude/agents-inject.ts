@@ -71,7 +71,12 @@ function entryParts(entry: string, config: OcxConfig): { alias: string; id: stri
   return { alias: claudeCodeNativeAlias(entry), id: entry, provider: "native" };
 }
 
-export function buildClaudeAgentDefs(config: OcxConfig, windows: Record<string, number>, configDir = claudeConfigDir()): ClaudeAgentDef[] {
+export interface ClaudeAgentBuildOptions {
+  includeSelf?: boolean;
+  resolvedEntries?: Readonly<Record<string, { provider: string; model: string; native: boolean }>>;
+}
+
+export function buildClaudeAgentDefs(config: OcxConfig, windows: Record<string, number>, configDir = claudeConfigDir(), options: ClaudeAgentBuildOptions = {}): ClaudeAgentDef[] {
   const auto = resolveAutoContext(config.claudeCode);
   const blockedSkills = effectiveBlockedSkillNames(config.claudeCode);
   const blockedSkillsFor = (model: string): readonly string[] => {
@@ -110,7 +115,10 @@ export function buildClaudeAgentDefs(config: OcxConfig, windows: Record<string, 
   const roster = config.subagentModels === undefined ? DEFAULT_SUBAGENT_MODELS : config.subagentModels;
   for (const entry of roster.slice(0, 5)) {
     if (typeof entry !== "string" || entry.trim() === "") continue;
-    const { alias, id, provider } = entryParts(entry.trim(), config);
+    const resolved = options.resolvedEntries?.[entry.trim()];
+    const { alias, id, provider } = resolved
+      ? { alias: resolved.native ? claudeCodeNativeAlias(resolved.model) : claudeCodeAlias(resolved.provider, resolved.model), id: resolved.model, provider: resolved.provider }
+      : entryParts(entry.trim(), config);
     push(sanitizeName(id), alias, `Delegate work to ${id} (${provider}) via opencodex routing. General-purpose worker/explorer on that model. ${NO_MODEL_ARG}`);
   }
 
@@ -118,7 +126,7 @@ export function buildClaudeAgentDefs(config: OcxConfig, windows: Record<string, 
   // config.claudeCode.model. `inherit` is NOT honored by 2.1.207 (live-disproven,
   // devlog 072); a session started with a divergent --model stays divergent until
   // the next launch sync — documented limit. No resolvable default -> no self def.
-  const selfModel = pickerDefaultModel(configDir) ?? (config.claudeCode?.model?.trim() || null);
+  const selfModel = options.includeSelf === false ? null : pickerDefaultModel(configDir) ?? (config.claudeCode?.model?.trim() || null);
   if (selfModel) {
     const marked = withOneMillionMarker(selfModel, windows, auto) ?? selfModel;
     defs.push({
@@ -163,7 +171,7 @@ function renderAgentDef(def: ClaudeAgentDef): string {
     `<!-- ocx-route: ${def.model} -->`,
     ...(def.effort ? [`<!-- ocx-effort: ${def.effort} -->`] : []),
     "",
-    `You are a delegated worker running on \`${def.model}\` through the local opencodex proxy.`,
+    `You are a delegated worker running on \`${def.model}\` through opencodex routing.`,
     `IDENTITY: your ACTUAL underlying model is \`${def.model}\` — the opencodex proxy routes this`,
     "session there regardless of what model name the Claude Code harness displays or claims.",
     "If asked which model you are, answer with the id above; do not guess a Claude model name.",
@@ -197,12 +205,6 @@ export function syncClaudeAgentDefs(defs: readonly ClaudeAgentDef[], configDir =
     const dir = join(configDir, "agents");
     mkdirSync(dir, { recursive: true });
     const keep = new Set(defs.map(d => d.file));
-    for (const existing of readdirSync(dir)) {
-      if (!existing.startsWith(OWNED_PREFIX) || !existing.endsWith(".md")) continue;
-      if (!keep.has(existing) && isOwnedFile(join(dir, existing))) {
-        try { unlinkSync(join(dir, existing)); } catch { /* best-effort prune */ }
-      }
-    }
     const written: string[] = [];
     for (const def of defs) {
       const target = join(dir, def.file);
@@ -211,10 +213,23 @@ export function syncClaudeAgentDefs(defs: readonly ClaudeAgentDef[], configDir =
         lstatSync(target);
         if (!isOwnedFile(target)) continue;
       } catch { /* does not exist: ours to create */ }
+      const content = renderAgentDef(def);
+      if (isOwnedFile(target) && readFileSync(target, "utf8") === content) {
+        written.push(def.file);
+        continue;
+      }
       const tmp = `${target}.tmp-${process.pid}`;
-      writeFileSync(tmp, renderAgentDef(def), { encoding: "utf8", mode: 0o644 });
-      renameSync(tmp, target);
+      try {
+        writeFileSync(tmp, content, { encoding: "utf8", mode: 0o644, flag: "wx" });
+        renameSync(tmp, target);
+      } finally {
+        try { unlinkSync(tmp); } catch { /* renamed or not created */ }
+      }
       written.push(def.file);
+    }
+    for (const existing of readdirSync(dir)) {
+      if (!existing.startsWith(OWNED_PREFIX) || !existing.endsWith(".md")) continue;
+      if (!keep.has(existing) && isOwnedFile(join(dir, existing))) unlinkSync(join(dir, existing));
     }
     return written;
   } catch {
@@ -234,10 +249,7 @@ export function injectClaudeAgentDefs(config: OcxConfig, windows: Record<string,
 /**
  * Dispatcher directive appended to every ocx-* description. The ocx-route body
  * directive makes the Agent tool's `model` argument INERT (the proxy overrides
- * the request model before routing — live-proven), so instead of asking the
- * dispatcher to omit it (which caused schema-anxiety loops), we hand it a fixed
- * placeholder: any value works; "haiku" is canonical because a haiku-labeled call
- * is visibly a placeholder in the Claude Code UI, while "sonnet" was
- * indistinguishable from a genuine Sonnet call (issue #252).
+ * the request model before routing). Omit the optional override rather than
+ * displaying a misleading Claude placeholder; label the task with its target model.
  */
-const NO_MODEL_ARG = "NOTE: this agent's real model is pinned by the opencodex proxy — the `model` argument is ignored. Pass model: \"haiku\" as a placeholder (or omit it); routing is unaffected either way.";
+const NO_MODEL_ARG = "NOTE: this agent's real model is pinned by the opencodex proxy — the `model` argument is ignored. Omit the optional Agent model argument; do not pass a haiku/sonnet/opus/fable placeholder. Prefix the Agent description with the target model id shown above so the call visibly identifies the selected route.";

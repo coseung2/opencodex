@@ -1046,18 +1046,22 @@ fn main() {
                 chosen: Vec<String>,
                 available: Vec<String>,
                 injection: InjectionModelResponse,
+                claude_code: serde_json::Value,
             }
 
             let result = (|| {
                 let models: SubagentModelsResponse = api::get_json("/api/subagent-models", 30_000)?;
                 let injection: InjectionModelResponse =
                     api::get_json("/api/injection-model", 30_000)?;
+                let policy: serde_json::Value = api::get_json("/api/claude-code", 30_000)?;
+                let claude_code = claude_agent_catalog_policy(&policy)?;
                 serde_json::to_string(&CatalogOutput {
                     schema_version: 1,
                     source: if api::is_remote() { "remote" } else { "local" },
                     chosen: models.chosen,
                     available: models.available,
                     injection,
+                    claude_code,
                 })
                 .map_err(|error| format!("Could not encode the subagent catalog: {error}"))
             })();
@@ -8215,9 +8219,51 @@ fn minimize_hit_rect(width: i32) -> RECT {
     }
 }
 
+// Export only renderer inputs; management auth/account fields must not leave Notch.
+fn claude_agent_catalog_policy(policy: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let object = policy
+        .as_object()
+        .ok_or_else(|| "Invalid Claude agent policy response".to_string())?;
+    let mut exported = serde_json::Map::new();
+    for key in [
+        "enabled", "injectAgents", "blockedSkills", "contextWindows", "autoContext",
+        "autoCompactWindow", "maxContextTokens", "modelMap",
+    ] {
+        if let Some(value) = object.get(key) {
+            exported.insert(key.to_string(), value.clone());
+        }
+    }
+    Ok(serde_json::Value::Object(exported))
+}
+
 #[cfg(test)]
 mod account_control_tests {
     use super::*;
+
+    #[test]
+    fn claude_agent_catalog_exports_only_renderer_policy() {
+        let policy = serde_json::json!({
+            "enabled": true,
+            "injectAgents": true,
+            "blockedSkills": [],
+            "contextWindows": { "claude-ocx-native--gpt-test": 272000 },
+            "autoContext": true,
+            "autoCompactWindow": null,
+            "maxContextTokens": null,
+            "modelMap": {},
+            "authMode": "private-test-value",
+            "authFoundBy": "private-test-location",
+            "available": [],
+            "admissionKeyActive": true
+        });
+        let exported = claude_agent_catalog_policy(&policy).unwrap();
+        assert_eq!(exported.as_object().unwrap().len(), 8);
+        assert_eq!(exported["blockedSkills"], serde_json::json!([]));
+        assert!(exported.get("authMode").is_none());
+        assert!(exported.get("authFoundBy").is_none());
+        assert!(exported.get("admissionKeyActive").is_none());
+        assert!(claude_agent_catalog_policy(&serde_json::json!([])).is_err());
+    }
 
     fn model_row(provider: &str, id: &str, disabled: bool, native: bool) -> ModelRow {
         ModelRow {

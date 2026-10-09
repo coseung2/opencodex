@@ -170,7 +170,31 @@ The npm launcher asks the native companion to write into a private temporary
 directory, prints one versioned JSON object containing `chosen`, `available`, and
 the injection model and supported efforts, then removes the temporary directory.
 It uses Notch's current connection profile, writes no credential to stdout, and
-exits nonzero when the selected OCX instance cannot be queried.
+exits nonzero when the selected OCX instance cannot be queried. The current native
+export also includes an allowlisted `claudeCode` policy object for agent generation;
+no admission credentials or authentication diagnostics are exported.
+### Claude Code native agents with a remote Notch profile
+
+The VM's roster save writes agent definitions on the VM, not on the Windows client.
+To synchronize only the active remote `chosen` roster into the client's native
+Claude Code agents directory, use the client sync script with a metadata-capable
+Notch binary:
+
+```powershell
+bun scripts/sync-notch-claude-agents.ts --notch-binary packages/ocx-notch/target/release/ocx-notch.exe
+```
+
+Run this from the OpenCodex checkout after building the companion. It uses the saved
+remote connection, preserves user-authored agents, and never falls back to a local
+OCX roster. Invalid or inaccessible catalogs retain the previous definitions.
+An explicit empty roster removes only verified OpenCodex-generated definitions.
+It does not add `ocx-self` or copy the Codex injection effort into Claude agent policy.
+For automatic updates, the same command with `--hook` can be merged into personal
+`SessionStart` and `UserPromptSubmit` command hooks, with absolute paths and a
+45-second timeout. Do not replace existing hook groups. The companion and checkout
+must remain at those paths. Restart a Code session if its runtime retains the old
+native agent list; a successful file sync is not proof of live Agent discovery.
+
 Codex's built-in OpenAI provider keeps its own ChatGPT login and sends that bearer
 separately through the relay.
 
