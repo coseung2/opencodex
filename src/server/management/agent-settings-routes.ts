@@ -771,6 +771,16 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     return jsonResponse(summarizeClaudeCache(readRecentUsageEntries(2000), config));
   }
 
+  // Confirmed per-provider prompt-cache policy, captured while each request ran. Unlike
+  // /api/claude-code/cache this is not rebuilt from the current config and is not limited
+  // to the Claude surface: it reports what the provider that actually served the request
+  // was asked for, and only lists pairs observed since the field was introduced.
+  if (url.pathname === "/api/cache-policy" && req.method === "GET") {
+    const { readRecentUsageEntries } = await import("../../usage/log");
+    const { summarizeRecordedCachePolicies } = await import("../../usage/cache-summary");
+    return jsonResponse(summarizeRecordedCachePolicies(readRecentUsageEntries(2000)));
+  }
+
   // Claude Code inbound settings (GUI "Claude ON" toggle + Claude page).
   if (url.pathname === "/api/claude-code" && req.method === "GET") {
     const models = await fetchAllModels(config);

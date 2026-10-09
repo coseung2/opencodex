@@ -5,6 +5,7 @@ import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { usageDisplayTotalTokens } from "./totals";
 import type { OcxUsage } from "../types";
+import { isCachePolicySnapshot, type CachePolicySnapshot } from "../providers/cache-policy";
 import { sanitizeLogMetadataString } from "../lib/redact";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
@@ -44,6 +45,8 @@ export interface PersistedUsageAttempt {
   usage?: OcxUsage;
   totalTokens?: number;
   errorCode?: string;
+  /** Confirmed prompt-cache policy of the provider this attempt actually reached. */
+  cachePolicy?: CachePolicySnapshot;
   /** Target-specific reasoning intent and exact adapter-normalized wire parameter. */
   requestedEffort?: string;
   effectiveEffort?: string;
@@ -90,6 +93,12 @@ export interface PersistedUsageEntry {
   usageStatus: UsageStatus;
   usage?: OcxUsage;
   totalTokens?: number;
+  /**
+   * Prompt-cache policy of the provider that served this request, captured at
+   * request time. Absent on rows written before this field existed; a reader must
+   * treat absence as "unknown", never as "no caching".
+   */
+  cachePolicy?: CachePolicySnapshot;
   attempts?: PersistedUsageAttempt[];
   // Failure diagnostics (devlog/_plan/260716_claudecode_hardening/030): persisted for
   // status>=400 or non-completed terminals so incidents survive the in-memory ring buffer.
@@ -284,6 +293,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       ? { totalTokens: attempt.totalTokens }
       : {}),
     ...(typeof attempt.errorCode === "string" ? { errorCode: attempt.errorCode } : {}),
+    ...(isCachePolicySnapshot(attempt.cachePolicy) ? { cachePolicy: attempt.cachePolicy } : {}),
     ...(typeof attempt.requestedEffort === "string" && attempt.requestedEffort
       ? { requestedEffort: capMetadataString(attempt.requestedEffort) }
       : {}),
@@ -384,6 +394,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     usageStatus: entry.usageStatus,
     ...(entry.usage ? { usage: normalizeUsageValue(entry.usage) } : {}),
     ...(typeof entry.totalTokens === "number" ? { totalTokens: entry.totalTokens } : {}),
+    ...(isCachePolicySnapshot(entry.cachePolicy) ? { cachePolicy: entry.cachePolicy } : {}),
     ...(attempts.length > 0 ? { attempts } : {}),
     ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
     ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),

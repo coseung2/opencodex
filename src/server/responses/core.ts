@@ -110,6 +110,7 @@ import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } f
 import { createTranslatorBudget, isTranslatorBudgetExceededError, type TranslatorBudget } from "../../lib/translator-budget";
 import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { cachePolicySnapshot } from "../../providers/cache-policy";
 import { slugsEquivalent } from "../../providers/slug-codec";
 import { applyOpenAiVirtualModel, resolveOpenAiCompactModel } from "../../providers/openai-virtual-models";
 import { isUsageDebugEnabled } from "../../usage/debug";
@@ -1316,6 +1317,28 @@ function finalizeOwnedTranslatorBudget(response: Response, budget: TranslatorBud
   return finalizedResponse;
 }
 
+/**
+ * Record the confirmed prompt-cache policy of the provider that will actually serve
+ * this request, at the moment its wire adapter is resolved.
+ *
+ * Deliberately captured here and not reconstructed when the usage row is written:
+ * a combo parent rewrites its own provider name to "combo", failover and account
+ * promotion replace the routed provider snapshot, and a routed Claude request carries
+ * a request-local retention that the persisted global `config.cacheRetention` lacks.
+ * Absence downstream therefore means "not recorded", never "no caching".
+ */
+function recordCachePolicy(
+  logCtx: RequestLogContext,
+  provider: OcxProviderConfig,
+  cacheRetention: OcxConfig["cacheRetention"],
+): void {
+  const policy = cachePolicySnapshot(provider, cacheRetention);
+  logCtx.cachePolicy = policy;
+  // A combo child seals its attempt identity from this same logCtx; keeping the two in
+  // step lets the attempt carry the physical provider's policy across the parent's rewrite.
+  if (logCtx.activeAttempt) logCtx.activeAttempt.cachePolicy = policy;
+}
+
 export async function handleResponses(
   req: Request,
   config: OcxConfig,
@@ -1668,6 +1691,7 @@ async function handleResponsesInner(
   const adapterProvider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
   logCtx.providerAdapter = adapter.name;
+  recordCachePolicy(logCtx, adapterProvider, config.cacheRetention);
   sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, adapter.name, logCtx.accountLogLabel);
   const isPassthrough = "passthrough" in adapter && !!adapter.passthrough;
 

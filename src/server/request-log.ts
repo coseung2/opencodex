@@ -37,6 +37,7 @@ import {
 } from "../usage/debug";
 import { matchesLogConversationId } from "./request-log-conversation";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
+import { isCachePolicySnapshot, type CachePolicySnapshot } from "../providers/cache-policy";
 
 export interface RequestLogContext {
   model: string;
@@ -87,6 +88,10 @@ export interface RequestLogContext {
   /** Route adapter type ("cursor"/"kiro"/"anthropic"/…): drives estimated-usage detection
    *  independent of the user-chosen provider NAME (devlog 130 B2). */
   providerAdapter?: string;
+  /** Confirmed prompt-cache policy of the effective provider, captured where the wire
+   *  adapter is resolved (cores: resolveAdapter). Never reconstructed from config at
+   *  log-write time — see cachePolicySnapshot. */
+  cachePolicy?: CachePolicySnapshot;
   /** Set when the bridge reported raw adapter usage via onUsage: the bridged wire now always
    *  carries synthetic zero-default token-detail objects (strict-client normalization, see
    *  responsesUsage in src/bridge.ts), so SSE/JSON re-parsing must not overwrite the raw
@@ -150,6 +155,8 @@ export interface RequestLogEntry {
   usageStatus: UsageStatus;
   usage?: OcxUsage;
   totalTokens?: number;
+  /** Prompt-cache policy of the serving provider, captured at request time. */
+  cachePolicy?: CachePolicySnapshot;
   attempts?: PersistedUsageAttempt[];
   /** Codex pool affinity decision for this request (diagnostics for #186). */
   affinity?: "reused" | "new_bind" | "rebound" | "cleared";
@@ -262,6 +269,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     usageStatus: entry.usageStatus,
     ...(entry.usage ? { usage: entry.usage } : {}),
     ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
+    ...(isCachePolicySnapshot(entry.cachePolicy) ? { cachePolicy: entry.cachePolicy } : {}),
     ...(entry.attempts?.length ? { attempts: entry.attempts } : {}),
   };
 }
@@ -358,6 +366,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       usageStatus: entry.usageStatus,
       ...(entry.usage ? { usage: entry.usage } : {}),
       ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
+      ...(isCachePolicySnapshot(entry.cachePolicy) ? { cachePolicy: entry.cachePolicy } : {}),
       ...(entry.attempts?.length ? { attempts: entry.attempts } : {}),
       ...failureDiagnostics,
     });
@@ -827,6 +836,9 @@ export function addFinalRequestLog(
   const loggedUsage = aggregate?.usage ?? existing.usage;
   const usageStatus = aggregate?.status ?? existing.status;
   const totalTokens = aggregate?.totalTokens ?? existing.totalTokens;
+  // The request's own resolution covers a routed turn; a combo parent never resolves an
+  // adapter itself, so it reports the terminal child attempt's captured policy instead.
+  const cachePolicy = logCtx.cachePolicy ?? (isCombo ? attempts?.at(-1)?.cachePolicy : undefined);
   addLog({
     requestId,
     timestamp: start,
@@ -865,6 +877,7 @@ export function addFinalRequestLog(
     usageStatus,
     ...(loggedUsage ? { usage: loggedUsage } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(cachePolicy ? { cachePolicy } : {}),
     ...(attempts?.length ? { attempts } : {}),
     ...(logCtx.affinity ? { affinity: logCtx.affinity } : {}),
     ...(logCtx.transportPhase ? { transportPhase: logCtx.transportPhase } : {}),

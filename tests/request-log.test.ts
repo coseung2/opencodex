@@ -381,7 +381,10 @@ describe("request log metadata", () => {
         ordinal: 1,
         status: 200,
         usageStatus: "reported",
-        usage: { inputTokens: 9, outputTokens: 3, totalTokens: 12 },
+        usage: {
+          inputTokens: 9, outputTokens: 3, totalTokens: 12,
+          cacheTelemetry: { inputIncludesCache: true, readReported: false, writeReported: false },
+        },
       }),
     ]);
   });
