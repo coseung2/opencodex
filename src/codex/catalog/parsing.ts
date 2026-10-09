@@ -31,7 +31,7 @@ import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 
-import { NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeModelConfig } from "./metadata";
+import { NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, isDynamicNativeOpenAiEntry, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeModelConfig } from "./metadata";
 
 export function legacyCatalogBackupPath(): string {
   return join(getConfigDir(), "catalog-backup.json");
@@ -440,7 +440,11 @@ export function catalogModelSlug(model: CatalogModel): string {
 
 export function filterSupportedNativeSlugs(models: RawEntry[]): string[] {
   return models
-    .filter(m => typeof m.slug === "string" && !(m.slug as string).includes("/") && m.visibility === "list" && SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug as string))
+    .filter(m => typeof m.slug === "string"
+      && !(m.slug as string).includes("/")
+      && m.visibility === "list"
+      && (SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug as string)
+        || isDynamicNativeOpenAiEntry(m)))
     .map(m => m.slug as string);
 }
 

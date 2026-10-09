@@ -462,9 +462,22 @@ describe("Windows Win32_Process owner enumeration (#476)", () => {
         // runner can exhaust the bounded CIM deadline; that fail-closed path is
         // covered deterministically above and is not an assertion about matching.
         Bun.sleepSync(250);
+        const enumerate = (): ReturnType<typeof listWindowsSnapshots> => {
+          for (let attempt = 0; ; attempt++) {
+            try {
+              return listWindowsSnapshots();
+            } catch (error) {
+              // Concurrent tests may retire a candidate between the CIM snapshot
+              // and GetOwner. Retry the whole fail-closed enumeration, never accept
+              // a partial list or treat a persistent failure as a passing test.
+              if (!(error instanceof Error) || error.message !== "windows_enum_incomplete" || attempt >= 2) throw error;
+              Bun.sleepSync(250);
+            }
+          }
+        };
         let snapshots: ReturnType<typeof listWindowsSnapshots>;
         try {
-          snapshots = listWindowsSnapshots();
+          snapshots = enumerate();
         } catch (error) {
           if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ETIMEDOUT") return;
           throw error;
@@ -472,7 +485,7 @@ describe("Windows Win32_Process owner enumeration (#476)", () => {
         let match = snapshots.find(snapshot => snapshot.pid === child.pid);
         if (!match) {
           Bun.sleepSync(250);
-          snapshots = listWindowsSnapshots();
+          snapshots = enumerate();
           match = snapshots.find(snapshot => snapshot.pid === child.pid);
         }
         expect(match).toBeDefined();

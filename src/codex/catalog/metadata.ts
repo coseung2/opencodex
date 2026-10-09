@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { atomicWriteFile, expandUserPath, getConfigDir, websocketsEnabled } from "../../config";
 import { CODEX_CONFIG_PATH, CODEX_MODELS_CACHE_PATH, DEFAULT_CATALOG_PATH, readRootTomlString, resolveCodexConfigPath } from "../paths";
@@ -31,7 +31,7 @@ import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 
-import { filterSupportedNativeSlugs } from "./parsing";
+import { filterSupportedNativeSlugs, readCatalog, readCodexCatalogPath } from "./parsing";
 import type { RawEntry } from "./parsing";
 import { readCurrentCatalogOrCache, unique } from "./bundled";
 
@@ -58,9 +58,74 @@ export const DOCUMENTED_NATIVE_OPENAI_ADDITIONS = [
 
 export const SUPPORTED_NATIVE_OPENAI_SLUGS = new Set(NATIVE_OPENAI_MODELS);
 
+const DYNAMIC_NATIVE_SLUG = /^(?:gpt|codex)-[a-z0-9][a-z0-9.-]*$/i;
+const RETIRED_NATIVE_SLUGS = new Set(["gpt-5.3-codex", "gpt-5.2", "codex-auto-review"]);
+let currentCatalogCache: { key: string; checkedAt: number; catalog: ReturnType<typeof readCurrentCatalogOrCache> } | undefined;
+
+function currentCatalog(): ReturnType<typeof readCurrentCatalogOrCache> {
+  const path = readCodexCatalogPath();
+  const now = Date.now();
+  if (currentCatalogCache?.key.startsWith(`${path}:`) && now - currentCatalogCache.checkedAt < 1000) {
+    return currentCatalogCache.catalog;
+  }
+  let stamp = "bundled";
+  try {
+    stamp = String(statSync(path).mtimeMs);
+  } catch {
+    // The bundled/cache fallback is stable for this process when no file exists.
+  }
+  const key = `${path}:${stamp}`;
+  if (!currentCatalogCache || currentCatalogCache.key !== key) {
+    // Dynamic discovery must use the active on-disk catalog only. Loading the
+    // bundled Codex template here is both expensive and would make a package
+    // fallback look like live discovery.
+    currentCatalogCache = { key, checkedAt: now, catalog: readCatalog(path) };
+  } else {
+    currentCatalogCache.checkedAt = now;
+  }
+  return currentCatalogCache.catalog;
+}
+
+export function resetNativeMetadataCatalogCache(): void {
+  currentCatalogCache = undefined;
+}
+
+/**
+ * Native OpenAI entries are normally pinned in this module, but a newer Codex
+ * catalog can arrive before this package is released. Accept only fully formed
+ * bare entries from that catalog; routed provider rows and metadata-less rows
+ * must never become native selectors by accident.
+ */
+export function isDynamicNativeOpenAiEntry(entry: RawEntry): boolean {
+  const slug = typeof entry.slug === "string" ? entry.slug : "";
+  if (!DYNAMIC_NATIVE_SLUG.test(slug) || SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug)
+    || RETIRED_NATIVE_SLUGS.has(slug) || /(?:^|[.-])internal(?:$|[.-])/i.test(slug)) return false;
+  const contextWindow = entry.context_window;
+  const modalities = entry.input_modalities;
+  const reasoning = entry.supported_reasoning_levels;
+  return typeof contextWindow === "number"
+    && Number.isSafeInteger(contextWindow)
+    && contextWindow > 0
+    && Array.isArray(modalities)
+    && modalities.length > 0
+    && Array.isArray(reasoning)
+    && reasoning.some(level => level && typeof level === "object" && typeof (level as Record<string, unknown>).effort === "string");
+}
+
+function dynamicNativeEntry(slug: string): RawEntry | undefined {
+  if (!DYNAMIC_NATIVE_SLUG.test(slug) || SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug)) return undefined;
+  const catalog = currentCatalog();
+  const entry = catalog?.models?.find(model => model.slug === slug && model.visibility === "list");
+  return entry && isDynamicNativeOpenAiEntry(entry) ? entry : undefined;
+}
+
+function nativeMetadataEntry(slug: string): RawEntry | undefined {
+  return UPSTREAM_NATIVE_ENTRIES.get(slug) ?? dynamicNativeEntry(slug);
+}
+
 export function isUnsupportedOpenAiNativeSlug(slug: string): boolean {
   if (slug.includes("/")) return false;
-  if (SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug)) return false;
+  if (SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug) || dynamicNativeEntry(slug)) return false;
   return /^(?:gpt|codex)-/.test(slug);
 }
 
@@ -89,9 +154,10 @@ function positiveNativeWindow(value: unknown): number | undefined {
 
 /** Astra has its own opt-in ceiling; do not change the fork's existing GPT-5.6 policy. */
 export function nativeOpenAiContextWindow(slug: string, config?: NativeModelConfig): number | undefined {
+  const metadata = nativeMetadataEntry(slug);
   const raw = NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.contextWindow
-    ?? (typeof UPSTREAM_NATIVE_ENTRIES.get(slug)?.context_window === "number"
-      ? UPSTREAM_NATIVE_ENTRIES.get(slug)!.context_window as number
+    ?? (typeof metadata?.context_window === "number"
+      ? metadata.context_window as number
       : undefined);
   if (slug !== NATIVE_GPT6_ASTRA_MODEL || raw === undefined) return raw;
   const provider = config?.providers?.openai;
@@ -104,13 +170,15 @@ export function nativeOpenAiContextWindow(slug: string, config?: NativeModelConf
 
 export function nativeOpenAiMaxInputTokens(slug: string, config?: NativeModelConfig): number | undefined {
   const maximum = NATIVE_OPENAI_CONTEXT_OVERRIDES[slug]?.maxInputTokens;
+  const dynamicMaximum = maximum === undefined ? dynamicNativeEntry(slug)?.max_input_tokens : undefined;
+  if (maximum === undefined && typeof dynamicMaximum === "number" && dynamicMaximum > 0) return dynamicMaximum;
   return slug === NATIVE_GPT6_ASTRA_MODEL && maximum !== undefined
     ? Math.min(maximum, nativeOpenAiContextWindow(slug, config) ?? maximum)
     : maximum;
 }
 
 export function nativeInputModalities(slug: string): string[] {
-  const upstream = UPSTREAM_NATIVE_ENTRIES.get(slug);
+  const upstream = nativeMetadataEntry(slug);
   if (Array.isArray(upstream?.input_modalities) && upstream!.input_modalities!.length > 0) {
     return [...upstream!.input_modalities as string[]];
   }
@@ -120,7 +188,7 @@ export function nativeInputModalities(slug: string): string[] {
 }
 
 export function nativeReasoningEfforts(slug: string): string[] {
-  const upstream = UPSTREAM_NATIVE_ENTRIES.get(slug);
+  const upstream = nativeMetadataEntry(slug);
   const levels = Array.isArray(upstream?.supported_reasoning_levels)
     ? upstream!.supported_reasoning_levels as Array<{ effort?: string }>
     : [];
@@ -135,12 +203,12 @@ export function nativeReasoningEfforts(slug: string): string[] {
 
 /** Upstream-pinned default for a native slug, when present and non-empty. */
 export function nativeDefaultReasoningEffort(slug: string): string | undefined {
-  const level = UPSTREAM_NATIVE_ENTRIES.get(slug)?.default_reasoning_level;
+  const level = nativeMetadataEntry(slug)?.default_reasoning_level;
   return typeof level === "string" && level.length > 0 ? level : undefined;
 }
 
 export function nativeParallelToolCalls(slug: string): boolean {
-  return UPSTREAM_NATIVE_ENTRIES.get(slug)?.supports_parallel_tool_calls === true
+  return nativeMetadataEntry(slug)?.supports_parallel_tool_calls === true
     || false;
 }
 
@@ -167,7 +235,7 @@ export function desktopVisibleNativeSlugs(config: Pick<OcxConfig, "claudeCode" |
 
 export function nativeModelRows(config: Pick<OcxConfig, "disabledModels"> & NativeModelConfig): Array<{ slug: string; disabled: boolean; contextWindow?: number }> {
   const disabled = disabledNativeSlugs(config);
-  return NATIVE_OPENAI_MODELS.map(slug => {
+  return nativeOpenAiSlugs().map(slug => {
     const contextWindow = nativeOpenAiContextWindow(slug, config);
     return { slug, disabled: disabled.has(slug), ...(contextWindow !== undefined ? { contextWindow } : {}) };
   });
@@ -176,7 +244,7 @@ export function nativeModelRows(config: Pick<OcxConfig, "disabledModels"> & Nati
 export function applyNativeVisibility(entries: RawEntry[], disabledNative: Set<string>): RawEntry[] {
   for (const entry of entries) {
     const slug = typeof entry.slug === "string" ? entry.slug : "";
-    if (!slug || slug.includes("/") || !SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug)) continue;
+    if (!slug || slug.includes("/") || (!SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug) && !isDynamicNativeOpenAiEntry(entry))) continue;
     entry.visibility = disabledNative.has(slug) ? "hide" : "list";
   }
   return entries;
@@ -234,7 +302,7 @@ export const UPSTREAM_NATIVE_ENTRIES: Map<string, RawEntry> = (() => {
 })();
 
 export function upstreamNativeEntry(slug: string): RawEntry | null {
-  const entry = UPSTREAM_NATIVE_ENTRIES.get(slug);
+  const entry = nativeMetadataEntry(slug);
   if (!entry) return null;
   const clone = JSON.parse(JSON.stringify(entry)) as RawEntry;
   delete clone.minimal_client_version;
@@ -250,11 +318,13 @@ export function shouldUpgradeToUpstreamEntry(entry: RawEntry): boolean {
 
 export function nativeOpenAiSlugs(): string[] {
   const live = listCatalogNativeSlugs();
-  return live.length > 0 ? unique([...live, ...DOCUMENTED_NATIVE_OPENAI_ADDITIONS]) : NATIVE_OPENAI_MODELS;
+  return live.length > 0
+    ? unique([...NATIVE_OPENAI_MODELS, ...live, ...DOCUMENTED_NATIVE_OPENAI_ADDITIONS])
+    : NATIVE_OPENAI_MODELS;
 }
 
 export function listCatalogNativeSlugs(): string[] {
-  const cat = readCurrentCatalogOrCache();
+  const cat = currentCatalog();
   const live = filterSupportedNativeSlugs(cat?.models ?? []);
   // Ensure documented additions (e.g. gpt-5.3-codex-spark) appear even when the bundled catalog
   // predates the slug — mirrors nativeOpenAiSlugs() which already merges them for /v1/models.

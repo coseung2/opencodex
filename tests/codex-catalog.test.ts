@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { augmentRoutedModelsWithJawcodeMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_OPENAI_MODELS, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, shouldExposeRoutedModel } from "../src/codex/catalog";
+import { augmentRoutedModelsWithJawcodeMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isDynamicNativeOpenAiEntry, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_OPENAI_MODELS, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, shouldExposeRoutedModel } from "../src/codex/catalog";
 import { withStubbedProviderFetch } from "./helpers/catalog-provider-fetch";
 import {
   CURSOR_STATIC_MODELS,
@@ -1271,9 +1271,10 @@ describe("Codex catalog routed normalization", () => {
     }
   });
 
-  test("Google Antigravity uses its static registry catalog and suppresses stale discovery (#723)", async () => {
+  test("Google Antigravity explicit static mode suppresses stale discovery (#723)", async () => {
     const providerName = "google-antigravity";
     const provider = structuredClone(OAUTH_PROVIDERS[providerName].providerConfig);
+    provider.liveModels = false;
     const config = {
       port: 10100,
       defaultProvider: providerName,
@@ -2729,6 +2730,28 @@ describe("native slug allowlist", () => {
     expect(filterSupportedNativeSlugs(liveModels)).toEqual([
       "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     ]);
+  });
+
+  test("accepts a newly released native slug only with complete catalog metadata", () => {
+    const liveModel = {
+      slug: "gpt-6.1-sol",
+      visibility: "list",
+      context_window: 272_000,
+      input_modalities: ["text", "image"],
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }],
+    };
+
+    expect(isDynamicNativeOpenAiEntry(liveModel)).toBe(true);
+    expect(filterSupportedNativeSlugs([liveModel])).toEqual(["gpt-6.1-sol"]);
+    for (const invalid of [
+      { ...liveModel, supported_reasoning_levels: [] },
+      { ...liveModel, context_window: -1 },
+      { ...liveModel, input_modalities: [] },
+      ...["gpt-5.3-codex", "gpt-5.2", "codex-auto-review", "gpt-5.6-internal"].map(slug => ({ ...liveModel, slug })),
+    ]) {
+      expect(isDynamicNativeOpenAiEntry(invalid)).toBe(false);
+      expect(filterSupportedNativeSlugs([invalid])).toEqual([]);
+    }
   });
 });
 

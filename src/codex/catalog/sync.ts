@@ -33,7 +33,7 @@ import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 import { activeCodexModelsCachePath, applyJawcodeCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, catalogModelSlug, ensureCatalogBackup, ensureStrictCatalogFields, findNativeTemplate, isRoutedModelCompatibilityExcluded, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readNativeBaseline } from "./parsing";
 import type { CatalogModel, MultiAgentMode, RawEntry } from "./parsing";
-import { applyNativeVisibility, disabledNativeSlugs, isUnsupportedOpenAiNativeSlug, nativeOpenAiSlugs, shouldUpgradeToUpstreamEntry, upstreamNativeEntry } from "./metadata";
+import { applyNativeVisibility, disabledNativeSlugs, isUnsupportedOpenAiNativeSlug, nativeOpenAiSlugs, resetNativeMetadataCatalogCache, shouldUpgradeToUpstreamEntry, upstreamNativeEntry } from "./metadata";
 import { loadCatalogForSync, resetBundledCatalogCacheForTests } from "./bundled";
 import { isMultiAgentV2Enabled } from "../features";
 import { applyCatalogModelMetadata, applyReasoningLevels, catalogEntryEfforts, clampCatalogModelsToCodexSupport, ensureGpt56ReasoningLevels, ensureUltraReasoningLevel, isGpt56NativeSlug } from "./effort";
@@ -315,6 +315,7 @@ export function buildCatalogEntries(
 
 export function resetCatalogRuntimeStateForTests(): void {
   resetBundledCatalogCacheForTests();
+  resetNativeMetadataCatalogCache();
   lastDropWarnSignature.clear();
   openAiApiCollisionWarnings.clear();
   comboCatalogWarningSignatures.clear();
@@ -575,6 +576,7 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{
   clampCatalogModelsToCodexSupport(catalog.models);
 
   atomicWriteFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n");
+  resetNativeMetadataCatalogCache();
   return { added: goEntries.length, path: catalogPath, catalogWritten: true, comboOmissions };
 }
 
@@ -594,6 +596,7 @@ export function restoreCodexCatalog(): { removed: number; kept: number; path: st
       models: [...backup.models, ...userNativeAdditions],
     };
     atomicWriteFile(catalogPath, JSON.stringify(restored, null, 2) + "\n");
+    resetNativeMetadataCatalogCache();
     return { removed, kept: restored.models.length, path: catalogPath };
   }
   const before = catalog.models.length;
@@ -602,6 +605,7 @@ export function restoreCodexCatalog(): { removed: number; kept: number; path: st
   if (removed > 0) {
     catalog.models = native;
     atomicWriteFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n");
+    resetNativeMetadataCatalogCache();
   }
   return { removed, kept: native.length, path: catalogPath };
 }
