@@ -1061,16 +1061,16 @@ export function bridgeToResponsesSSE(
                 reportTerminal("failed");
               } else if (event.stopReason === "max_tokens") {
                 // Upstream stopped before a normal completion. Surface as incomplete so the
-                // client can distinguish a truncated/filtered turn from a finished one.
+                // client can distinguish a token-limited turn from a finished one.
                 const response = {
                   ...responseSnapshot("incomplete", finishedItems, event.endTurn),
                   usage: responsesUsage(event.usage),
                   incomplete_details: {
-                    reason: event.stopReason === "max_tokens" ? "max_output_tokens" : "content_filter",
+                    reason: "max_output_tokens",
                   },
                 };
                 // Cache max-output partials so previous_response_id replay can continue them;
-                // rememberResponseState rejects content-filtered incomplete responses.
+                // Filter rejections above are never installed as continuation state.
                 options?.onCompletedResponse?.(response, event.providerState);
                 options?.onUsage?.(event.usage);
                 emit("response.incomplete", { response });
@@ -1658,7 +1658,7 @@ export function buildResponseJSON(
   const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;
   const status = errorEvent || stopReason === "content_filter"
     ? "failed"
-    : incompleteEvent || stopReason === "max_tokens" || stopReason === "content_filter"
+    : incompleteEvent || stopReason === "max_tokens"
       ? "incomplete"
       : "completed";
   options?.onUsage?.(incompleteEvent?.usage ?? usage);
