@@ -7,6 +7,7 @@
  * unchanged. The Responses output (SSE or JSON) is converted back to Anthropic shape.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
+import { bindCodexRoutingConfig } from "../codex/routing-config";
 import { enforceAnthropicImageLimits } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
 import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
@@ -49,7 +50,7 @@ function isRec(v: unknown): v is Rec {
 
 /** Resolve Claude-only sidecar overrides without mutating the shared server config. */
 export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
-  return {
+  return bindCodexRoutingConfig({
     ...config,
     webSearchSidecar: {
       ...config.webSearchSidecar,
@@ -59,7 +60,7 @@ export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
       ...config.visionSidecar,
       ...config.claudeCode?.visionSidecar,
     },
-  };
+  }, config);
 }
 
 function claudeInboundDisabled(config: OcxConfig): Response | null {

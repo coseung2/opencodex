@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { saveConfigPreservingClaudeCode } from "../config";
+import { codexRoutingConfig } from "./routing-config";
 import { isCodexAccountGenerationLive, readCodexAccountRecord } from "./account-store";
 import { codexAccountLogLabel } from "./account-label";
 import {
@@ -956,6 +957,7 @@ function pickUnboundStrategyAccount(
 }
 
 export function getPoolAccountPlan(config: OcxConfig, accountId: string): string | undefined {
+  config = codexRoutingConfig(config);
   if (accountId === MAIN_CODEX_ACCOUNT_ID) return getMainAccountPlan();
   return (config.codexAccounts ?? [])
     .find(account => isSelectableCodexPoolAccount(account) && account.id === accountId)?.plan;
@@ -986,6 +988,7 @@ export function pickLowestUsageCodexAccount(
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
 ): string | null {
+  config = codexRoutingConfig(config);
   let best: string | null = null;
   let bestUsage = Number.POSITIVE_INFINITY;
   for (const id of getEligiblePoolAccounts(config, excludeId, now, quotaScope)) {
@@ -1009,6 +1012,7 @@ export function pickAlternateCodexAccount(
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
 ): string | null {
+  config = codexRoutingConfig(config);
   const strategy = normalizeAccountPoolStrategy(config.accountPoolStrategy);
   if (strategy === "round-robin") {
     const eligible = getEligiblePoolAccounts(config, excludeId, now, quotaScope);
@@ -1023,10 +1027,11 @@ export function pickAlternateCodexAccount(
 
 /** Effective active: automatic runtime cursor, else operator/persisted selection. */
 export function getEffectiveActiveCodexAccountId(config: OcxConfig): string | undefined {
-  return runtimeActiveCodexAccountId ?? config.activeCodexAccountId;
+  return runtimeActiveCodexAccountId ?? codexRoutingConfig(config).activeCodexAccountId;
 }
 
 export function isEffectiveCodexAccountPinned(config: OcxConfig): boolean {
+  config = codexRoutingConfig(config);
   const pinned = pinnedCodexAccountId(config);
   return pinned !== undefined && pinned === getEffectiveActiveCodexAccountId(config);
 }
@@ -1048,6 +1053,7 @@ function releaseCodexAccountPinFor(config: OcxConfig, accountId: string): boolea
 
 /** Persist operator (or quota-strategy) active selection to config + disk. */
 function setActiveCodexAccount(config: OcxConfig, accountId: string): void {
+  config = codexRoutingConfig(config);
   runtimeActiveCodexAccountId = undefined;
   const releasedPin = releaseCodexAccountPinFor(config, accountId);
   if (config.activeCodexAccountId === accountId && !releasedPin) return;
@@ -1076,6 +1082,7 @@ export function reconcileCodexActiveAfterExclusion(
   excludedAccountId: string,
   now = Date.now(),
 ): string | null {
+  config = codexRoutingConfig(config);
   const wasEffective = (getEffectiveActiveCodexAccountId(config) ?? MAIN_CODEX_ACCOUNT_ID) === excludedAccountId;
   if (config.activeCodexAccountId === excludedAccountId) {
     config.activeCodexAccountId = undefined;
@@ -1206,6 +1213,7 @@ export function previewCodexAccountForRequest(
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
 ): string | null {
+  config = codexRoutingConfig(config);
   const entry = threadId ? getThreadAffinity(threadId, quotaScope) : undefined;
   if (threadId && entry) {
     if (
@@ -1279,6 +1287,7 @@ export function resolveCodexAccountForThreadDetailed(
   now = Date.now(),
   quotaScope?: CodexQuotaScope,
 ): CodexThreadResolution {
+  config = codexRoutingConfig(config);
   if (!isIndependentCodexQuotaScope(quotaScope)) releaseDrainedCodexAccountPin(config, now);
   const entry = threadId ? getThreadAffinity(threadId, quotaScope) : undefined;
   if (threadId && entry) {
@@ -1375,6 +1384,7 @@ export function recordCodexUpstreamOutcome(
   outcome: CodexUpstreamOutcome,
   meta: CodexUpstreamOutcomeMeta = {},
 ): void {
+  config = codexRoutingConfig(config);
   if (!accountId) return;
   const writerGeneration = meta.writerGeneration ?? captureConfigGeneration();
   if (writerGeneration < lastReconciledGeneration && !liveHealthAccountIds.has(accountId)) return;

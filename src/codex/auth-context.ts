@@ -30,6 +30,7 @@ import { getAccountQuota } from "./quota";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
+import { codexRoutingConfig } from "./routing-config";
 
 export type CodexAuthContext =
   | { kind: "main"; accountId: null }
@@ -245,6 +246,7 @@ export async function resolveCodexAuthContext(
     if (!hasCallerCodexBearer(headers)) throw new CodexDirectAuthenticationError();
     return { kind: "main", accountId: null };
   }
+  config = codexRoutingConfig(config);
   reconcileMainCodexAccountRuntimeState();
   const threadId = headers.get("x-codex-parent-thread-id");
   const quotaScope = codexQuotaScopeForModel(options.modelId);
@@ -398,6 +400,7 @@ export function headersForCodexAuthContext(headers: Headers, ctx: CodexAuthConte
 
 export function isCodexAuthContextUsable(ctx: CodexAuthContext, config: OcxConfig): boolean {
   if (ctx.kind === "main") return true;
+  config = codexRoutingConfig(config);
   if (ctx.kind === "main-pool") return isCodexAccountUsable(config, ctx.accountId);
   return isCodexAccountUsable(config, ctx.accountId) && isCodexAccountGenerationLive(ctx.accountId, ctx.generation);
 }

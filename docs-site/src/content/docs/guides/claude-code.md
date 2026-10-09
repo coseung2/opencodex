@@ -7,6 +7,15 @@ opencodex serves `POST /v1/messages` (plus `count_tokens`) alongside `/v1/respon
 Code can use every routed provider — OAuth logins, account pools, key failover and sidecars
 included — with zero extra auth work.
 
+## OpenAI pool account state
+
+Claude requests routed through the OpenAI Codex pool share its active-account state with
+Codex, the dashboard and Notch. Automatic quota or failover switches update that shared
+state; manually selecting an account clears existing pool affinities so subsequent routing
+uses the selection, subject to quota and cooldown rules. Claude-only sidecar, cache and
+service-tier overrides remain request-local and are not saved by an account switch.
+Direct mode and explicit account-qualified routes do not rotate the pool's active account.
+
 ## Claude OAuth account pool (experimental)
 
 You can log in multiple Claude accounts via the Providers dashboard (`ocx login anthropic` /
