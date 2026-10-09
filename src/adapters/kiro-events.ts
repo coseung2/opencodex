@@ -7,7 +7,7 @@ export type ParsedKiroEvent =
   | { type: "context_usage"; contextUsagePercentage: number }
   | { type: "tool"; name?: string; toolUseId?: string; input?: string; stop?: boolean }
   | { type: "truncation"; data: string }
-  | { type: "metadata"; usage?: OcxUsage; contextUsagePercentage?: number; stopReason?: string }
+  | { type: "metadata"; usage?: OcxUsage; cacheTelemetry?: { usageReported: boolean; readReported: boolean; writeReported: boolean }; contextUsagePercentage?: number; stopReason?: string }
   | { type: "message_metadata"; conversationId?: string }
   | { type: "invalid_state"; message?: string }
   | { type: "error"; reason?: string; message?: string };
@@ -83,6 +83,11 @@ function parseTokenUsage(eventType: string, value: unknown): OcxUsage | undefine
     inputTokens,
     outputTokens,
     totalTokens,
+    cacheTelemetry: {
+      readReported: usage.cacheReadInputTokens !== undefined,
+      writeReported: usage.cacheWriteInputTokens !== undefined,
+      inputIncludesCache: true,
+    },
     cachedInputTokens: cacheRead,
     cacheReadInputTokens: cacheRead,
     cacheCreationInputTokens: cacheWrite,
@@ -163,11 +168,16 @@ export function parseKiroEvent(eventType: string, payload: Uint8Array): ParsedKi
         return malformed(eventType, "contextUsagePercentage must be a finite number");
       }
       const stopReason = optionalString(eventType, parsed, "stopReason");
+      const usage = parseTokenUsage(eventType, parsed.tokenUsage);
+      const tokenUsage = parsed.tokenUsage as Record<string, unknown> | undefined;
       return {
         type: "metadata",
-        ...(parseTokenUsage(eventType, parsed.tokenUsage) !== undefined
-          ? { usage: parseTokenUsage(eventType, parsed.tokenUsage) }
-          : {}),
+        cacheTelemetry: {
+          usageReported: usage !== undefined,
+          readReported: typeof tokenUsage?.cacheReadInputTokens === "number",
+          writeReported: typeof tokenUsage?.cacheWriteInputTokens === "number",
+        },
+        ...(usage !== undefined ? { usage } : {}),
         ...(typeof contextUsagePercentage === "number" ? { contextUsagePercentage } : {}),
         ...(stopReason !== undefined ? { stopReason } : {}),
       };

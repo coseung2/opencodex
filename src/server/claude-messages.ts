@@ -116,7 +116,7 @@ function uuidFromHex(hex32: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-function anthropicUsageToOcx(usage: Rec | undefined): { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number } | undefined {
+function anthropicUsageToOcx(usage: Rec | undefined): import("../types").OcxUsage | undefined {
   if (!usage) return undefined;
   const num = (v: unknown) => typeof v === "number" ? v : 0;
   const hasCache = usage.cache_read_input_tokens !== undefined || usage.cache_creation_input_tokens !== undefined;
@@ -127,6 +127,11 @@ function anthropicUsageToOcx(usage: Rec | undefined): { inputTokens: number; out
   return {
     inputTokens: num(usage.input_tokens) + read + write,
     outputTokens: num(usage.output_tokens),
+    cacheTelemetry: {
+      readReported: typeof usage.cache_read_input_tokens === "number" && Number.isFinite(usage.cache_read_input_tokens) && usage.cache_read_input_tokens >= 0,
+      writeReported: typeof usage.cache_creation_input_tokens === "number" && Number.isFinite(usage.cache_creation_input_tokens) && usage.cache_creation_input_tokens >= 0,
+      inputIncludesCache: true,
+    },
     ...(hasCache ? {
       cachedInputTokens: read,
       cacheReadInputTokens: read,

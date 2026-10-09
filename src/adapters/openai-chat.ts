@@ -483,6 +483,11 @@ function usageFromOpenAIChat(usage: Record<string, unknown> | undefined): OcxUsa
   return {
     inputTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
     outputTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+    cacheTelemetry: {
+      readReported: typeof promptDetails?.cached_tokens === "number" && Number.isFinite(promptDetails.cached_tokens) && promptDetails.cached_tokens >= 0,
+      writeReported: false,
+      inputIncludesCache: true,
+    },
     ...(promptDetails?.cached_tokens !== undefined ? { cachedInputTokens: promptDetails.cached_tokens } : {}),
     ...(completionDetails?.reasoning_tokens !== undefined ? { reasoningOutputTokens: completionDetails.reasoning_tokens } : {}),
   };

@@ -557,6 +557,11 @@ export function usageFromResponsesPayload(usage: unknown): OcxUsage | undefined 
     return {
       inputTokens: raw.input_tokens,
       outputTokens: raw.output_tokens,
+      cacheTelemetry: {
+        readReported: typeof raw.input_tokens_details?.cached_tokens === "number" && Number.isFinite(raw.input_tokens_details.cached_tokens) && raw.input_tokens_details.cached_tokens >= 0,
+        writeReported: typeof raw.input_tokens_details?.cache_write_tokens === "number" && Number.isFinite(raw.input_tokens_details.cache_write_tokens) && raw.input_tokens_details.cache_write_tokens >= 0,
+        inputIncludesCache: true,
+      },
       ...(typeof raw.total_tokens === "number" ? { totalTokens: raw.total_tokens } : {}),
       ...(typeof raw.input_tokens_details?.cached_tokens === "number"
         ? {
@@ -576,6 +581,11 @@ export function usageFromResponsesPayload(usage: unknown): OcxUsage | undefined 
     return {
       inputTokens: raw.prompt_tokens,
       outputTokens: raw.completion_tokens,
+      cacheTelemetry: {
+        readReported: typeof raw.prompt_tokens_details?.cached_tokens === "number" && Number.isFinite(raw.prompt_tokens_details.cached_tokens) && raw.prompt_tokens_details.cached_tokens >= 0,
+        writeReported: typeof raw.prompt_tokens_details?.cache_write_tokens === "number" && Number.isFinite(raw.prompt_tokens_details.cache_write_tokens) && raw.prompt_tokens_details.cache_write_tokens >= 0,
+        inputIncludesCache: true,
+      },
       ...(typeof raw.total_tokens === "number" ? { totalTokens: raw.total_tokens } : {}),
       ...(typeof raw.prompt_tokens_details?.cached_tokens === "number"
         ? {
@@ -1075,6 +1085,7 @@ export function aggregateAttemptUsage(
     inputTokens: usages.reduce((sum, usage) => sum + usage.inputTokens, 0),
     outputTokens: usages.reduce((sum, usage) => sum + usage.outputTokens, 0),
     totalTokens,
+    ...(attempts.length === 1 && usages[0].cacheTelemetry ? { cacheTelemetry: usages[0].cacheTelemetry } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),

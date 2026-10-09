@@ -369,6 +369,11 @@ function usageFromAnthropic(usage: Record<string, number> | undefined): OcxUsage
   return {
     inputTokens: (usage.input_tokens ?? 0) + read + write,
     outputTokens: usage.output_tokens ?? 0,
+    cacheTelemetry: {
+      readReported: Number.isFinite(usage.cache_read_input_tokens) && usage.cache_read_input_tokens >= 0,
+      writeReported: Number.isFinite(usage.cache_creation_input_tokens) && usage.cache_creation_input_tokens >= 0,
+      inputIncludesCache: true,
+    },
     ...(hasCache ? {
       cachedInputTokens: read,
       cacheReadInputTokens: read,

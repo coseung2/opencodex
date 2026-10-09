@@ -338,6 +338,8 @@ export interface OcxUsage {
    */
   contextTotalTokens?: number;
   totalTokens?: number;
+  /** Upstream field presence; compatibility zeros are not measured misses. */
+  cacheTelemetry?: { readReported: boolean; writeReported: boolean; inputIncludesCache: boolean };
   cachedInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;

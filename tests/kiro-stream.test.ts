@@ -119,6 +119,7 @@ describe("kiro adapter — parseStream", () => {
   test("Kiro event parser preserves usage and context usage frames", async () => {
     expect(parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({ contextUsagePercentage: 25.5 })))).toEqual({
       type: "metadata",
+      cacheTelemetry: { usageReported: false, readReported: false, writeReported: false },
       contextUsagePercentage: 25.5,
     });
     expect(parseKiroEvent("messageMetadataEvent", enc.encode(JSON.stringify({ conversationId: "returned-conversation-1" })))).toEqual({
@@ -130,6 +131,7 @@ describe("kiro adapter — parseStream", () => {
   test("Kiro event parser surfaces the native stop reason and rejects a non-string one", async () => {
     expect(parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({ stopReason: "END_TURN" })))).toEqual({
       type: "metadata",
+      cacheTelemetry: { usageReported: false, readReported: false, writeReported: false },
       stopReason: "END_TURN",
     });
     expect(() => parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({ stopReason: 7 })))).toThrow(
@@ -1445,6 +1447,7 @@ describe("kiro adapter — parseStream", () => {
     expect(done).toEqual({
       inputTokens: 15,
       contextTotalTokens: 298,
+      cacheTelemetry: { readReported: true, writeReported: true, inputIncludesCache: true },
       cachedInputTokens: 3,
       cacheReadInputTokens: 3,
       cacheCreationInputTokens: 2,

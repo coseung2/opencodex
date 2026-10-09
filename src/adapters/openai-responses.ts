@@ -1054,6 +1054,10 @@ function usageFromResponsesPayload(payload: unknown): OcxUsage | undefined {
     inputTokens,
     outputTokens,
     ...(typeof usage.total_tokens === "number" ? { totalTokens: usage.total_tokens } : {}),
+    ...(isPlainObject(usage.input_tokens_details) && typeof usage.input_tokens_details.cached_tokens === "number"
+      && Number.isFinite(usage.input_tokens_details.cached_tokens) && usage.input_tokens_details.cached_tokens >= 0
+      ? { cachedInputTokens: usage.input_tokens_details.cached_tokens,
+          cacheTelemetry: { readReported: true, writeReported: false, inputIncludesCache: true } } : {}),
   };
 }
 

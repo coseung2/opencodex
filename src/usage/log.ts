@@ -168,6 +168,9 @@ function normalizeUsageValue(usage: OcxUsage | undefined): OcxUsage | undefined 
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
+    ...(usage.cacheTelemetry && typeof usage.cacheTelemetry.readReported === "boolean"
+      && typeof usage.cacheTelemetry.writeReported === "boolean" && typeof usage.cacheTelemetry.inputIncludesCache === "boolean"
+      ? { cacheTelemetry: { readReported: usage.cacheTelemetry.readReported, writeReported: usage.cacheTelemetry.writeReported, inputIncludesCache: usage.cacheTelemetry.inputIncludesCache } } : {}),
     // Absolute active-context checkpoint (types.ts). Stateful providers such as Kiro report
     // per-attempt usage only, so this field is the ONLY carrier of the cumulative context
     // figure once the log records raw adapter usage instead of re-parsing the bridged wire

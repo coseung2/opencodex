@@ -234,6 +234,11 @@ function usageFromGemini(usage: Record<string, number> | undefined): OcxUsage | 
   return {
     inputTokens: usage.promptTokenCount ?? 0,
     outputTokens: usage.candidatesTokenCount ?? 0,
+    cacheTelemetry: {
+      readReported: Number.isFinite(usage.cachedContentTokenCount) && usage.cachedContentTokenCount >= 0,
+      writeReported: false,
+      inputIncludesCache: true,
+    },
     ...(usage.cachedContentTokenCount !== undefined ? { cachedInputTokens: usage.cachedContentTokenCount } : {}),
     ...(usage.thoughtsTokenCount !== undefined ? { reasoningOutputTokens: usage.thoughtsTokenCount } : {}),
   };

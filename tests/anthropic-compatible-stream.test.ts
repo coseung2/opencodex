@@ -195,7 +195,7 @@ describe("Anthropic-compatible reasoning stream termination (#312)", () => {
 
     expect(events.at(-1)).toEqual({
       type: "done",
-      usage: { inputTokens: 2, outputTokens: 3 },
+      usage: { inputTokens: 2, outputTokens: 3, cacheTelemetry: { readReported: false, writeReported: false, inputIncludesCache: true } },
       stopReason: "max_tokens",
     });
     expect(events.some(event => event.type === "error")).toBe(false);
@@ -226,7 +226,7 @@ describe("Anthropic-compatible reasoning stream termination (#312)", () => {
     expect(events).toEqual([
       { type: "thinking_delta", thinking: "think" },
       { type: "text_delta", text: "visible" },
-      { type: "done", usage: { inputTokens: 2, outputTokens: 3 }, stopReason: "end_turn" },
+      { type: "done", usage: { inputTokens: 2, outputTokens: 3, cacheTelemetry: { readReported: false, writeReported: false, inputIncludesCache: true } }, stopReason: "end_turn" },
     ]);
   });
 });

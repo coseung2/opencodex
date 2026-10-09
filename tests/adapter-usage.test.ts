@@ -29,7 +29,7 @@ describe("adapter reasoning and usage details", () => {
     expect(events).toEqual([
       { type: "reasoning_raw_delta", text: "raw thoughts" },
       { type: "text_delta", text: "answer" },
-      { type: "done", usage: { inputTokens: 11, outputTokens: 7, cachedInputTokens: 5, reasoningOutputTokens: 3 } },
+      { type: "done", usage: { cacheTelemetry: { readReported: true, writeReported: false, inputIncludesCache: true }, inputTokens: 11, outputTokens: 7, cachedInputTokens: 5, reasoningOutputTokens: 3 } },
     ]);
   });
 
@@ -47,7 +47,7 @@ describe("adapter reasoning and usage details", () => {
     expect(events).toEqual([
       { type: "reasoning_raw_delta", text: "raw stream" },
       { type: "text_delta", text: "answer" },
-      { type: "done", usage: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2, reasoningOutputTokens: 1 } },
+      { type: "done", usage: { cacheTelemetry: { readReported: true, writeReported: false, inputIncludesCache: true }, inputTokens: 9, outputTokens: 4, cachedInputTokens: 2, reasoningOutputTokens: 1 } },
     ]);
   });
 
@@ -102,6 +102,7 @@ describe("adapter reasoning and usage details", () => {
       type: "done",
       usage: {
         // canonical convention: inputTokens is inclusive of cache read + write
+        cacheTelemetry: { readReported: true, writeReported: true, inputIncludesCache: true },
         inputTokens: 30,
         outputTokens: 8,
         cachedInputTokens: 4,
@@ -120,7 +121,7 @@ describe("adapter reasoning and usage details", () => {
 
     expect(events?.at(-1)).toEqual({
       type: "done",
-      usage: { inputTokens: 20, outputTokens: 8 },
+      usage: { inputTokens: 20, outputTokens: 8, cacheTelemetry: { readReported: false, writeReported: false, inputIncludesCache: true } },
     });
   });
 
@@ -262,7 +263,7 @@ describe("adapter reasoning and usage details", () => {
 
     expect(events?.at(-1)).toEqual({
       type: "done",
-      usage: { inputTokens: 13, outputTokens: 5, cachedInputTokens: 3, reasoningOutputTokens: 2 },
+      usage: { cacheTelemetry: { readReported: true, writeReported: false, inputIncludesCache: true }, inputTokens: 13, outputTokens: 5, cachedInputTokens: 3, reasoningOutputTokens: 2 },
     });
   });
 });
@@ -277,7 +278,7 @@ describe("usage and content retention (F2)", () => {
     const events = [];
     for await (const event of adapter.parseStream(response)) events.push(event);
     expect(events).toContainEqual({ type: "text_delta", text: "final" });
-    expect(events.at(-1)).toEqual({ type: "done", usage: { inputTokens: 3, outputTokens: 2 } });
+    expect(events.at(-1)).toEqual({ type: "done", usage: { inputTokens: 3, outputTokens: 2, cacheTelemetry: { readReported: false, writeReported: false, inputIncludesCache: true } } });
   });
 
   test("openai-chat retains usage on EOF without [DONE]", async () => {
@@ -288,7 +289,7 @@ describe("usage and content retention (F2)", () => {
     ].join(""));
     const events = [];
     for await (const event of adapter.parseStream(response)) events.push(event);
-    expect(events.at(-1)).toEqual({ type: "done", usage: { inputTokens: 5, outputTokens: 1 } });
+    expect(events.at(-1)).toEqual({ type: "done", usage: { inputTokens: 5, outputTokens: 1, cacheTelemetry: { readReported: false, writeReported: false, inputIncludesCache: true } } });
   });
 
   test("anthropic stream merges message_start input usage with message_delta output usage", async () => {
@@ -313,6 +314,7 @@ describe("usage and content retention (F2)", () => {
       type: "done",
       usage: {
         // canonical convention: inputTokens is inclusive of cache read + write
+        cacheTelemetry: { readReported: true, writeReported: true, inputIncludesCache: true },
         inputTokens: 25,
         outputTokens: 4,
         cachedInputTokens: 3,
@@ -349,7 +351,7 @@ describe("usage and content retention (F2)", () => {
     for await (const event of adapter.parseStream(response)) events.push(event);
     const dones = events.filter(e => e.type === "done");
     expect(dones.length).toBe(1);
-    expect(dones[0]).toEqual({ type: "done", usage: { inputTokens: 4, outputTokens: 2 } });
+    expect(dones[0]).toEqual({ type: "done", usage: { inputTokens: 4, outputTokens: 2, cacheTelemetry: { readReported: false, writeReported: false, inputIncludesCache: true } } });
   });
 });
 

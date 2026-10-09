@@ -1260,6 +1260,7 @@ async function* parseKiroAttemptEvents(
       if (!ev) continue;
       switch (ev.type) {
         case "metadata":
+          if (ev.cacheTelemetry) debugProviderDiagnostic("kiro", "cache_telemetry", { ...ev.cacheTelemetry });
           if (ev.usage) authoritativeUsage = ev.usage;
           if (ev.contextUsagePercentage !== undefined && ev.contextUsagePercentage > 0) {
             contextUsagePercentage = ev.contextUsagePercentage;
