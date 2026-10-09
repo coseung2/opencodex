@@ -406,12 +406,12 @@ The proxy translates every Anthropic Messages API request into the Codex Respons
 | Messages input | Responses output |
 | --- | --- |
 | Top-level `system` | `instructions` (text blocks joined with `\n\n`) |
-| `messages[].role: "system"` | Chronological `developer` items; standalone token accounting notices are omitted |
+| `messages[].role: "system"` | Chronological `developer` item; does not rewrite leading instructions |
 | User text / image | `input_text` / `input_image` (base64 → data URL) |
 | Assistant text | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringified `arguments`) |
 | User `tool_result` | `function_call_output` (`is_error` → `[tool error]` prefix) |
-| `thinking` / `redacted_thinking` replay | Dropped |
+| `thinking` / `redacted_thinking` replay | Reasoning items with preserved signatures/opaque data |
 | Function tools | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, named→`{type:"function",name}` |
 | `max_tokens` | `max_output_tokens` |
@@ -428,7 +428,7 @@ name.
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | Text deltas | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
-| Reasoning summary/text | `thinking` block with synthetic signature |
+| Reasoning summary/text | `thinking` block with native signature when available; otherwise synthetic fallback |
 | Function-call frames | `tool_use` block with `input_json_delta` |
 | Terminal event | `message_delta` → `message_stop` |
 | EOF before terminal | 502-style `api_error` |
@@ -442,6 +442,28 @@ name.
 other 5xx `api_error`. `Retry-After` is preserved.
 
 ## Prompt caching and token usage
+
+Claude requests to Kiro reuse the last successful Kiro conversation ID when the client supplies
+a recognized per-session UUID in `metadata.user_id`. The process-local state is bounded to 256
+entries and expires after one hour of inactivity. Admission credentials, the initial user turn,
+provider credential, endpoint and model separate the scopes. Missing session identity, overlapping
+turns, failure or cancellation use a fresh conversation instead of joining unrelated work. Server
+restarts and credential changes also start fresh. The shared prompt-cache key is never used as a
+conversation identity. This preserves continuity; it does not guarantee faster responses or reveal
+Kiro's upstream cache-hit rate. Codex's existing Responses continuation path is unchanged.
+
+Mid-conversation system notices keep their chronological position through the Claude and Chat
+translations, so appending a notice does not rewrite the leading prompt. Standalone system
+`<total_tokens>… tokens left</total_tokens>` bookkeeping is omitted, including its standard
+`<system-reminder>` wrapper; user text, fenced examples and mixed instructions are retained.
+Anthropic subscription
+requests on the translated Claude route use a one-hour cache by default. An explicit `5m` or `1h`
+marker is honored; mixed lifetimes use the shorter one because this translation has one retention
+policy. An explicit global `cacheRetention` still takes precedence. API-key requests retain their
+existing default unless a lifetime is supplied. These are request-local choices, not changes to
+other sessions or providers. Cache breakpoints are rebuilt by the adapter rather than copied
+byte-for-byte. Native signatures and redacted thinking survive replay; hidden thinking remains
+hidden. Feature beta headers accompany Anthropic requests without forwarding gateway credentials.
 
 **Anthropic-routed requests:** the adapter manages cache breakpoints for tools, system content,
 and the penultimate user message, plus top-level automatic `cache_control`. Stable turns normally
