@@ -38,6 +38,9 @@ provider — xAI, Kimi, DeepSeek, GLM, Groq, OpenRouter, Ollama (local & cloud),
   adapter **omits it entirely** for ids in `provider.noReasoningModels`.
 - Streams `delta.content` (text), `delta.reasoning_content` (thinking), and `delta.tool_calls[]`;
   collects `usage`.
+- For models in `preserveReasoningContentModels`, replays original reasoning on assistant history.
+  Tool-only turns with no thinking text (including repaired orphan tool results) carry
+  `reasoning_content: ""` rather than omitting the field; no reasoning text is invented.
 
 ## `openai-responses`
 
