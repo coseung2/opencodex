@@ -18,7 +18,7 @@ import {
   setCached,
   type ProviderModelDiscoveryFailure,
 } from "../model-cache";
-import { buildModelsRequest, resolveModelsAuthToken } from "../../oauth";
+import { buildModelsRequest, resolveModelsAuthToken, getOAuthCredentialProjectId } from "../../oauth";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { modelInList } from "../../types";
 import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
@@ -31,6 +31,7 @@ import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { fetchKiroAvailableModels } from "../../providers/kiro-live-models";
+import { fetchAntigravityModels } from "../../providers/antigravity-live-models";
 import { resolveKiroApiRegion, resolveKiroProfileArn } from "../../oauth/kiro";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import {
@@ -184,7 +185,10 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
     const base = inputModalities ?? model.inputModalities ?? ["text"];
     inputModalities = base.includes("image") ? [...base] : [...base, "image"];
   }
-  const reasoningEfforts = configuredReasoningEfforts(prov, model.id);
+  const configuredEfforts = configuredReasoningEfforts(prov, model.id);
+  const reasoningEfforts = name === "google-antigravity" && model.reasoningEfforts && configuredEfforts
+    ? configuredEfforts.filter(effort => model.reasoningEfforts!.includes(effort))
+    : configuredEfforts;
   const defaultReasoningEffort = modelRecordValue(prov.modelDefaultReasoningEfforts, model.id) ?? model.defaultReasoningEffort;
   const supportsReasoningSummaries = configuredReasoningSummarySupport(prov, model.id);
   const hinted = {
@@ -491,6 +495,35 @@ export async function fetchProviderModels(name: string, prov: OcxProviderConfig,
     );
     const staleCursor = getStaleCached(name);
     return staleCursor ? applyConfigHintsToCachedModels(name, prov, staleCursor) : configured;
+  }
+  if (name === "google-antigravity" && prov.adapter === "google") {
+    const projectId = prov.project || getOAuthCredentialProjectId(name);
+    if (!apiKey || !projectId) {
+      markProviderDiscoveryFailed(name, { reason: "blocked" });
+      return configured;
+    }
+    const fresh = getFreshCached(name, ttlMs);
+    if (fresh) return applyConfigHintsToCachedModels(name, prov, fresh, contextCap);
+    const fallback = () => {
+      const stale = getStaleCached(name);
+      return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap) : configured;
+    };
+    if (isModelsFetchCoolingDown(name)) return fallback();
+    const result = await fetchAntigravityModels({ accessToken: apiKey, projectId });
+    if (result.ok) {
+      const models = result.models.map(model => applyProviderConfigHints(name, prov, { ...model, provider: name }, contextCap));
+      markProviderDiscoveryOk(name, models.length);
+      setCached(name, models);
+      return models;
+    }
+    const failure: ProviderModelDiscoveryFailure = {
+      reason: result.error === "auth" ? "blocked" : result.error === "http" ? "provider" : result.error,
+    };
+    const shouldLog = shouldLogDiscoveryFailure(name, failure);
+    markModelsFetchFailure(name);
+    markProviderDiscoveryFailed(name, failure);
+    if (shouldLog) console.warn(`[opencodex] Antigravity model discovery failed [${result.error}]; using stale/static catalog degradation.`);
+    return fallback();
   }
   if (prov.adapter === "kiro") {
     if (!apiKey) return configured;

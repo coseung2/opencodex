@@ -97,20 +97,35 @@ describe("POST /api/providers/test (WP040 connectivity probe)", () => {
     expect(body).toEqual({ applicable: false, reason: "static_catalog", latencyMs: 0 });
   });
 
-  test("Google Antigravity reports not-applicable without credentials or network access (#723)", async () => {
+  test("Google Antigravity explicit static mode reports not-applicable without network access (#723)", async () => {
     let fetches = 0;
     globalThis.fetch = (async () => {
       fetches += 1;
       throw new Error("static Antigravity catalog must not probe upstream");
     }) as typeof fetch;
     const config = baseConfig({
-      "google-antigravity": structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
+      "google-antigravity": { ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig), liveModels: false },
     });
 
     const { body } = await probe(config, "google-antigravity");
 
     expect(body).toEqual({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     expect(fetches).toBe(0);
+  });
+
+  test("Antigravity connectivity uses live CCA evidence and never passes from cached models", async () => {
+    const config = baseConfig({ "google-antigravity": {
+      ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
+      authMode: "key", apiKey: "fixture-token", project: "fixture-project",
+    } });
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toEndWith("/v1internal:fetchAvailableModels");
+      expect(init?.method).toBe("POST");
+      return Response.json({ models: { "new-model": {} } });
+    }) as typeof fetch;
+    expect((await probe(config, "google-antigravity")).body).toMatchObject({ ok: true, models: 1 });
+    globalThis.fetch = (async () => new Response(null, { status: 401 })) as typeof fetch;
+    expect((await probe(config, "google-antigravity")).body).toMatchObject({ ok: false, error: "Antigravity discovery failed: auth" });
   });
 
   test("a fake key gets the upstream rejection, not a catalog-presence pass", async () => {

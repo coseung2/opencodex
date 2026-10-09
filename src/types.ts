@@ -555,6 +555,8 @@ export interface OcxConfig {
   openaiProviderTierVersion?: 1 | 2;
   /** One-time migration marker for Antigravity's static catalog default. */
   googleAntigravityStaticCatalogVersion?: 1;
+  /** One-time migration to CCA live discovery; subsequent user opt-outs are preserved. */
+  googleAntigravityLiveCatalogVersion?: 1;
   /** Claude Code inbound + launcher settings. */
   claudeCode?: OcxClaudeCodeConfig;
   /**

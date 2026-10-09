@@ -370,10 +370,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       // credential resolution/network access for providers such as Antigravity.
       return jsonResponse({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     }
-    const { resolveModelsAuthToken, buildModelsRequest } = await import("../../oauth");
+    const { resolveModelsAuthToken, buildModelsRequest, getOAuthCredentialProjectId } = await import("../../oauth");
     const apiKey = await resolveModelsAuthToken(name, prov);
     if (prov.authMode === "oauth" && !apiKey) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "static catalog only — upstream not verified (not logged in)" });
+    }
+    if (name === "google-antigravity" && prov.adapter === "google") {
+      const { fetchAntigravityModels } = await import("../../providers/antigravity-live-models");
+      const started = Date.now();
+      const result = await fetchAntigravityModels({ accessToken: apiKey ?? "", projectId: prov.project || getOAuthCredentialProjectId(name) || "" });
+      const latencyMs = Date.now() - started;
+      return result.ok
+        ? jsonResponse({ ok: true, latencyMs, models: result.models.length, message: `Connected — ${result.models.length} models available.` })
+        : jsonResponse({ ok: false, latencyMs, error: `Antigravity discovery failed: ${result.error}` });
     }
     const { url: modelsUrl, headers } = buildModelsRequest(prov, apiKey, name);
     const discovery = resolveProviderModelDiscovery(name, prov);

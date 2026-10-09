@@ -706,8 +706,8 @@ export function buildModelsRequest(prov: OcxProviderConfig, apiKey: string | und
  *
  * Only touches providers that are registry-managed AND still `authMode: "oauth"`. Preset fields
  * are refreshed, while the registry's `liveModels` default is normally filled only when no value
- * is stored. Antigravity has one versioned exception below because its old GUI-generated `true`
- * cannot be distinguished from a hand-written pre-migration `true`. Persists + returns true when
+ * is stored. Antigravity has one versioned exception to replace the previous forced-static
+ * default with CCA live discovery. Persists + returns true when
  * anything changed.
  */
 function cloneProviderField(value: unknown): unknown {
@@ -737,28 +737,23 @@ const OAUTH_RECONCILE_FIELDS: (keyof OcxProviderConfig)[] = [
 ];
 
 const GOOGLE_ANTIGRAVITY_PROVIDER = "google-antigravity";
-const GOOGLE_ANTIGRAVITY_STATIC_CATALOG_VERSION = 1 as const;
+const GOOGLE_ANTIGRAVITY_LIVE_CATALOG_VERSION = 1 as const;
 
 export function reconcileOAuthProviders(config: OcxConfig): boolean {
   let changed = false;
-  const migrateAntigravityStaticCatalog =
-    config.googleAntigravityStaticCatalogVersion !== GOOGLE_ANTIGRAVITY_STATIC_CATALOG_VERSION;
+  const migrateAntigravityLiveCatalog =
+    config.googleAntigravityLiveCatalogVersion !== GOOGLE_ANTIGRAVITY_LIVE_CATALOG_VERSION;
   for (const [name, prov] of Object.entries(config.providers)) {
     const def = OAUTH_PROVIDERS[name];
-    // Normalize the canonical row before the OAuth-only reconciliation guard. The old GUI and a
-    // manual edit both persist the same bare `true`, with no source metadata, so every ambiguous
-    // pre-marker value is reset once. A deliberate live-discovery choice can be re-enabled after
-    // the marker and is then preserved. Do this before the guard so omitted/non-OAuth authMode
-    // rows do not get stamped without actually receiving the new static default.
-    if (name === GOOGLE_ANTIGRAVITY_PROVIDER && migrateAntigravityStaticCatalog && prov.liveModels !== false) {
-      prov.liveModels = false;
+    // Previous releases forced static discovery. Enable the CCA endpoint once on upgrade,
+    // before the OAuth guard; preserve all subsequent explicit user choices.
+    if (name === GOOGLE_ANTIGRAVITY_PROVIDER && migrateAntigravityLiveCatalog && prov.liveModels !== true) {
+      prov.liveModels = true;
       changed = true;
     }
-    // During the one-time Antigravity static-catalog migration, also refresh preset catalog
-    // fields when authMode is omitted or non-oauth. Otherwise liveModels flips to static while
-    // a stale models[] remains the published catalog forever.
+    // Refresh the fallback list on upgrade even for rows with omitted/non-OAuth authMode.
     const migrateAntigravityCatalogFields =
-      name === GOOGLE_ANTIGRAVITY_PROVIDER && migrateAntigravityStaticCatalog;
+      name === GOOGLE_ANTIGRAVITY_PROVIDER && migrateAntigravityLiveCatalog;
     if (!def || (prov.authMode !== "oauth" && !migrateAntigravityCatalogFields)) continue;
     const preset = def.providerConfig;
     for (const field of OAUTH_RECONCILE_FIELDS) {
@@ -770,21 +765,21 @@ export function reconcileOAuthProviders(config: OcxConfig): boolean {
       }
       changed = true;
     }
-    // Before this marker existed, the GUI materialized an omitted `liveModels` as `true` on any
-    // settings save. Since persisted values have no provenance, the pre-guard normalization above
-    // intentionally resets all pre-marker `true` values once. Later choices are version-bounded.
+    // Registry defaults seed omitted values without replacing post-migration choices.
     if (prov.liveModels === undefined && preset.liveModels !== undefined) {
       prov.liveModels = preset.liveModels;
       changed = true;
     }
     // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
-    if (prov.defaultModel && preset.defaultModel && !(prov.models ?? []).includes(prov.defaultModel)) {
+    const keepLiveAntigravityDefault = name === GOOGLE_ANTIGRAVITY_PROVIDER
+      && prov.liveModels !== false && !migrateAntigravityLiveCatalog;
+    if (!keepLiveAntigravityDefault && prov.defaultModel && preset.defaultModel && !(prov.models ?? []).includes(prov.defaultModel)) {
       prov.defaultModel = preset.defaultModel;
       changed = true;
     }
   }
-  if (migrateAntigravityStaticCatalog) {
-    config.googleAntigravityStaticCatalogVersion = GOOGLE_ANTIGRAVITY_STATIC_CATALOG_VERSION;
+  if (migrateAntigravityLiveCatalog) {
+    config.googleAntigravityLiveCatalogVersion = GOOGLE_ANTIGRAVITY_LIVE_CATALOG_VERSION;
     changed = true;
   }
   if (changed) saveConfig(config);
@@ -848,11 +843,9 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   const existing = config.providers[provider];
   const next: OcxProviderConfig = { ...def.providerConfig };
   // `liveModels` is a user-facing provider toggle. A registry default seeds new rows, but an
-  // explicit post-migration choice must survive re-login and the latest-config upsert. Old GUI
-  // saves and manual edits left identical pre-marker `true` values, so that ambiguous state is
-  // reset once; users who deliberately forced discovery can re-enable it after migration.
+  // explicit post-migration choice must survive re-login and the latest-config upsert.
   const preserveExistingLiveModels = provider !== GOOGLE_ANTIGRAVITY_PROVIDER
-    || config.googleAntigravityStaticCatalogVersion === GOOGLE_ANTIGRAVITY_STATIC_CATALOG_VERSION;
+    || config.googleAntigravityLiveCatalogVersion === GOOGLE_ANTIGRAVITY_LIVE_CATALOG_VERSION;
   if (preserveExistingLiveModels && typeof existing?.liveModels === "boolean") {
     next.liveModels = existing.liveModels;
   }
@@ -880,7 +873,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   }
   config.providers[provider] = next;
   if (provider === GOOGLE_ANTIGRAVITY_PROVIDER) {
-    config.googleAntigravityStaticCatalogVersion = GOOGLE_ANTIGRAVITY_STATIC_CATALOG_VERSION;
+    config.googleAntigravityLiveCatalogVersion = GOOGLE_ANTIGRAVITY_LIVE_CATALOG_VERSION;
   }
 }
 

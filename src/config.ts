@@ -785,6 +785,7 @@ const configSchema = z.object({
   // Invalid hand edits must not discard an otherwise usable config. Treat them as
   // pre-migration so startup can safely re-run the one-time normalization.
   googleAntigravityStaticCatalogVersion: z.literal(1).optional().catch(undefined),
+  googleAntigravityLiveCatalogVersion: z.literal(1).optional().catch(undefined),
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
@@ -1532,6 +1533,10 @@ function appOwnedMemoryBudgetError(value: unknown): string | null {
 
 function googleAntigravityStaticCatalogVersionError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
+  if (raw && Object.hasOwn(raw, "googleAntigravityLiveCatalogVersion")) {
+    const version = raw.googleAntigravityLiveCatalogVersion;
+    if (version !== undefined && version !== 1) return "schema_invalid: googleAntigravityLiveCatalogVersion: must be 1 or omitted";
+  }
   if (!raw || !Object.hasOwn(raw, "googleAntigravityStaticCatalogVersion")) return null;
   const version = raw.googleAntigravityStaticCatalogVersion;
   if (version === undefined || version === 1) return null;
