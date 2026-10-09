@@ -463,7 +463,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
       }
 
       if (effectiveType === "function_call") {
-        const call = item as { id?: string; call_id: string; name: string; arguments?: string; namespace?: string };
+        const call = item as { id?: string; call_id: string; name: string; arguments?: string; namespace?: string; thought_signature?: string; thoughtSignature?: string };
         // Tolerate empty/non-JSON arguments (e.g. a no-arg tool call serialized as "") instead of
         // throwing — a single poisoned history item would otherwise 400 every subsequent turn.
         let args: Record<string, unknown> = {};
@@ -483,6 +483,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
         const toolCall: OcxToolCall = {
           type: "toolCall", id: call.call_id, name: call.name, arguments: args,
           ...(call.namespace ? { namespace: call.namespace } : {}),
+          ...(call.thought_signature ?? call.thoughtSignature ? { thoughtSignature: call.thought_signature ?? call.thoughtSignature } : {}),
         };
         assistantHolderWithReasoning().content.push(toolCall);
         continue;

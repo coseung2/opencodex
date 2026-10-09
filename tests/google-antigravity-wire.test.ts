@@ -323,6 +323,18 @@ describe("antigravity parseStream unwraps response", () => {
     expect((done as Extract<AdapterEvent, { type: "done" }>).usage?.inputTokens).toBe(4);
     expect((done as Extract<AdapterEvent, { type: "done" }>).usage?.cachedInputTokens).toBe(3);
   });
+
+  test("keeps the upstream thoughtSignature on the emitted tool-call event", async () => {
+    const adapter = createGoogleAdapter(provider);
+    const events: AdapterEvent[] = [];
+    for await (const ev of adapter.parseStream(sseResponse([
+      { response: { candidates: [{ content: { parts: [{ functionCall: { name: "default_api:exec_command", args: { cmd: "pwd" } }, thoughtSignature: "sig-stream-abcdef0123456789" }] } }] } },
+      { response: { candidates: [{ finishReason: "STOP" }] } },
+    ]))) events.push(ev);
+    expect(events.find(event => event.type === "tool_call_start")).toMatchObject({
+      type: "tool_call_start", name: "default_api:exec_command", thoughtSignature: "sig-stream-abcdef0123456789",
+    });
+  });
 });
 
 describe("antigravity parseResponse unwraps response (non-streaming)", () => {

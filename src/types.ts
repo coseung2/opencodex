@@ -266,7 +266,7 @@ export type AdapterEvent =
   // Never rendered — it only rides the reasoning item's envelope so the next request can replay it.
   | { type: "kiro_redacted_reasoning"; data: string }
   | { type: "reasoning_raw_delta"; text: string }
-  | { type: "tool_call_start"; id: string; name: string }
+  | { type: "tool_call_start"; id: string; name: string; thoughtSignature?: string }
   | { type: "tool_call_delta"; arguments: string }
   | { type: "tool_call_end" }
   /** Internal boundary between a guarded first pass and its one-shot continuation. */

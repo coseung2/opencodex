@@ -427,7 +427,7 @@ export function bridgeToResponsesSSE(
       // synthetic compaction item's payload on done.
       let compactionText = "";
       let compactionTextBytes = 0;
-      let currentToolCall: { itemId: string; outputIndex: number; callId: string; name: string; args: string; argsBytes: number; namespace?: string; freeform?: boolean; toolSearch?: boolean; inputEmitted?: string } | null = null;
+      let currentToolCall: { itemId: string; outputIndex: number; callId: string; name: string; args: string; argsBytes: number; thoughtSignature?: string; namespace?: string; freeform?: boolean; toolSearch?: boolean; inputEmitted?: string } | null = null;
       // Open native web-search cell (between begin and end). Holds the output index allocated on
       // begin so the matching done reuses it; closed as `failed` if the stream terminates early.
       let currentWebSearch: { itemId: string; eventId: string; outputIndex: number } | null = null;
@@ -545,6 +545,7 @@ export function bridgeToResponsesSSE(
               call_id: currentToolCall.callId, name: currentToolCall.name,
               arguments: argsStr, status: "completed",
               ...(currentToolCall.namespace ? { namespace: currentToolCall.namespace } : {}),
+              ...(currentToolCall.thoughtSignature ? { thought_signature: currentToolCall.thoughtSignature } : {}),
             };
         emit("response.output_item.done", { output_index: currentToolCall.outputIndex, item });
         retainFinishedItem(item as OutputItem);
@@ -579,6 +580,7 @@ export function bridgeToResponsesSSE(
               call_id: currentToolCall.callId, name: currentToolCall.name,
               arguments: argsStr, status: "incomplete",
               ...(currentToolCall.namespace ? { namespace: currentToolCall.namespace } : {}),
+              ...(currentToolCall.thoughtSignature ? { thought_signature: currentToolCall.thoughtSignature } : {}),
             };
         emit("response.output_item.done", { output_index: currentToolCall.outputIndex, item });
         retainFinishedItem(item as OutputItem);
@@ -893,9 +895,9 @@ export function bridgeToResponsesSSE(
                 ? { type: "tool_search_call", id: itemId, call_id: event.id, execution: "client", arguments: {}, status: "in_progress" }
                 : freeform
                 ? { type: "custom_tool_call", id: itemId, call_id: event.id, name: realName, input: "", status: "in_progress" }
-                : { type: "function_call", id: itemId, call_id: event.id, name: realName, arguments: "", status: "in_progress", ...(ns ? { namespace: ns } : {}) };
+                : { type: "function_call", id: itemId, call_id: event.id, name: realName, arguments: "", status: "in_progress", ...(ns ? { namespace: ns } : {}), ...(event.thoughtSignature ? { thought_signature: event.thoughtSignature } : {}) };
               emit("response.output_item.added", { output_index: outputIndex, item });
-              currentToolCall = { itemId, outputIndex, callId: event.id, name: realName, args: "", argsBytes: 0, namespace: ns, freeform, toolSearch };
+              currentToolCall = { itemId, outputIndex, callId: event.id, name: realName, args: "", argsBytes: 0, thoughtSignature: event.thoughtSignature, namespace: ns, freeform, toolSearch };
               budget?.openCall(event.id);
               break;
             }
@@ -1326,6 +1328,7 @@ export function buildResponseJSON(
   let batchKiroRedactedBytes = 0;
   let currentToolCallId = "";
   let currentToolCallName = "";
+  let currentToolCallThoughtSignature: string | undefined;
   let currentToolCallArgs = "";
   let currentToolCallArgsBytes = 0;
   // Web-search citations awaiting the next assistant message (attached as url_citation annotations).
@@ -1427,12 +1430,14 @@ export function buildResponseJSON(
         type: "function_call", id: `fc_${uuid()}`,
         call_id: currentToolCallId, name: realName,
         arguments: currentToolCallArgs || "{}", status,
+        ...(currentToolCallThoughtSignature ? { thought_signature: currentToolCallThoughtSignature } : {}),
         ...(ns ? { namespace: ns } : {}),
       });
     }
     budget?.closeCall(currentToolCallId);
     currentToolCallId = "";
     currentToolCallName = "";
+    currentToolCallThoughtSignature = undefined;
     currentToolCallArgs = "";
     currentToolCallArgsBytes = 0;
   };
@@ -1517,6 +1522,7 @@ export function buildResponseJSON(
         if (currentRawReasoning) flushRawReasoning();
         flushToolCall();
         currentToolCallId = e.id;
+        currentToolCallThoughtSignature = e.thoughtSignature;
         budget?.openCall(e.id);
         currentToolCallName = e.name;
         currentToolCallArgs = "";

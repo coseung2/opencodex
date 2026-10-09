@@ -545,7 +545,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               const id = `call_${crypto.randomUUID().slice(0, 8)}`;
               toolCallsStarted++;
               emittedContentEvent = true;
-              yield { type: "tool_call_start", id, name: restoreGoogleToolName(part.functionCall.name) };
+              const thoughtSignature = (part as { thoughtSignature?: unknown; thought_signature?: unknown }).thoughtSignature
+                ?? (part as { thought_signature?: unknown }).thought_signature;
+              yield {
+                type: "tool_call_start", id, name: restoreGoogleToolName(part.functionCall.name),
+                ...(typeof thoughtSignature === "string" && thoughtSignature.length > 0 ? { thoughtSignature } : {}),
+              };
               yield { type: "tool_call_delta", arguments: JSON.stringify(part.functionCall.args ?? {}) };
               yield { type: "tool_call_end" };
             }
@@ -756,7 +761,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           if (part.functionCall) {
             const id = `call_${crypto.randomUUID().slice(0, 8)}`;
             toolCallsStarted++;
-            events.push({ type: "tool_call_start", id, name: restoreGoogleToolName(part.functionCall.name) });
+            const thoughtSignature = (part as { thoughtSignature?: unknown; thought_signature?: unknown }).thoughtSignature
+              ?? (part as { thought_signature?: unknown }).thought_signature;
+            events.push({
+              type: "tool_call_start", id, name: restoreGoogleToolName(part.functionCall.name),
+              ...(typeof thoughtSignature === "string" && thoughtSignature.length > 0 ? { thoughtSignature } : {}),
+            });
             events.push({ type: "tool_call_delta", arguments: JSON.stringify(part.functionCall.args ?? {}) });
             events.push({ type: "tool_call_end" });
           }
