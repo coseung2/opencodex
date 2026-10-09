@@ -128,6 +128,34 @@ describe("kiro adapter — parseStream", () => {
     });
   });
 
+  test("metadata cacheDetails names the write TTL and never invents one", () => {
+    const usageOf = (tokenUsage: unknown) =>
+      (parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({ tokenUsage }))) as { usage?: Record<string, unknown> | undefined }).usage;
+    // 1h write
+    expect(usageOf({ uncachedInputTokens: 10, cacheWriteInputTokens: 2, cacheDetails: [{ inputTokens: 2, ttl: "1h" }], outputTokens: 4, totalTokens: 19 }))
+      .toMatchObject({ cacheWriteTtl: "1h" });
+    // 5m write
+    expect(usageOf({ uncachedInputTokens: 10, cacheWriteInputTokens: 2, cacheDetails: [{ inputTokens: 2, ttl: "5m" }], outputTokens: 4, totalTokens: 19 }))
+      .toMatchObject({ cacheWriteTtl: "5m" });
+    // longest wins when a request writes both
+    expect(usageOf({ uncachedInputTokens: 10, cacheWriteInputTokens: 6, cacheDetails: [{ inputTokens: 2, ttl: "1h" }, { inputTokens: 4, ttl: "5m" }], outputTokens: 4, totalTokens: 19 }))
+      .toMatchObject({ cacheWriteTtl: "1h" });
+    // no write: absent and empty cacheDetails carry no lifetime
+    expect(usageOf({ uncachedInputTokens: 10, outputTokens: 4, totalTokens: 14 })).not.toHaveProperty("cacheWriteTtl");
+    expect(usageOf({ uncachedInputTokens: 10, cacheDetails: [], outputTokens: 4, totalTokens: 14 })).not.toHaveProperty("cacheWriteTtl");
+    // a TTL outside the schema is refused, not guessed
+    expect(() => usageOf({ uncachedInputTokens: 10, cacheDetails: [{ inputTokens: 2, ttl: "2h" }], outputTokens: 4, totalTokens: 14 })).toThrow(
+      "cacheDetails.ttl must be 5m or 1h",
+    );
+  });
+
+  test("a Bedrock-shaped tokenUsage without uncachedInputTokens parses instead of failing the request", () => {
+    const usage = (parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({
+      tokenUsage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+    }))) as { usage?: Record<string, unknown> | undefined }).usage;
+    expect(usage).toMatchObject({ inputTokens: 10, outputTokens: 4, totalTokens: 14 });
+  });
+
   test("Kiro event parser surfaces the native stop reason and rejects a non-string one", async () => {
     expect(parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({ stopReason: "END_TURN" })))).toEqual({
       type: "metadata",
@@ -1479,6 +1507,25 @@ describe("kiro adapter — parseStream", () => {
       outputTokens: 4,
       totalTokens: 19,
     });
+  });
+
+  test("a metadata cache write TTL reaches the terminal usage", async () => {
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "x".repeat(700) }]));
+    const done = await doneUsage(
+      adapter,
+      eventFrame({ content: "answer" }),
+      eventFrame({
+        tokenUsage: {
+          uncachedInputTokens: 10,
+          cacheWriteInputTokens: 4,
+          cacheDetails: [{ inputTokens: 4, ttl: "1h" }],
+          outputTokens: 4,
+          totalTokens: 18,
+        },
+      }, "metadataEvent"),
+    );
+    expect(done.cacheWriteTtl).toBe("1h");
   });
 
   test("authoritative turn usage floors a smaller payload context estimate", async () => {

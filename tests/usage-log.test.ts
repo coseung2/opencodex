@@ -641,6 +641,35 @@ describe("usage log", () => {
     });
   });
 
+  test("persists a provider-named cache-write TTL and drops an out-of-set one", () => {
+    appendUsageEntry({
+      requestId: "ocx-cache-ttl",
+      timestamp: 4,
+      provider: "kiro",
+      model: "claude-opus-5",
+      status: 200,
+      durationMs: 30,
+      usageStatus: "reported",
+      usage: { inputTokens: 12, outputTokens: 4, cacheCreationInputTokens: 2, cacheWriteTtl: "1h" },
+      totalTokens: 16,
+    });
+    expect(readUsageEntries()[0]?.usage).toMatchObject({ cacheWriteTtl: "1h" });
+
+    appendUsageEntry({
+      requestId: "ocx-cache-ttl-bad",
+      timestamp: 5,
+      provider: "kiro",
+      model: "claude-opus-5",
+      status: 200,
+      durationMs: 30,
+      usageStatus: "reported",
+      // a value outside the closed set never reaches the log, same discipline as the enum guards
+      usage: { inputTokens: 12, outputTokens: 4, cacheWriteTtl: "2h" as never },
+      totalTokens: 16,
+    });
+    expect("cacheWriteTtl" in (readUsageEntries()[1]?.usage ?? {})).toBe(false);
+  });
+
   test("persists and reads back effort / service-tier GUI metadata", () => {
     appendUsageEntry({
       requestId: "ocx-effort",

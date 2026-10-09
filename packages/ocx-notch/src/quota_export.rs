@@ -98,6 +98,40 @@ struct CachePolicyResponse {
     rows: Vec<CachePolicyRow>,
 }
 
+/// One provider+model's cache effectiveness over the recent window, as the proxy aggregated
+/// it. Projected like every other field: unknown keys are dropped, and a silent provider
+/// keeps `status: "unreported"` (with an optional labelled reuse estimate) rather than a
+/// fabricated hit ratio.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheEffectivenessRow {
+    provider: String,
+    model: String,
+    control: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_retention: Option<String>,
+    samples: u64,
+    reported_samples: u64,
+    read_tokens: u64,
+    write_tokens: u64,
+    input_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hit_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_reuse_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_ttl: Option<String>,
+    status: String,
+    last_observed_at: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheEffectivenessResponse {
+    #[serde(default)]
+    rows: Vec<CacheEffectivenessRow>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudePolicy {
@@ -116,6 +150,9 @@ struct Export {
     /// Confirmed per-provider prompt-cache policy. Additive under schemaVersion 1:
     /// a consumer that predates it ignores the key rather than failing.
     cache_policy: Vec<CachePolicyRow>,
+    /// Per provider+model cache effectiveness (a hit rate over the window). Additive under
+    /// schemaVersion 1; an older consumer ignores the key.
+    cache_effectiveness: Vec<CacheEffectivenessRow>,
     #[serde(flatten)]
     quotas: QuotaResponse,
 }
@@ -135,6 +172,10 @@ pub fn write(path: &Path) -> Result<(), &'static str> {
     // never "no caching", and the plugin shows the policy it can confirm.
     let cache_policy = crate::api::get_json::<CachePolicyResponse>("/api/cache-policy", 20_000)
         .map(|response| response.rows).unwrap_or_default();
+    // Optional on servers that predate the endpoint: an empty list is "not observed", never
+    // "no caching". A silent provider stays "unreported" in the rows themselves.
+    let cache_effectiveness = crate::api::get_json::<CacheEffectivenessResponse>("/api/cache-effectiveness", 20_000)
+        .map(|response| response.rows).unwrap_or_default();
     if origin != crate::api::connection_base_url()
         || crate::api::poll_generation() != crate::api::connection::generation()
     {
@@ -147,6 +188,7 @@ pub fn write(path: &Path) -> Result<(), &'static str> {
         model_routes,
         model_map,
         cache_policy,
+        cache_effectiveness,
         quotas,
     }).map_err(|_| "Could not encode provider quotas")?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)
@@ -213,6 +255,41 @@ mod tests {
                 "control": "anthropic-breakpoints", "lastObservedAt": 5}]
         })).unwrap();
         assert!(without_retention.rows[0].requested_retention.is_none());
+    }
+
+    #[test]
+    fn cache_effectiveness_projection_keeps_only_read_only_metadata() {
+        let input = serde_json::json!({
+            "generatedAt": 1000, "apiKey": "private",
+            "rows": [{"provider": "openai", "model": "gpt-5.6-sol", "control": "upstream-managed",
+                "requestedRetention": "short", "samples": 10, "reportedSamples": 9,
+                "readTokens": 100, "writeTokens": 0, "inputTokens": 120,
+                "hitRatio": 0.83, "estimatedReuseRatio": null, "observedTtl": "1h",
+                "status": "hit", "lastObservedAt": 1000, "accountId": "private"}]
+        });
+        let response: CacheEffectivenessResponse = serde_json::from_value(input).unwrap();
+        let out = serde_json::to_string(&response).unwrap();
+        assert!(out.contains("\"hitRatio\":0.83"));
+        assert!(out.contains("\"observedTtl\":\"1h\""));
+        assert!(!out.contains("private"));
+        assert!(!out.contains("accountId"));
+    }
+
+    #[test]
+    fn cache_effectiveness_silent_provider_keeps_estimate_and_drops_null_ratios() {
+        let response: CacheEffectivenessResponse =
+            serde_json::from_value(serde_json::json!({"generatedAt": 1})).unwrap();
+        assert!(response.rows.is_empty());
+        let silent: CacheEffectivenessResponse = serde_json::from_value(serde_json::json!({
+            "rows": [{"provider": "kiro", "model": "claude-opus-5", "control": "unknown",
+                "samples": 4, "reportedSamples": 0, "readTokens": 0, "writeTokens": 0,
+                "inputTokens": 0, "hitRatio": null, "estimatedReuseRatio": 0.99,
+                "status": "unreported", "lastObservedAt": 3}]
+        })).unwrap();
+        let out = serde_json::to_string(&silent.rows[0]).unwrap();
+        assert!(out.contains("\"estimatedReuseRatio\":0.99"));
+        assert!(!out.contains("hitRatio"));
+        assert!(!out.contains("observedTtl"));
     }
 
     #[test]
