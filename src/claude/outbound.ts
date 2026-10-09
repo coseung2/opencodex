@@ -4,12 +4,13 @@
  * Wire contract pinned in devlog/260711_claude_inbound/003_evidence.md (all Tier 2):
  *  - SSE order: message_start -> (content_block_start -> deltas -> content_block_stop)*
  *    -> message_delta -> message_stop; any number of `ping`.
- *  - thinking blocks get thinking_delta(s) then ONE synthetic signature_delta just
- *    before content_block_stop (CCR precedent: Claude Code does not verify signatures).
+ *  - thinking blocks keep the upstream signature when available; non-Anthropic
+ *    reasoning retains the legacy synthetic-signature fallback.
  *  - message_delta.usage is cumulative; message_start embeds a full message snapshot.
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
 import { isTransientUpstreamStatus } from "../lib/upstream-retry";
+import { decodeReasoningEnvelope } from "../responses/reasoning-envelope";
 import {
   isTranslatorBudgetExceededError,
   TRANSLATOR_MAX_TURN_BYTES,
@@ -187,6 +188,7 @@ interface OpenBlock {
   argsBufBytes?: number;
   webSearchArgsEmitted?: boolean;
   callId?: string;
+  signature?: string;
 }
 
 /** Streaming: Responses SSE bytes -> Anthropic Messages SSE bytes. */
@@ -270,10 +272,10 @@ export function responsesSseToAnthropicSse(
           open.webSearchArgsEmitted = true;
         }
         if (open.kind === "thinking") {
-          // Synthetic signature: Claude Code accepts it (003 E6); inbound drops replays anyway.
+          // Preserve native signatures; other providers retain a synthetic marker.
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
-            delta: { type: "signature_delta", signature: `ocx${Date.now()}` },
+            delta: { type: "signature_delta", signature: open.signature ?? `ocx${Date.now()}` },
           });
         }
         emit("content_block_stop", { type: "content_block_stop", index: open.index });
@@ -423,6 +425,34 @@ export function responsesSseToAnthropicSse(
           case "response.output_item.done": {
             const item = isRec(data.item) ? data.item : null;
             if (!item) break;
+            if (item.type === "reasoning" && typeof item.encrypted_content === "string") {
+              const envelope = decodeReasoningEnvelope(item.encrypted_content);
+              // The signature slot is the only field a Claude-wire client echoes back verbatim,
+              // so an envelope carrying hidden text (txt) or a Kiro blob (krc) must claim it too,
+              // not just one carrying an Anthropic signature. Without a carrier the replayed
+              // assistant turn loses its reasoning entirely and providers that require history
+              // reasoning (DeepSeek V4, GLM) reject the next turn with a 400.
+              if (envelope?.sig !== undefined || envelope?.txt !== undefined || envelope?.krc !== undefined) {
+                const hidden = !open || open.kind !== "thinking";
+                if (!open || open.kind !== "thinking") {
+                  ensureBlock("thinking");
+                }
+                // Hidden reasoning stays hidden: its visible text was suppressed, so the whole
+                // envelope travels in the signature slot and is restored only on replay.
+                const wholeEnvelope = envelope.sig === undefined || (hidden && envelope.txt !== undefined);
+                open!.signature = wholeEnvelope ? item.encrypted_content : envelope.sig!;
+              }
+              if (envelope?.red?.length) {
+                closeOpenBlock();
+                ensureStarted();
+                for (const data of envelope.red) {
+                  const index = blockIndex++;
+                  emit("content_block_start", { type: "content_block_start", index, content_block: { type: "redacted_thinking", data } });
+                  emit("content_block_stop", { type: "content_block_stop", index });
+                }
+              }
+            }
+            if (item.type === "reasoning" && open?.kind === "thinking") closeOpenBlock();
             // Server-side web search (native passthrough or sidecar bridge): translate the
             // finished call into the Anthropic pair Claude Code natively parses —
             // server_tool_use (query via input_json_delta) + web_search_tool_result.
@@ -691,8 +721,20 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
             if (isRec(s) && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
           }
         }
-        if (parts.length > 0) {
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: `ocx${Date.now()}` });
+        const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : undefined;
+        const envelope = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+        for (const data of envelope?.red ?? []) content.push({ type: "redacted_thinking", data });
+        // Same carrier rule as the streaming path: a Claude-wire client only replays the
+        // signature slot, so a txt/krc-only envelope has to claim it or the reasoning is lost.
+        const carriesReasoning = envelope?.sig !== undefined || envelope?.txt !== undefined || envelope?.krc !== undefined;
+        if (parts.length > 0 || carriesReasoning) {
+          const hidden = parts.length === 0;
+          const wholeEnvelope = carriesReasoning && (envelope!.sig === undefined || (hidden && envelope!.txt !== undefined));
+          content.push({
+            type: "thinking",
+            thinking: parts.length > 0 ? (envelope?.txt ?? parts.join("\n\n")) : "",
+            signature: wholeEnvelope ? encrypted! : (envelope?.sig ?? `ocx${Date.now()}`),
+          });
         }
         break;
       }

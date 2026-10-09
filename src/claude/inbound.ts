@@ -4,8 +4,8 @@
  * Design (devlog/260711_claude_inbound/010, 003_evidence.md):
  *  - translate-and-replay: the produced body MUST pass the real responsesRequestSchema
  *    parse so routing/OAuth/pool/failover are inherited unchanged.
- *  - thinking/redacted_thinking blocks on replay are DROPPED (v1 policy) — routed
- *    providers carry reasoning in Responses items/ocxr1 envelopes instead.
+ *  - thinking/redacted_thinking replay travels in Responses reasoning items and
+ *    ocxr1 envelopes so Anthropic signatures survive the return trip.
  *  - thinking.budget_tokens is NEVER forwarded raw; it maps to an effort tier.
  *  - top_k is accepted and silently dropped (no Responses equivalent, CCR parity).
  */
@@ -15,6 +15,7 @@ import { stripOneMillionMarker } from "./context-windows";
 import { resolveDesktop3pAlias } from "./desktop-3p";
 import { desktopBaseModelId, desktopRouteSpeed } from "./desktop-speed";
 import { createHash } from "node:crypto";
+import { encodeReasoningEnvelope, decodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 
 export class AnthropicRequestError extends Error {}
 
@@ -333,9 +334,25 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
       }
-      case "thinking":
+      case "thinking": {
+        flush();
+        const signature = typeof raw.signature === "string" ? raw.signature : "";
+        // Old OCX synthetic signatures are not Anthropic signatures. Preserve text,
+        // but never send a made-up signature to the upstream verifier.
+        const owned = signature.startsWith(OCX_REASONING_PREFIX) ? decodeReasoningEnvelope(signature) : null;
+        if (signature.startsWith(OCX_REASONING_PREFIX) && !owned) throw new AnthropicRequestError("malformed reasoning envelope");
+        const realSignature = signature && !signature.startsWith("ocx") ? signature : undefined;
+        const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
+        if (thinking || owned || realSignature) input.push({
+          type: "reasoning", summary: thinking ? [{ type: "summary_text", text: thinking }] : [],
+          ...(owned || realSignature ? { encrypted_content: owned ? signature : encodeReasoningEnvelope({ sig: realSignature }) } : {}),
+        });
+        break;
+      }
       case "redacted_thinking":
-        break; // v1 policy: dropped on replay (003 evidence — safe for routed providers)
+        flush();
+        if (typeof raw.data === "string" && raw.data) input.push({ type: "reasoning", summary: [], encrypted_content: encodeReasoningEnvelope({ red: [raw.data] }) });
+        break;
       default:
         break;
     }
@@ -451,7 +468,6 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
     store: false,
     stream: raw.stream === true,
   };
-
   const desktopRoute = resolveDesktop3pAlias(stripOneMillionMarker(raw.model));
   const speed = desktopRoute ? desktopRouteSpeed(desktopRoute) : undefined;
   if (speed) body.service_tier = speed;

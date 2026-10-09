@@ -25,6 +25,46 @@ let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
 const originalFetch = globalThis.fetch;
 
+test("Claude gateway preserves cached prefix, one-hour markers and native signatures over two HTTP turns", async () => {
+  const captures: Array<{ body: any; beta: string | null }> = [];
+  const signature = "c2lnbmVkX2VuZHBvaW50X2ZpeHR1cmU=";
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    captures.push({ body: await req.json(), beta: req.headers.get("anthropic-beta") });
+    const frames: Array<[string, unknown]> = [
+      ["message_start", { message: { id: "msg_cache", type: "message", role: "assistant", content: [], model: "claude-opus-5-5", usage: { input_tokens: 2, cache_read_input_tokens: 5000, cache_creation_input_tokens: 10, output_tokens: 0 } } }],
+      ["content_block_start", { index: 0, content_block: { type: "thinking", thinking: "", signature: "" } }],
+      ["content_block_delta", { index: 0, delta: { type: "thinking_delta", thinking: "exact thought" } }],
+      ["content_block_delta", { index: 0, delta: { type: "signature_delta", signature } }],
+      ["content_block_stop", { index: 0 }],
+      ["content_block_start", { index: 1, content_block: { type: "text", text: "" } }],
+      ["content_block_delta", { index: 1, delta: { type: "text_delta", text: "OK" } }],
+      ["content_block_stop", { index: 1 }],
+      ["message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 4 } }],
+      ["message_stop", {}],
+    ];
+    return new Response(frames.map(([type, data]) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  } });
+  saveConfig({ port: 0, defaultProvider: "fixture", providers: { fixture: { adapter: "anthropic", baseUrl: upstream.url.toString(), apiKey: "fixture", allowPrivateNetwork: true, liveModels: false } } } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const messages: any[] = [{ role: "user", content: "hello" }, { role: "system", content: "tokens remaining: 100" }];
+    for (let turn = 0; turn < 2; turn++) {
+      const response = await fetch(new URL("/v1/messages", server.url), { method: "POST", headers: { "content-type": "application/json", "anthropic-beta": "extended-cache-ttl-2025-04-11" }, body: JSON.stringify({ model: "fixture/claude-opus-5-5", system: [{ type: "text", text: "stable", cache_control: { type: "ephemeral", ttl: "1h" } }], messages, max_tokens: 64 }) });
+      expect(response.status).toBe(200);
+      const result = await response.json() as any;
+      const returnedSignature = result.content.find((x: any) => x.type === "thinking").signature;
+      const { decodeReasoningEnvelope } = await import("../src/responses/reasoning-envelope");
+      expect(decodeReasoningEnvelope(returnedSignature)?.sig ?? returnedSignature).toBe(signature);
+      expect(result.usage.cache_read_input_tokens).toBe(5000);
+      messages.push({ role: "assistant", content: result.content }, { role: "user", content: "continue" }, { role: "system", content: "tokens remaining: 99" });
+    }
+    expect(captures[1]!.body.system).toEqual(captures[0]!.body.system);
+    expect(captures[1]!.beta).toContain("extended-cache-ttl-2025-04-11");
+    expect(JSON.stringify(captures[1]!.body)).toContain('"ttl":"1h"');
+    expect(captures[1]!.body.messages.flatMap((m: any) => Array.isArray(m.content) ? m.content : []).some((b: any) => b.signature === signature)).toBe(true);
+  } finally { server.stop(true); upstream.stop(true); }
+}, 30_000);
+
 test("Desktop speed selection reaches OpenAI per request, overriding global Fast without affecting other sessions", async () => {
   const captured: Array<Record<string, any>> = [];
   const upstream = Bun.serve({ port: 0, async fetch(req) {

@@ -439,7 +439,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
 
         // Native/non-ocxr1 encrypted-only reasoning is opaque here. Do not create a detached
         // assistant turn or invent replayable plaintext/signatures from the encrypted payload.
-        if (thinkingText.length > 0) {
+        if (thinkingText.length > 0 || envelope?.sig || envelope?.red?.length) {
           const part: OcxThinkingContent = {
             type: "thinking",
             thinking: thinkingText,
@@ -447,7 +447,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
             ...(envelope?.red ? { redacted: envelope.red } : {}),
             ...(reasoning.id ? { itemId: reasoning.id } : {}),
           };
-          const envelopeSigned = typeof envelope?.sig === "string";
+          const envelopeSigned = typeof envelope?.sig === "string" || !!envelope?.red?.length;
           const previous = pendingReasoning[pendingReasoning.length - 1];
 
           if (!envelopeSigned && previous && !previous.envelopeSigned) {

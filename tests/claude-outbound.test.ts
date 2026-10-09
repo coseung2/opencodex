@@ -13,6 +13,10 @@ import {
   TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
   type TranslatorBudget,
 } from "../src/lib/translator-budget";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../src/responses/reasoning-envelope";
+import { anthropicToResponsesTranslation } from "../src/claude/inbound";
+import { parseRequest } from "../src/responses/parser";
+import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
 
 const streamBudgets = new WeakMap<ReadableStream<Uint8Array>, TranslatorBudget>();
 
@@ -793,4 +797,67 @@ describe("sanitizeWebSearchInput (#381)", () => {
       data: { error: { type: "request_too_large", code: "translation_buffer_limit" } },
     });
   }, 60_000);
+});
+
+describe("hidden raw reasoning keeps a Claude-wire carrier", () => {
+  // The thinking signature is the only field a Claude-wire client echoes back verbatim, so an
+  // envelope that carries hidden text (or a Kiro blob) has to ride it — not just one carrying an
+  // Anthropic signature. Without a carrier the replayed assistant turn loses its reasoning and a
+  // provider that requires history reasoning (DeepSeek V4, GLM) rejects the next turn with
+  // "the `reasoning_content` in the thinking mode must be passed back to the API".
+  const hiddenReasoningItem = (txt: string) => ({
+    type: "reasoning",
+    id: "rs_1",
+    summary: [],
+    encrypted_content: encodeReasoningEnvelope({ txt }),
+  });
+
+  test("streaming: a txt-only envelope becomes a thinking signature_delta and leaks no text", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      sse("response.output_item.added", { output_index: 0, item: { type: "reasoning", id: "rs_1" } }),
+      sse("response.output_item.done", { output_index: 0, item: hiddenReasoningItem("hidden chain") }),
+      sse("response.completed", { response: { id: "resp_1", status: "completed", output: [] } }),
+    ].join("")), "deepseek-v4.1-flash"));
+
+    expect(events.some(e => e.name === "content_block_start" && e.data.content_block?.type === "thinking")).toBe(true);
+    const signature = events.find(e => e.data?.delta?.type === "signature_delta")?.data.delta.signature;
+    expect(decodeReasoningEnvelope(signature)?.txt).toBe("hidden chain");
+    // The raw reasoning stays hidden on the wire.
+    expect(events.some(e => e.data?.delta?.type === "thinking_delta")).toBe(false);
+  });
+
+  test("non-streaming: the carrier survives the Claude round trip into reasoning_content", () => {
+    const message = responsesJsonToAnthropicMessage({
+      id: "resp_1",
+      status: "completed",
+      output: [
+        hiddenReasoningItem("hidden chain"),
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_file", arguments: "{}", status: "completed" },
+      ],
+    }, "deepseek-v4.1-flash") as { content: Record<string, unknown>[] };
+
+    const thinking = message.content.find(c => c.type === "thinking") as Record<string, unknown> | undefined;
+    expect(thinking).toBeDefined();
+    expect(thinking!.thinking).toBe("");
+    expect(decodeReasoningEnvelope(thinking!.signature as string)?.txt).toBe("hidden chain");
+
+    // Claude Code echoes the assistant turn back on the next request.
+    const translated = anthropicToResponsesTranslation({
+      model: "deepseek-v4.1-flash",
+      max_tokens: 16,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "inspect" }] },
+        { role: "assistant", content: message.content },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "file contents" }] },
+      ],
+    });
+    const body = JSON.parse(createOpenAIChatAdapter({
+      adapter: "openai-chat",
+      baseUrl: "https://example.invalid/v1",
+      preserveReasoningContentModels: ["deepseek-v4.1-flash"],
+    }).buildRequest(parseRequest(translated.body)).body) as { messages: Record<string, unknown>[] };
+
+    expect(body.messages.find(m => m.tool_calls)?.reasoning_content).toBe("hidden chain");
+  });
 });

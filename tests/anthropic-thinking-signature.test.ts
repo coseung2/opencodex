@@ -127,11 +127,10 @@ describe("bridge ocxr1 envelope emission", () => {
       ...baseEvents,
     ], "claude-x");
     const output = response.output as Record<string, unknown>[];
-    const reasoning = output.find(i => i.type === "reasoning");
-    expect(reasoning).toBeDefined();
-    const env = decodeReasoningEnvelope(reasoning!.encrypted_content as string);
-    expect(env?.sig).toBe("RealSig1234567890==");
-    expect(env?.red).toEqual(["RED1"]);
+    const reasoning = output.filter(i => i.type === "reasoning");
+    expect(reasoning).toHaveLength(2);
+    expect(decodeReasoningEnvelope(reasoning[0]!.encrypted_content as string)).toEqual({ red: ["RED1"] });
+    expect(decodeReasoningEnvelope(reasoning[1]!.encrypted_content as string)?.sig).toBe("RealSig1234567890==");
   });
 
   test("redacted-only turn still emits an envelope reasoning item (SSE)", async () => {

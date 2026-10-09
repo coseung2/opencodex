@@ -846,12 +846,18 @@ export function bridgeToResponsesSSE(
               // Signature arrives at the end of the thinking block. With a visible reasoning item
               // open, closeCurrentReasoning attaches the envelope; hidden/suppressed blocks flush
               // an envelope-only reasoning item now.
-              if (!currentReasoning) flushHiddenReasoningEnvelope();
+              if (currentReasoning) closeCurrentReasoning();
+              else flushHiddenReasoningEnvelope();
               break;
             }
             case "redacted_thinking": {
+              closeCurrentMessage("commentary");
+              closeCurrentReasoning();
+              closeCurrentRawReasoning();
+              if (currentToolCall) closeCurrentToolCall();
               budget?.chargeRetained(bytesOf(event.data), { kind: "reasoning" });
               pendingRedacted.push(event.data);
+              flushHiddenReasoningEnvelope();
               break;
             }
             case "kiro_redacted_reasoning": {
@@ -1518,12 +1524,17 @@ export function buildResponseJSON(
         flushSummaryReasoning();
         break;
       case "redacted_thinking":
+        flushText("commentary");
+        flushSummaryReasoning();
+        flushRawReasoning();
+        flushToolCall();
         {
           const dataBytes = bytesOf(e.data);
           budget?.chargeRetained(dataBytes, { kind: "reasoning" });
           batchRedactedBytes += dataBytes;
         }
         batchRedacted.push(e.data);
+        flushSummaryReasoning();
         break;
       case "kiro_redacted_reasoning":
         // Stash only — pushed after the trailing flushes. One blob per turn, so last wins.
