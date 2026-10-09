@@ -66,7 +66,10 @@ export function sessionLaneIdFromRequest(headers: Headers): string | undefined {
   const thread = headers.get("thread-id")?.trim();
   const session = sessionIdHeaderFromRequest(headers)?.trim();
   const openCodeSession = headers.get("x-opencode-session")?.trim();
-  const lane = [parent, thread, session, openCodeSession].filter(Boolean);
+  // Routed Claude requests have an admission-bound internal scope, but no native
+  // session_id header. Preserve that stable lane instead of randomizing Go affinity.
+  const claudeScope = headers.get("x-ocx-claude-session-scope")?.trim();
+  const lane = [parent, thread, session, openCodeSession, claudeScope].filter(Boolean);
   return lane.length > 0 ? lane.join("\0") : undefined;
 }
 

@@ -7,6 +7,7 @@
  * unchanged. The Responses output (SSE or JSON) is converted back to Anthropic shape.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
+import { claudeSessionScope, CLAUDE_SESSION_SCOPE_HEADER } from "../claude/session-scope";
 import { claudeCacheRetention } from "../claude/cache-retention";
 import { bindCodexRoutingConfig } from "../codex/routing-config";
 import { enforceAnthropicImageLimits } from "../adapters/anthropic-image-guard";
@@ -675,6 +676,8 @@ async function handleClaudeMessagesWithBudget(
   } catch { /* unknown model: let handleResponses shape the 404 */ }
 
   const headers = new Headers({ "content-type": "application/json" });
+  const sessionScope = claudeSessionScope(req.headers, anthropicBody);
+  if (sessionScope) headers.set(CLAUDE_SESSION_SCOPE_HEADER, sessionScope);
   const anthropicBeta = req.headers.get("anthropic-beta");
   if (anthropicBeta) headers.set("anthropic-beta", anthropicBeta);
   for (const name of FORWARD_HEADERS) {

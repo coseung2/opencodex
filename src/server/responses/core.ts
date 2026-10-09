@@ -1537,6 +1537,17 @@ async function handleResponsesInner(
   }
 
   route.provider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
+  if (selectedForwardHeaders.has("x-ocx-claude-session-scope")) {
+    selectedForwardHeaders = new Headers(selectedForwardHeaders);
+    selectedForwardHeaders.delete("x-ocx-claude-session-scope");
+  }
+  if (inboundWire === "anthropic" && route.provider.adapter === "kiro") {
+    const scope = req.headers.get("x-ocx-claude-session-scope");
+    if (scope && /^[a-f0-9]{64}$/.test(scope)) {
+      selectedForwardHeaders = new Headers(selectedForwardHeaders);
+      selectedForwardHeaders.set("x-ocx-claude-session-scope", scope);
+    }
+  }
   logCtx.provider = formatCodexProviderForLog(route.providerName, codexLogAccountId(authCtx), config);
   const accountLogLabel = codexAuthContextLogLabel(authCtx, config);
   if (accountLogLabel) logCtx.accountLogLabel = accountLogLabel;

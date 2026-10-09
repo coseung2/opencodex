@@ -18,6 +18,8 @@ import {
 } from "./kiro-codec";
 import type { KiroCompletionMode } from "./kiro-constants";
 import { safeKiroHttpErrorMessage } from "./kiro-errors";
+import { kiroClaudeSessions, type KiroSessionLease } from "./kiro-session";
+import { CLAUDE_SESSION_SCOPE_HEADER } from "../claude/session-scope";
 import {
   buildKiroNativeRequest,
   fetchKiroNativeResponse,
@@ -53,6 +55,14 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
   let requestSnapshot: OcxParsedRequest | undefined;
   let firstRequestBodyBytes = 0;
   let requestAbortSignal: AbortSignal | undefined;
+  let sessionLease: KiroSessionLease | undefined;
+  let leaseParsed: OcxParsedRequest | undefined;
+  let removeAbortListener: (() => void) | undefined;
+  const finishSession = (success: boolean, returnedId?: string) => {
+    sessionLease?.finish(success, returnedId);
+    sessionLease = undefined;
+    removeAbortListener?.(); removeAbortListener = undefined;
+  };
 
   const build = (parsed: OcxParsedRequest, forcedCompletionMode?: KiroCompletionMode) =>
     buildKiroNativeRequest(provider, parsed, forcedCompletionMode);
@@ -123,7 +133,26 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     },
 
     async buildRequest(parsed: OcxParsedRequest, incoming) {
-      const built = await build(parsed);
+      if (leaseParsed !== parsed) {
+        finishSession(false);
+        leaseParsed = parsed;
+        if (!parsed._providerContinuation?.kiro?.conversationId) {
+          sessionLease = kiroClaudeSessions.acquire(incoming?.headers.get(CLAUDE_SESSION_SCOPE_HEADER), provider, parsed.modelId);
+        }
+      }
+      const signal = incoming?.abortSignal;
+      if (signal && sessionLease && !removeAbortListener) {
+        const abort = () => finishSession(false);
+        signal.addEventListener("abort", abort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", abort);
+        if (signal.aborted) { finishSession(false); throw signal.reason ?? new DOMException("Aborted", "AbortError"); }
+      }
+      // Do not attach session state to the shared parsed request: account failover
+      // may rebuild it with a different adapter/credential later in this turn.
+      const forBuild = sessionLease ? { ...parsed, _providerContinuation: { ...parsed._providerContinuation, kiro: { conversationId: sessionLease.conversationId } } } : parsed;
+      let built;
+      try { built = await build(forBuild); }
+      catch (error) { finishSession(false); throw error; }
       modelId = parsed.modelId;
       contextWindow = kiroUpstreamContextWindow(parsed.modelId);
       inputTokens = built.inputTokens;
@@ -131,14 +160,16 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       toolNameMap = built.nameMap;
       conversationId = built.conversationId;
       completionMode = built.completionMode;
-      requestSnapshot = structuredClone(parsed);
+      requestSnapshot = structuredClone(forBuild);
       firstRequestBodyBytes = Buffer.byteLength(built.request.body);
       requestAbortSignal = incoming?.abortSignal;
       return built.request;
     },
 
-    parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
-      return parseKiroStream(
+    async *parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
+      let success = false;
+      let returnedId: string | undefined;
+      try { for await (const event of parseKiroStream(
         response,
         budget,
         modelId,
@@ -150,12 +181,31 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
         completionMode === "required" ? fallbackFactory : undefined,
         contextInputEstimate,
         noteKiroNativeTransientThrottle,
-      );
+      )) {
+        if (event.type === "done") {
+          success = true; returnedId = event.providerState?.kiro?.conversationId;
+          // Publish before yielding the terminal: eager relay can start the next
+          // client turn before this generator is resumed for cleanup.
+          finishSession(true, returnedId);
+        }
+        yield event;
+      } } finally { finishSession(success, returnedId); }
     },
 
-    fetchResponse(request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> {
+    async fetchResponse(request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> {
       if (ctx?.abortSignal) requestAbortSignal = ctx.abortSignal;
-      return fetchKiroNativeResponse(request, ctx);
+      if (ctx?.abortSignal && sessionLease && !removeAbortListener) {
+        const signal = ctx.abortSignal;
+        const abort = () => finishSession(false);
+        signal.addEventListener("abort", abort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", abort);
+        if (signal.aborted) finishSession(false);
+      }
+      try {
+        const response = await fetchKiroNativeResponse(request, ctx);
+        if (!response.ok) finishSession(false);
+        return response;
+      } catch (error) { finishSession(false); throw error; }
     },
 
     formatErrorBody(status: number, headers: Headers, payloadText: string): string {
@@ -164,6 +214,8 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
 
     async parseResponse(response: Response, budget: TranslatorBudget): Promise<AdapterEvent[]> {
       const events: AdapterEvent[] = [];
+      let success = false;
+      let returnedId: string | undefined;
       try {
         for await (const event of parseKiroStream(
           response,
@@ -178,6 +230,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
           contextInputEstimate,
           noteKiroNativeTransientThrottle,
         )) {
+          if (event.type === "done") { success = true; returnedId = event.providerState?.kiro?.conversationId; }
           retainTranslatedEvent(event, budget, events.at(-1));
           events.push(event);
         }
@@ -185,7 +238,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       } catch (error) {
         for (const event of events) releaseTranslatedEvent(event, budget);
         throw error;
-      }
+      } finally { finishSession(success, returnedId); }
     },
   };
 }
