@@ -10,7 +10,7 @@
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
 import { isTransientUpstreamStatus } from "../lib/upstream-retry";
-import { decodeReasoningEnvelope } from "../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX, type NativeReasoning } from "../responses/reasoning-envelope";
 import {
   isTranslatorBudgetExceededError,
   TRANSLATOR_MAX_TURN_BYTES,
@@ -195,7 +195,7 @@ interface OpenBlock {
 export function responsesSseToAnthropicSse(
   upstream: ReadableStream<Uint8Array>,
   model: string,
-  opts: { pingIntervalMs?: number; translatorBudget: TranslatorBudget },
+  opts: { pingIntervalMs?: number; translatorBudget: TranslatorBudget; nativeReasoningFor?: (enc: string, id?: string) => NativeReasoning | undefined },
 ): ReadableStream<Uint8Array> {
   const translatorBudget = opts.translatorBudget;
   const pingIntervalMs = opts?.pingIntervalMs ?? 20_000;
@@ -427,6 +427,12 @@ export function responsesSseToAnthropicSse(
             if (!item) break;
             if (item.type === "reasoning" && typeof item.encrypted_content === "string") {
               const envelope = decodeReasoningEnvelope(item.encrypted_content);
+              const native = !item.encrypted_content.startsWith(OCX_REASONING_PREFIX)
+                ? opts.nativeReasoningFor?.(item.encrypted_content, typeof item.id === "string" ? item.id : undefined) : undefined;
+              if (native) {
+                ensureBlock("thinking");
+                open!.signature = encodeReasoningEnvelope({ nat: native });
+              }
               // The signature slot is the only field a Claude-wire client echoes back verbatim,
               // so an envelope carrying hidden text (txt) or a Kiro blob (krc) must claim it too,
               // not just one carrying an Anthropic signature. Without a carrier the replayed
@@ -690,7 +696,7 @@ export function responsesSseToAnthropicSse(
 }
 
 /** Non-streaming: /v1/responses JSON -> Anthropic message JSON. */
-export function responsesJsonToAnthropicMessage(json: unknown, model: string): Rec {
+export function responsesJsonToAnthropicMessage(json: unknown, model: string, nativeReasoningFor?: (enc: string, id?: string) => NativeReasoning | undefined): Rec {
   const body = isRec(json) ? json : {};
   const output = Array.isArray(body.output) ? body.output : [];
   const content: Rec[] = [];
@@ -723,17 +729,19 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
         }
         const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : undefined;
         const envelope = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+        const native = encrypted && !encrypted.startsWith(OCX_REASONING_PREFIX)
+          ? nativeReasoningFor?.(encrypted, typeof raw.id === "string" ? raw.id : undefined) : undefined;
         for (const data of envelope?.red ?? []) content.push({ type: "redacted_thinking", data });
         // Same carrier rule as the streaming path: a Claude-wire client only replays the
         // signature slot, so a txt/krc-only envelope has to claim it or the reasoning is lost.
         const carriesReasoning = envelope?.sig !== undefined || envelope?.txt !== undefined || envelope?.krc !== undefined;
-        if (parts.length > 0 || carriesReasoning) {
+        if (parts.length > 0 || carriesReasoning || native) {
           const hidden = parts.length === 0;
           const wholeEnvelope = carriesReasoning && (envelope!.sig === undefined || (hidden && envelope!.txt !== undefined));
           content.push({
             type: "thinking",
             thinking: parts.length > 0 ? (envelope?.txt ?? parts.join("\n\n")) : "",
-            signature: wholeEnvelope ? encrypted! : (envelope?.sig ?? `ocx${Date.now()}`),
+            signature: native ? encodeReasoningEnvelope({ nat: native }) : wholeEnvelope ? encrypted! : (envelope?.sig ?? `ocx${Date.now()}`),
           });
         }
         break;

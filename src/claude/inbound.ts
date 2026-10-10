@@ -15,9 +15,23 @@ import { stripOneMillionMarker } from "./context-windows";
 import { resolveDesktop3pAlias } from "./desktop-3p";
 import { desktopBaseModelId, desktopRouteSpeed } from "./desktop-speed";
 import { createHash } from "node:crypto";
-import { encodeReasoningEnvelope, decodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
+import { encodeReasoningEnvelope, decodeReasoningEnvelope, OCX_REASONING_PREFIX, type NativeReasoning } from "../responses/reasoning-envelope";
 
 export class AnthropicRequestError extends Error {}
+
+/** Provider-private Responses ciphertext must never ride a native Anthropic request. */
+export function nativeAnthropicReasoningProjection(body: Rec): Rec {
+  if (!Array.isArray(body.messages)) return body;
+  return { ...body, messages: body.messages.map(message => {
+    if (!isRec(message) || !Array.isArray(message.content)) return message;
+    return { ...message, content: message.content.flatMap(block => {
+      if (!isRec(block) || block.type !== "thinking" || typeof block.signature !== "string"
+        || !decodeReasoningEnvelope(block.signature)?.nat) return [block];
+      return typeof block.thinking === "string" && block.thinking.length > 0
+        ? [{ type: "text", text: block.thinking }] : [];
+    }) };
+  }) };
+}
 
 type Rec = Record<string, unknown>;
 
@@ -107,6 +121,9 @@ function toolResultOutput(block: Rec): string | Rec[] {
       if (!isRec(item)) continue;
       if (item.type === "text" && typeof item.text === "string") {
         out.push({ type: "input_text", text: item.text });
+      } else if (item.type === "tool_reference" && typeof item.tool_name === "string" && item.tool_name.length > 0) {
+        // Discovery evidence is output, not authorization to create another tool.
+        out.push({ type: "input_text", text: `\n[ToolSearch loaded tool: ${JSON.stringify(item.tool_name)}]\n` });
       } else if (item.type === "image") {
         const img = imageBlockToInputImage(item);
         if (img) out.push(img);
@@ -215,13 +232,15 @@ function maybeElideSkillText(text: string, names: readonly string[]): string {
   const base = dir.replace(/\\/g, "/").split("/").filter(Boolean).pop()?.toLowerCase() ?? "";
   if (!names.includes(base)) return text;
   return `[opencodex] '${base}' skill document bundle (${text.length} chars) elided for routed models `
-    + "(claudeCode.blockedSkills). The skill is loaded; answer from general knowledge instead of citing the bundle.";
+    + "(claudeCode.blockedSkills). Continue the existing user task using the available tools and conversation history. "
+    + "Do not restart with a skill greeting or ask the user to repeat the task. Do not cite the omitted bundle.";
 }
 
 function skillElisionStub(callId: string): string {
   return "[opencodex] Skill document bundle elided for routed models (claudeCode.blockedSkills). "
     + `The skill loaded, but its reference documents were removed to save context (call ${callId}). `
-    + "Answer from general knowledge instead of citing the bundle.";
+    + "Continue the existing user task using the available tools and conversation history. "
+    + "Do not restart with a skill greeting or ask the user to repeat the task. Do not cite the omitted bundle.";
 }
 
 /** Collect Skill-tool call ids whose input names a blocked skill. */
@@ -309,7 +328,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(content: unknown, input: Rec[]): void {
+function assistantMessageToItems(content: unknown, input: Rec[], nativeReplay: Map<string, NativeReasoning>): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -343,6 +362,14 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
         if (signature.startsWith(OCX_REASONING_PREFIX) && !owned) throw new AnthropicRequestError("malformed reasoning envelope");
         const realSignature = signature && !signature.startsWith("ocx") ? signature : undefined;
         const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
+        if (owned?.nat) {
+          const id = `rs_${crypto.randomUUID().replace(/-/g, "")}`;
+          nativeReplay.set(id, owned.nat);
+          // Ciphertext stays out of the ordinary translated body until its destination
+          // verifies provenance. Switching to a different adapter cannot leak it.
+          input.push({ type: "reasoning", id, summary: thinking ? [{ type: "summary_text", text: thinking }] : [] });
+          break;
+        }
         if (thinking || owned || realSignature) input.push({
           type: "reasoning", summary: thinking ? [{ type: "summary_text", text: thinking }] : [],
           ...(owned || realSignature ? { encrypted_content: owned ? signature : encodeReasoningEnvelope({ sig: realSignature }) } : {}),
@@ -360,7 +387,7 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
   flush();
 }
 
-function toolsToResponses(tools: unknown): Rec[] | undefined {
+function toolsToResponses(tools: unknown, blockedSkills: readonly string[] = []): Rec[] | undefined {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   const out: Rec[] = [];
   for (const raw of tools) {
@@ -376,6 +403,12 @@ function toolsToResponses(tools: unknown): Rec[] | undefined {
         name: raw.name,
         ...(typeof raw.description === "string" ? { description: raw.description } : {}),
         parameters: raw.input_schema as Record<string, unknown>,
+        strict: typeof raw.strict === "boolean" ? raw.strict : false,
+        ...(raw.name === "Skill" && blockedSkills.length > 0 ? {
+          description: `${typeof raw.description === "string" ? raw.description : "Load a skill."}\n`
+            + `Do not invoke these skills on this routed session: ${blockedSkills.map(name => JSON.stringify(name)).join(", ")}. `
+            + "Their reference bundles are omitted. Continue the user's current task directly with the other available tools.",
+        } : {}),
       });
       continue;
     }
@@ -417,6 +450,7 @@ export type ClaudeCacheKeySource = "metadata" | "system" | null;
 export interface ClaudeInboundTranslation {
   body: Rec;
   cacheKeySource: ClaudeCacheKeySource;
+  nativeReasoningReplay: ReadonlyMap<string, NativeReasoning>;
 }
 
 /**
@@ -442,6 +476,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   }
 
   const input: Rec[] = [];
+  const nativeReasoningReplay = new Map<string, NativeReasoning>();
   const systemParts: string[] = [];
   const topLevelSystem = systemToInstructions(raw.system);
   if (topLevelSystem !== undefined) systemParts.push(topLevelSystem);
@@ -453,7 +488,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw new AnthropicRequestError("each message must be an object");
     if (msg.role === "user") userMessageToItems(msg.content, input, elide);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, nativeReasoningReplay);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       // Upstream #4161: chronological notices must not rewrite the prompt head.
@@ -474,7 +509,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
 
   if (systemParts.length > 0) body.instructions = systemParts.join("\n\n");
 
-  const tools = toolsToResponses(raw.tools);
+  const tools = toolsToResponses(raw.tools, blockedNames);
   if (tools) body.tools = tools;
   toolChoiceToResponses(raw.tool_choice, body);
 
@@ -531,7 +566,8 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
       reasoning.effort = effortForThinkingBudget(thinking.budget_tokens);
     }
     body.reasoning = reasoning;
+    body.include = ["reasoning.encrypted_content"];
   }
 
-  return { body, cacheKeySource };
+  return { body, cacheKeySource, nativeReasoningReplay };
 }

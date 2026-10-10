@@ -130,6 +130,35 @@ function mockChatUpstream() {
   return mockChatUpstreamCapturing().server;
 }
 
+test("Claude HTTP turns replay native Responses reasoning to the same authenticated destination", async () => {
+  const captures: Array<Record<string, any>> = [];
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    captures.push(await req.json() as Record<string, any>);
+    const events = [
+      { type: "response.output_item.done", item: { type: "reasoning", id: "rs_http_fixture", encrypted_content: "opaque-http-fixture" } },
+      { type: "response.output_text.delta", delta: "Continue the repository task." },
+      { type: "response.completed", response: { status: "completed", usage: { input_tokens: 12, output_tokens: 4 } } },
+    ];
+    return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  } });
+  saveConfig({ port: 0, defaultProvider: "fixture", providers: {
+    fixture: { adapter: "openai-responses", baseUrl: upstream.url.toString().replace(/\/$/, ""), apiKey: "fixture-key", allowPrivateNetwork: true },
+  } } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const messages: Record<string, unknown>[] = [{ role: "user", content: "Investigate the repository." }];
+    const post = () => fetch(new URL("/v1/messages", server.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "fixture/model", max_tokens: 128, thinking: { type: "adaptive" }, messages }) });
+    const first = await post(); expect(first.status).toBe(200);
+    const message = await first.json() as Record<string, any>;
+    expect(message.content.some((block: Record<string, unknown>) => block.type === "thinking" && block.thinking === "")).toBe(true);
+    messages.push({ role: "assistant", content: message.content }, { role: "user", content: "Continue." });
+    const second = await post(); expect(second.status).toBe(200); await second.text();
+    expect(captures[1]!.input.some((item: Record<string, unknown>) => item.type === "reasoning" && item.encrypted_content === "opaque-http-fixture")).toBe(true);
+    expect(JSON.stringify(captures[1])).not.toContain("ocxr1:");
+    expect(captures[0]!.include).toContain("reasoning.encrypted_content");
+  } finally { server.stop(true); upstream.stop(true); }
+}, SERVER_BUDGET_MS);
+
 function mockChatUpstreamCapturing() {
   const captured: Array<Record<string, unknown>> = [];
   const server = Bun.serve({

@@ -7,6 +7,7 @@ import {
   resolveEnvValue,
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
+import { attachNativeReasoningState, type NativeReasoningState } from "../../claude/native-reasoning";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { XaiToolSchemaCompatibilityError } from "../../adapters/xai-tool-schema";
@@ -681,6 +682,7 @@ export interface HandleResponsesOptions {
    */
   inboundWire?: InboundWire;
   /** Internal recursion guard; callers outside this module must not set it. */
+  nativeReasoningState?: NativeReasoningState;
   comboAttempt?: boolean;
   /** Internal combo handoff: allow a later same-provider model after a reset-derived 429/402. */
   deferCodexResetDerivedCooldown?: boolean;
@@ -1409,6 +1411,7 @@ async function handleResponsesInner(
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
   try {
     parsed = parseRequest(body);
+    if (options.nativeReasoningState) attachNativeReasoningState(parsed, options.nativeReasoningState);
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
     parsed._providerContinuation = previousResponseProviderState(parsed.previousResponseId);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { projectNativeReasoning } from "../claude/native-reasoning";
 import type { IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage } from "../types";
 import { catalogModelSupportsReasoningSummaries } from "../codex/catalog";
@@ -1131,6 +1132,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         parsed._rawBody,
         forward || parsed._previousResponseInputExpanded === true,
       );
+      outBody = projectNativeReasoning(parsed, outBody, url, headers);
       const stateless = provider.statelessResponses === true;
       if (stateless) outBody = stripStatefulResponsesParams(outBody);
       // A replay miss can leave a function_call_output whose paired function_call sat

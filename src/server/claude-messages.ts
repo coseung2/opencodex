@@ -29,6 +29,8 @@ import {
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
 import { routeModel } from "../router";
+import type { NativeReasoningState } from "../claude/native-reasoning";
+import { nativeAnthropicReasoningProjection } from "../claude/inbound";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
@@ -562,6 +564,7 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
+  const nativeReasoningState: NativeReasoningState = { replay: new Map() };
   let effortOverride: ReturnType<typeof extractOcxEffortDirective> = null;
   try {
     anthropicBody = await readAnthropicBody(req, translatorBudget);
@@ -606,7 +609,7 @@ async function handleClaudeMessagesWithBudget(
       if (claudeConversationId) logCtx.conversationId = claudeConversationId;
     }
     if (isRec(anthropicBody) && wantsNativePassthrough(req, config, anthropicBody.model)) {
-      return await anthropicNativePassthrough(req, config, logCtx, logIds, anthropicBody, "/v1/messages");
+      return await anthropicNativePassthrough(req, config, logCtx, logIds, nativeAnthropicReasoningProjection(anthropicBody), "/v1/messages");
     }
     if (isRec(anthropicBody) && effortOverride) {
       anthropicBody.output_config = { effort: effortOverride };
@@ -616,6 +619,7 @@ async function handleClaudeMessagesWithBudget(
     internalBody = translation.body;
     translatorBudget.chargeRetained(new TextEncoder().encode(JSON.stringify(internalBody)).byteLength, { kind: "request_copies" });
     cacheKeySource = translation.cacheKeySource;
+    nativeReasoningState.replay = translation.nativeReasoningReplay;
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
     const status = overflow ? 413 : err instanceof AnthropicRequestError ? 400 : 500;
@@ -742,6 +746,7 @@ async function handleClaudeMessagesWithBudget(
     // Without this the replay would look native and a Responses-scoped wire default
     // would fire, disagreeing with the pre-flight decision above.
     inboundWire: "anthropic",
+    nativeReasoningState,
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForTerminalStatus(status), { terminalStatus: status, closeReason: "terminal" }),
@@ -793,7 +798,8 @@ async function handleClaudeMessagesWithBudget(
 
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream") && response.body) {
-    const anthropicSse = responsesSseToAnthropicSse(response.body, requestedModel, { translatorBudget });
+    const anthropicSse = responsesSseToAnthropicSse(response.body, requestedModel, { translatorBudget,
+      nativeReasoningFor: (enc, id) => nativeReasoningState.mint?.(enc, id) });
     if (stream) {
       return new Response(anthropicSse, {
         status: 200,
@@ -853,7 +859,7 @@ async function handleClaudeMessagesWithBudget(
     }
     return anthropicErrorResponse(502, error?.message ?? "upstream request failed", "api_error");
   }
-  const message = responsesJsonToAnthropicMessage(json, requestedModel);
+  const message = responsesJsonToAnthropicMessage(json, requestedModel, (enc, id) => nativeReasoningState.mint?.(enc, id));
   if ((message as Rec).type === "error") {
     return new Response(JSON.stringify(message), {
       status: 529,
