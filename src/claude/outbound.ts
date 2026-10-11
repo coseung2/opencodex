@@ -814,6 +814,7 @@ export async function collectAnthropicMessage(
   stream: ReadableStream<Uint8Array>,
   model: string,
   translatorBudget: TranslatorBudget,
+  options: { modelValidationProbe?: boolean } = {},
 ): Promise<Rec> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
@@ -824,6 +825,7 @@ export async function collectAnthropicMessage(
   let stopReason: string | null = "end_turn";
   let usage: Rec = anthropicUsage(undefined);
   let error: Rec | null = null;
+  let probeAnswered = false;
   const replaceRetained = (previous: string, next: string, kind: "live_transient" | "retained_collectors") => {
     const reservation = translatorBudget.reserveTransient(Buffer.byteLength(next), { kind });
     reservation.commitRetained();
@@ -845,6 +847,9 @@ export async function collectAnthropicMessage(
 
   const handle = (name: string, data: Rec) => {
     switch (name) {
+      case "message_start":
+        if (options.modelValidationProbe && isRec(data.message) && isRec(data.message.usage)) usage = { ...data.message.usage };
+        break;
       case "content_block_start":
         closeBlock();
         if (isRec(data.content_block)) openBlock = { ...data.content_block };
@@ -854,7 +859,16 @@ export async function collectAnthropicMessage(
         if (!openBlock) break;
         if (delta.type === "text_delta" && typeof delta.text === "string") {
           const previous = typeof openBlock.text === "string" ? openBlock.text : "";
-          openBlock.text = replaceRetained(previous, previous + delta.text, "retained_collectors");
+          const text = options.modelValidationProbe ? Array.from(delta.text)[0] ?? "" : delta.text;
+          openBlock.text = replaceRetained(previous, previous + text, "retained_collectors");
+          if (options.modelValidationProbe && openBlock.type === "text" && text.length > 0) {
+            // Kiro has no output-limit wire field. A one-token validation must not
+            // wait for its entire answer beyond the SDK's five-second deadline.
+            // Only actual provider text confirms the route, never message_start.
+            probeAnswered = true;
+            stopReason = "max_tokens";
+            usage = { ...usage, output_tokens: 1 };
+          }
         } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
           const previous = typeof openBlock.thinking === "string" ? openBlock.thinking : "";
           openBlock.thinking = replaceRetained(previous, previous + delta.thinking, "retained_collectors");
@@ -883,7 +897,7 @@ export async function collectAnthropicMessage(
   };
 
   try {
-    for (;;) {
+    collect: for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer = replaceRetained(buffer, buffer + decoder.decode(value, { stream: true }), "live_transient");
@@ -901,9 +915,11 @@ export async function collectAnthropicMessage(
         let data: unknown;
         try { data = JSON.parse(dataLine); } catch { continue; }
         if (isRec(data)) handle(eventName, data);
+        if (probeAnswered) break collect;
       }
     }
   } finally {
+    if (probeAnswered) void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
   closeBlock();

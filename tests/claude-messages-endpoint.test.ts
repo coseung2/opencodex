@@ -25,6 +25,30 @@ let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
 const originalFetch = globalThis.fetch;
 
+test("in-session model validation returns real provider output without waiting for an unbounded answer", async () => {
+  let cancelled = false;
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    const body = await req.json() as Record<string, unknown>;
+    expect(body.model).toBe("fixture-model");
+    expect(JSON.stringify(body.messages)).not.toContain("fixture coding-agent prefix");
+    return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "Hello" } }] })}\n\n`));
+    }, cancel() { cancelled = true; } }), { headers: { "content-type": "text/event-stream" } });
+  } });
+  saveConfig({ port: 0, defaultProvider: "fixture", providers: { fixture: { adapter: "openai-chat", baseUrl: upstream.url.toString(), apiKey: "fixture", allowPrivateNetwork: true, liveModels: false } } } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/messages", server.url), { method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(4000), body: JSON.stringify({
+      model: "fixture/fixture-model", max_tokens: 1, system: [{ type: "text", text: "fixture coding-agent prefix" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "Hi", cache_control: { type: "ephemeral" } }] }],
+    }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ type: "message", content: [{ type: "text", text: "H" }], stop_reason: "max_tokens" });
+    for (let index = 0; index < 20 && !cancelled; index++) await Bun.sleep(10);
+    expect(cancelled).toBe(true);
+  } finally { server.stop(true); upstream.stop(true); }
+}, 10000);
+
 test("Claude gateway preserves cached prefix, one-hour markers and native signatures over two HTTP turns", async () => {
   const captures: Array<{ body: any; beta: string | null }> = [];
   const signature = "c2lnbmVkX2VuZHBvaW50X2ZpeHR1cmU=";

@@ -32,6 +32,7 @@ import { routeModel } from "../router";
 import type { NativeReasoningState } from "../claude/native-reasoning";
 import { nativeAnthropicReasoningProjection } from "../claude/inbound";
 import { carriesMessageThread, messageThreadUnsupportedResponse } from "../claude/message-threads";
+import { isClaudeModelValidationProbe } from "../claude/model-validation";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
@@ -640,6 +641,11 @@ async function handleClaudeMessagesWithBudget(
   }
 
   const requestedModel = (anthropicBody as Rec).model as string;
+  const modelValidationProbe = isClaudeModelValidationProbe(anthropicBody);
+  // The CLI's side query carries its coding-agent system prefix even for "Hi".
+  // It is not conversation context and can delay Kiro's first text past the SDK
+  // deadline. Only routed validation drops it; native passthrough returned above.
+  if (modelValidationProbe) delete internalBody.instructions;
   const stream = internalBody.stream === true;
   // Routed adapters only support streamed turns; always stream internally and fold
   // the translated Anthropic SSE into a message JSON for non-streaming clients.
@@ -819,7 +825,7 @@ async function handleClaudeMessagesWithBudget(
     }
     let message: Rec;
     try {
-      message = await collectAnthropicMessage(anthropicSse, requestedModel, translatorBudget);
+      message = await collectAnthropicMessage(anthropicSse, requestedModel, translatorBudget, { modelValidationProbe });
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) {
         return anthropicErrorResponse(413, error.message, "request_too_large", error.code);
