@@ -32,7 +32,7 @@ test("hidden native ciphertext survives JSON round trip only for its actual dest
   expect((message.content as Record<string, unknown>[])[0]!.thinking).toBe("");
   const translated = translation(message.content);
   expect(JSON.stringify(translated.body)).not.toContain("opaque-fixture");
-  expect(translated.body.include).toEqual(["reasoning.encrypted_content"]);
+  expect(translated.body.include).toContain("reasoning.encrypted_content");
   expect(JSON.stringify(replay(translated))).toContain("opaque-fixture");
   for (const projected of [replay(translated, "https://other.invalid/v1/responses"), replay(translated, url, { Authorization: "Bearer another-key" }), replay(translated, url, headers, "other-model")]) {
     expect(JSON.stringify(projected)).not.toContain("opaque-fixture");

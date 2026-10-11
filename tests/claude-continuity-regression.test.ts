@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import { anthropicToResponsesBody } from "../src/claude/inbound";
 import { pickerEffortTemplate } from "../src/claude/picker-effort";
+import { responsesRequestSchema } from "../src/responses/schema";
+test("forced hosted web search retains its hosted selector instead of a nonexistent function", () => {
+  const body = anthropicToResponsesBody({ model: "fixture/model", messages: [{ role: "user", content: "Search" }],
+    tools: [{ type: "web_search_20250305", name: "web_search" }], tool_choice: { type: "tool", name: "web_search" } });
+  expect(body.tools).toEqual([{ type: "web_search" }]);
+  expect(body.tool_choice).toEqual({ type: "web_search" });
+  expect(body.include).toContain("web_search_call.action.sources");
+  expect(responsesRequestSchema.safeParse(body).success).toBe(true);
+});
 
 test("ToolSearch references preserve loaded names and subsequent task text", () => {
   const body = anthropicToResponsesBody({ model: "fixture/model", messages: [

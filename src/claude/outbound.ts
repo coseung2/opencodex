@@ -149,8 +149,9 @@ function webSearchPairFromItem(item: Rec): { id: string; input: Rec; resultConte
   let resultContent: unknown;
   if (completed) {
     const hits: Rec[] = [];
-    if (Array.isArray(item.sources)) {
-      for (const s of item.sources) {
+    const sources = Array.isArray(item.sources) ? item.sources : Array.isArray(action.sources) ? action.sources : [];
+    if (sources.length) {
+      for (const s of sources) {
         if (isRec(s) && typeof s.url === "string" && s.url.length > 0) {
           hits.push({ type: "web_search_result", title: typeof s.title === "string" ? s.title : "", url: s.url });
         }

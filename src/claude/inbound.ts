@@ -428,7 +428,10 @@ function toolChoiceToResponses(choice: unknown, body: Rec): void {
       if (typeof choice.name !== "string" || choice.name.length === 0) {
         throw new AnthropicRequestError("tool_choice.tool requires a name");
       }
-      body.tool_choice = { type: "function", name: choice.name };
+      // Upstream: hosted search is not an ordinary client function selector.
+      body.tool_choice = (choice.name === "web_search" || choice.name === "WebSearch")
+        && Array.isArray(body.tools) && body.tools.some(tool => isRec(tool) && tool.type === "web_search")
+        ? { type: "web_search" } : { type: "function", name: choice.name };
       break;
     default: break;
   }
@@ -511,6 +514,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
 
   const tools = toolsToResponses(raw.tools, blockedNames);
   if (tools) body.tools = tools;
+  if (tools?.some(tool => tool.type === "web_search")) body.include = ["web_search_call.action.sources"];
   toolChoiceToResponses(raw.tool_choice, body);
 
   if (typeof raw.max_tokens === "number") body.max_output_tokens = raw.max_tokens;
@@ -566,7 +570,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
       reasoning.effort = effortForThinkingBudget(thinking.budget_tokens);
     }
     body.reasoning = reasoning;
-    body.include = ["reasoning.encrypted_content"];
+    body.include = [...(Array.isArray(body.include) ? body.include : []), "reasoning.encrypted_content"];
   }
 
   return { body, cacheKeySource, nativeReasoningReplay };
