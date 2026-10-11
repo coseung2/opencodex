@@ -1,0 +1,9 @@
+# DeepSeek Claude request rejection
+
+- Date/timezone: 2026-10-11, Asia/Seoul; investigation around 08:40-08:50 KST.
+- Symptoms: user-reported DeepSeek failure on Claude Code; VM records show OpenCode Go `deepseek-v4.1-flash` requests rejected with HTTP 400. Most upstream error bodies were empty; one exposed only the model id, not an actionable cause.
+- Confirmed evidence: official Go documentation and authenticated model discovery list the configured model and Chat Completions endpoint. Direct requests using the same installed provider configuration and credential returned HTTP 200 for DeepSeek V4.1 Flash and V4 Flash. Streaming, high/max/xhigh reasoning, ordinary tools, long user ids, long tool names, usage reporting and large output budgets were accepted in bounded diagnostic variants.
+- Actual Claude-path verification: a fresh short Messages request traversing local authenticated proxy, relay and VM returned text with HTTP 200. A two-turn fixture issued Read, replayed its genuine thinking and tool-call blocks, supplied a synthetic tool result, and returned the correct fact with HTTP 200 on both turns. No filesystem operation was executed by the fixture.
+- Cause: unresolved for the original rejected request. Results exclude a general model/account outage but do not prove that an old conversation, a specific schema or another field caused rejection. Do not attribute it to quota, context length or reasoning replay without request-specific evidence.
+- Response: retained the user's DeepSeek model/provider/account and did not replace it or rewrite its limits. Confirmed the usable fresh tool-loop path and kept the failed request metadata for further correlation without persisting raw user prompts or credentials.
+- Follow-up: if the user's fresh session still fails, correlate its failure time and test a minimized structural reproduction; do not blindly replay the original task or silently substitute another model.
