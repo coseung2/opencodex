@@ -1,4 +1,5 @@
 import { markActivity } from "../lib/sidecar-tracker";
+import { registerClaudeIntercept, startDesiredClaudeIntercept } from "../claude/intercept/runtime";
 import {
   buildWarmupCompletionFrames,
   buildWsErrorFrame,
@@ -392,15 +393,7 @@ export function startServer(port?: number) {
     return response;
   }
 
-  const server: Server<WsData> = Bun.serve<WsData>({
-    port: listenPort,
-    hostname: bindHost,
-    idleTimeout: 255,
-    // Keep Bun's listener admission ceiling aligned with the bounded
-    // decompression reader. Bun otherwise rejects valid large Codex turns at
-    // its lower default before the application can enforce the 256 MiB cap.
-    maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
-    async fetch(req, requestServer): Promise<Response> {
+  async function dispatchHttp(req: Request, requestServer: Server<WsData>): Promise<Response> {
       const url = new URL(req.url);
       markActivity(`${req.method} ${url.pathname}`);
 
@@ -906,7 +899,15 @@ export function startServer(port?: number) {
       }
 
       return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
-    },
+  }
+
+  const server: Server<WsData> = Bun.serve<WsData>({
+    port: listenPort,
+    hostname: bindHost,
+    idleTimeout: 255,
+    // Match the bounded decompression reader's admission ceiling.
+    maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
+    fetch: dispatchHttp,
     websocket: {
       idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,
       // Responses WebSocket data plane (phase 120.2). Re-frames the same SSE pipeline onto the
@@ -1106,6 +1107,15 @@ export function startServer(port?: number) {
   setServerRef(server);
   const actualPort = server.port ?? listenPort;
   setCorsOrigin(actualPort);
+  registerClaudeIntercept({
+    config,
+    publicPort: actualPort,
+    maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
+    dispatch: dispatchHttp,
+  });
+  void startDesiredClaudeIntercept().catch(() => {
+    console.warn("[claude] First-party listener unavailable; existing settings were not changed.");
+  });
 
   console.log(`🚀 opencodex proxy running on http://localhost:${actualPort}`);
   console.log(`   POST /v1/responses → provider translation`);

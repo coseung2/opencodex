@@ -1,4 +1,5 @@
 import { flushResponseState } from "../responses/state";
+import { stopClaudeIntercept } from "../claude/intercept/runtime";
 import { setStorageCleanupPolicyLiveSink } from "../storage/policy";
 import {
   abortStorageCleanupPolicyJobAsync,
@@ -320,7 +321,8 @@ export async function drainAndShutdown(
     try {
       // Bun's Server.stop returns Promise<void>; fire-and-forget races the next
       // isolate reclaim / follow-on listen the same way unterminated Workers did.
-      if (s) await s.stop(true);
+      try { await stopClaudeIntercept(); }
+      finally { if (s) await s.stop(true); }
     } finally {
       draining = false;
     }
