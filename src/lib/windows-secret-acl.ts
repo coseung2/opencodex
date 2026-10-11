@@ -51,6 +51,11 @@ export interface HardenOptions {
    * Must NOT be a parent directory — directory ACLs are not authoritative for new files.
    */
   timeoutMemoKey?: string;
+  /**
+   * Optional icacls principal. Absent keeps the historical USERNAME grant so existing
+   * callers are unchanged. The local CA passes the effective token SID (`*S-1-...`).
+   */
+  principal?: string;
 }
 
 /**
@@ -173,6 +178,17 @@ export function forgetHardenedSecretPath(targetPath: string): void {
   hardenedPaths.delete(targetPath);
 }
 
+/**
+ * Release both the success memo and the destination-keyed timeout memo for a
+ * proven-absent ephemeral temp. Never pass a stable destination: those timeout
+ * memos are intentional anti-restall state.
+ */
+export function forgetEphemeralSecretPath(tempPath: string): void {
+  hardenedPaths.delete(tempPath);
+  timedOutPaths.delete(`required:${tempPath}`);
+  timedOutPaths.delete(`optional:${tempPath}`);
+}
+
 /** Test seam for proving ephemeral success memos do not grow across replacements. */
 export function hardenedSecretPathCountForTests(): number {
   return hardenedPaths.size;
@@ -226,8 +242,8 @@ function grantAce(user: string, directory: boolean): string {
   return directory ? `${user}:(OI)(CI)(F)` : `${user}:(F)`;
 }
 
-function runIcacls(targetPath: string, directory: boolean, deadline: number): void {
-  const user = currentWindowsUser();
+function runIcacls(targetPath: string, directory: boolean, deadline: number, principal?: string): void {
+  const user = principal ?? currentWindowsUser();
   if (!user) {
     throw new Error("Cannot determine current Windows user for ACL hardening");
   }
@@ -275,8 +291,8 @@ function runIcacls(targetPath: string, directory: boolean, deadline: number): vo
 }
 
 /** Async counterpart of runIcacls — same step order and timeout/error classification (#612). */
-async function runIcaclsAsync(targetPath: string, directory: boolean, deadline: number): Promise<void> {
-  const user = currentWindowsUser();
+async function runIcaclsAsync(targetPath: string, directory: boolean, deadline: number, principal?: string): Promise<void> {
+  const user = principal ?? currentWindowsUser();
   if (!user) {
     throw new Error("Cannot determine current Windows user for ACL hardening");
   }
@@ -327,6 +343,8 @@ function sanitizeDiagnostics(error: unknown): string {
       return `ACL hardening failed (${code}) — permission denied running icacls`;
     case "EICACLS":
       return "ACL hardening failed (EICACLS) — icacls command error; filesystem may not support per-user NTFS ACLs";
+    case "EACLIDENTITY":
+      return "ACL hardening failed (EACLIDENTITY) — the effective Windows account SID could not be resolved";
     default:
       return `ACL hardening failed${code ? ` (${code})` : ""} — filesystem may not support per-user NTFS ACLs`;
   }
@@ -335,6 +353,18 @@ function sanitizeDiagnostics(error: unknown): string {
 function isTimeoutError(error: unknown): boolean {
   return error instanceof Error && "code" in error
     && String((error as NodeJS.ErrnoException).code) === "ETIMEDOUT";
+}
+
+/** Preserve the bounded machine-readable cause on a sanitized required-mode error. */
+function sanitizedAclError(diagnostics: string, cause: unknown): NodeJS.ErrnoException {
+  const error = new Error(diagnostics) as NodeJS.ErrnoException;
+  const code = cause && typeof cause === "object" && "code" in cause
+    ? String((cause as { code?: unknown }).code)
+    : "";
+  if (code === "ETIMEDOUT" || code === "EICACLS" || code === "EACCES" || code === "EPERM" || code === "EACLIDENTITY") {
+    error.code = code;
+  }
+  return error;
 }
 
 /**
@@ -410,7 +440,7 @@ function hardenEntry(
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0 && deadline - nowFn() <= 0) break; // retry only while budget remains
     try {
-      runIcacls(targetPath, directory, deadline);
+      runIcacls(targetPath, directory, deadline, opts.principal);
       cache.add(targetPath);
       return { ok: true };
     } catch (err) {
@@ -424,11 +454,11 @@ function hardenEntry(
     timedOutPaths.add(memoKey);
     const state = describeAclStateAfterTimeout(targetPath, deadline);
     const annotated = `${diagnostics}; ${state}`;
-    if (opts.required) throw new Error(annotated);
+    if (opts.required) throw sanitizedAclError(annotated, lastErr);
     console.warn(`[opencodex] ${annotated} — continuing without NTFS ACL harden`);
     return { ok: false, diagnostics: annotated };
   }
-  if (opts.required) throw new Error(diagnostics);
+  if (opts.required) throw sanitizedAclError(diagnostics, lastErr);
   return { ok: false, diagnostics };
 }
 
@@ -454,7 +484,7 @@ async function hardenEntryAsync(
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0 && deadline - nowFn() <= 0) break;
     try {
-      await runIcaclsAsync(targetPath, directory, deadline);
+      await runIcaclsAsync(targetPath, directory, deadline, opts.principal);
       cache.add(targetPath);
       return { ok: true };
     } catch (err) {
@@ -468,11 +498,11 @@ async function hardenEntryAsync(
     timedOutPaths.add(memoKey);
     const state = await describeAclStateAfterTimeoutAsync(targetPath, deadline);
     const annotated = `${diagnostics}; ${state}`;
-    if (opts.required) throw new Error(annotated);
+    if (opts.required) throw sanitizedAclError(annotated, lastErr);
     console.warn(`[opencodex] ${annotated} — continuing without NTFS ACL harden`);
     return { ok: false, diagnostics: annotated };
   }
-  if (opts.required) throw new Error(diagnostics);
+  if (opts.required) throw sanitizedAclError(diagnostics, lastErr);
   return { ok: false, diagnostics };
 }
 
