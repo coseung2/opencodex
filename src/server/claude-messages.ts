@@ -31,6 +31,7 @@ import { estimateTokens } from "../lib/token-estimate";
 import { routeModel } from "../router";
 import type { NativeReasoningState } from "../claude/native-reasoning";
 import { nativeAnthropicReasoningProjection } from "../claude/inbound";
+import { carriesMessageThread, messageThreadUnsupportedResponse } from "../claude/message-threads";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
@@ -611,6 +612,12 @@ async function handleClaudeMessagesWithBudget(
     if (isRec(anthropicBody) && wantsNativePassthrough(req, config, anthropicBody.model)) {
       return await anthropicNativePassthrough(req, config, logCtx, logIds, nativeAnthropicReasoningProjection(anthropicBody), "/v1/messages");
     }
+    // Upstream #5985: a continuation is only a delta. Ask Claude Code to resend
+    // the full conversation instead of translating it as a fresh, empty task.
+    if (carriesMessageThread(anthropicBody)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
+      return messageThreadUnsupportedResponse();
+    }
     if (isRec(anthropicBody) && effortOverride) {
       anthropicBody.output_config = { effort: effortOverride };
       delete anthropicBody.thinking;
@@ -924,6 +931,7 @@ export async function handleClaudeCountTokens(req: Request, config: OcxConfig): 
   if (wantsNativePassthrough(req, config, model)) {
     return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
   }
+  if (carriesMessageThread(raw)) return messageThreadUnsupportedResponse();
   const parts: string[] = [];
   if (raw.system !== undefined) parts.push(typeof raw.system === "string" ? raw.system : JSON.stringify(raw.system));
   if (raw.messages !== undefined) parts.push(JSON.stringify(raw.messages));
