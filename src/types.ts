@@ -472,6 +472,16 @@ export interface OcxClaudeCodeConfig {
   webSearchSidecar?: { backend?: "openai" | "anthropic"; model?: string };
   /** Claude-originated vision override. Unset fields inherit the global sidecar settings. */
   visionSidecar?: { backend?: "openai" | "anthropic"; model?: string };
+  /** Desktop transport intent. Existing installs remain on the gateway unless explicitly changed. */
+  desktopMode?: "gateway" | "first-party";
+  /** Independent first-party transport intent for terminal Claude Code. Default: false. */
+  cliFirstParty?: boolean;
+  /** Local first-party listeners. Picker trust is a separate, explicit opt-in. */
+  intercept?: {
+    enabled?: boolean;
+    port?: number;
+    picker?: boolean;
+  };
   /** Persisted Claude Desktop four-family routing profile. */
   desktopProfile?: OcxClaudeDesktopProfile;
   /** Auto-reconcile Desktop 3P config when provider catalog changes. Default: enabled. */
