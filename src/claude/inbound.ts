@@ -12,6 +12,7 @@
 import type { OcxClaudeCodeConfig } from "../types";
 import { resolveAlias } from "./alias";
 import { stripOneMillionMarker } from "./context-windows";
+import { portableToolSchemaPatterns } from "./tool-schema-patterns";
 import { resolveDesktop3pAlias } from "./desktop-3p";
 import { desktopBaseModelId, desktopRouteSpeed } from "./desktop-speed";
 import { createHash } from "node:crypto";
@@ -402,7 +403,7 @@ function toolsToResponses(tools: unknown, blockedSkills: readonly string[] = [])
         type: "function",
         name: raw.name,
         ...(typeof raw.description === "string" ? { description: raw.description } : {}),
-        parameters: raw.input_schema as Record<string, unknown>,
+        parameters: portableToolSchemaPatterns(raw.input_schema),
         strict: typeof raw.strict === "boolean" ? raw.strict : false,
         ...(raw.name === "Skill" && blockedSkills.length > 0 ? {
           description: `${typeof raw.description === "string" ? raw.description : "Load a skill."}\n`
