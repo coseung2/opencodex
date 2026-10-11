@@ -30,7 +30,11 @@ export interface ReasoningEnvelope {
    * model reasoning across turns, so it round-trips here the same way a signature does.
    */
   krc?: string;
+  /** Responses ciphertext; trusted only after verification at the actual destination. */
+  nat?: NativeReasoning;
 }
+
+export interface NativeReasoning { enc: string; model: string; tag: string; id?: string }
 
 export function encodeReasoningEnvelope(envelope: ReasoningEnvelope): string {
   return OCX_REASONING_PREFIX + Buffer.from(JSON.stringify(envelope), "utf-8").toString("base64");
@@ -53,7 +57,16 @@ export function decodeReasoningEnvelope(encryptedContent: string): ReasoningEnve
     if (typeof txt === "string" && txt.length > 0) envelope.txt = txt;
     const krc = (parsed as { krc?: unknown }).krc;
     if (typeof krc === "string" && krc.length > 0) envelope.krc = krc;
-    return envelope.sig || envelope.red || envelope.txt || envelope.krc ? envelope : null;
+    const nat = (parsed as { nat?: unknown }).nat;
+    if (nat && typeof nat === "object" && !Array.isArray(nat)) {
+      const value = nat as Partial<NativeReasoning>;
+      if (typeof value.enc === "string" && value.enc.length > 0 && typeof value.model === "string" && value.model.length > 0
+        && typeof value.tag === "string" && /^[a-f0-9]{64}$/.test(value.tag)) {
+        envelope.nat = { enc: value.enc, model: value.model, tag: value.tag,
+          ...(typeof value.id === "string" && value.id.length > 0 ? { id: value.id } : {}) };
+      }
+    }
+    return envelope.sig || envelope.red || envelope.txt || envelope.krc || envelope.nat ? envelope : null;
   } catch {
     return null;
   }

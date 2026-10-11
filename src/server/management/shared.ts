@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildFirstPartyCatalog } from "../../claude/first-party-catalog";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
@@ -214,7 +215,7 @@ export function stripRegistryOnlyStaticHeaders(name: string, provider: OcxProvid
 
 /** Shared Desktop profile DTO builder for the management API and CLI. */
 export async function buildClaudeDesktopState(config: OcxConfig, stored?: OcxClaudeDesktopProfile) {
-  const { filterCatalogVisibleModels, nativeOpenAiContextWindow, desktopVisibleNativeSlugs } = await import("../../codex/catalog");
+  const { filterCatalogVisibleModels, nativeOpenAiContextWindow, nativeReasoningEfforts, desktopVisibleNativeSlugs } = await import("../../codex/catalog");
   const { DESKTOP_SUPPORTS_1M_THRESHOLD } = await import("../../claude/desktop-3p");
   const { reconcileDesktopProfile, renderDesktopProfile } = await import("../../claude/desktop-profile");
   const routed = filterCatalogVisibleModels(await fetchAllModels(config), config);
@@ -272,6 +273,10 @@ export async function buildClaudeDesktopState(config: OcxConfig, stored?: OcxCla
     profile,
     models,
     rendered: renderDesktopProfile(profile, profileModels),
+    firstPartyCatalog: buildFirstPartyCatalog([
+      ...desktopVisibleNativeSlugs(config).map(id => ({ provider: "native", id, contextWindow: nativeOpenAiContextWindow(id), reasoningEfforts: nativeReasoningEfforts(id) })),
+      ...routed.map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, reasoningEfforts: model.reasoningEfforts })),
+    ], config.claudeCode),
     port: config.port,
   };
 }

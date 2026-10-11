@@ -32,6 +32,8 @@ const SHUTDOWN_PATH: &str = "/__ocx_notch_shutdown";
 /// or take over, a relay it does not own.
 const CONTROL_HEADER: &str = "X-OCX-Notch-Relay-Control";
 const CONTROL_TARGET: &str = "OCX Notch:relay-control";
+const CLAUDE_EDGE_TARGET: &str = "OCX Notch:claude-edge-auth";
+const CLAUDE_EDGE_HEADER: &str = "X-OCX-Claude-Edge";
 /// Purpose strings keep the control proofs separate: a proof captured from one
 /// endpoint cannot be replayed against the other.
 const PROBE_PURPOSE: &str = "ocx-notch-relay-probe";
@@ -356,7 +358,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 /// SHA-256 of a message no larger than two 64-byte blocks, which is all the
 /// control proof and its padding require.
-fn sha256(message: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(message: &[u8]) -> [u8; 32] {
     const INITIAL: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
@@ -579,6 +581,16 @@ fn handle_client(
             "unsupported_path",
             "The relay accepts only OCX data-plane routes",
         );
+        return Ok(());
+    }
+    let route_path = request.target.split('?').next().unwrap_or("");
+    let claude_route = matches!(route_path, "/v1/messages" | "/v1/messages/count_tokens");
+    if claude_route && (request.method != "POST" || !claude_edge_authorized(&request)) {
+        write_json_error(&mut client, 403, "claude_edge_auth_required", "The owned Claude edge credential is required");
+        return Ok(());
+    }
+    if !claude_route && request.headers.iter().any(|header| header.name.eq_ignore_ascii_case(CLAUDE_EDGE_HEADER)) {
+        write_json_error(&mut client, 403, "claude_edge_route_rejected", "Claude edge accepts only Messages routes");
         return Ok(());
     }
     if codex_connection::read_mode() != "remote" {
@@ -858,6 +870,7 @@ fn upgrade_header_allowed(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "host"
             | "x-opencodex-api-key"
+            | "x-ocx-claude-edge"
             | "proxy-authenticate"
             | "proxy-authorization"
             | "te"
@@ -1495,6 +1508,14 @@ fn winhttp_headers(request: &IncomingRequest, key: &str) -> String {
     output
 }
 
+fn claude_edge_authorized(request: &IncomingRequest) -> bool {
+    let mut supplied = request.headers.iter().filter(|header| header.name.eq_ignore_ascii_case(CLAUDE_EDGE_HEADER));
+    let Some(value) = supplied.next() else { return false; };
+    if supplied.next().is_some() { return false; }
+    let Ok(Some(expected)) = connection::read_secret(CLAUDE_EDGE_TARGET) else { return false; };
+    !expected.is_empty() && constant_time_eq(value.value.as_bytes(), expected.as_bytes())
+}
+
 fn request_header_allowed(name: &str) -> bool {
     !matches!(
         name.to_ascii_lowercase().as_str(),
@@ -1507,6 +1528,7 @@ fn request_header_allowed(name: &str) -> bool {
             | "upgrade"
             | "host"
             | "x-opencodex-api-key"
+            | "x-ocx-claude-edge"
     )
 }
 

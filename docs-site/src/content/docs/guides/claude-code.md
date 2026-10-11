@@ -43,6 +43,31 @@ Operational contract when enabled:
 
 See [Configuration](/reference/configuration/#anthropicaccountpool-experimental).
 
+## Windows Desktop first-party model picker
+
+For a remote VM connection, keep Notch running and run `ocx-notch --claude-picker-on`.
+Confirm the Windows certificate trust dialog, then fully quit and reopen Desktop.
+This retains claude.ai login and extends only the local Code model lists (`ccd` and `code`).
+Native models and Chat stay native; routed model requests use the selected VM.
+The picker uses a user-scoped, short-lived CA constrained to `claude.ai`; its signing key is
+DPAPI-encrypted. The app's PAC proxies only `claude.ai`, with other destinations direct.
+Use `ocx-notch --claude-picker-off` to remove the owned profile and certificate.
+Foreign proxies and later user profile changes are never overwritten.
+
+Unlike gateway/3P mode, a first-party session can change its model through the Code picker.
+The companion also supplies the routed IDs to the child CLI's bootstrap; publishing the
+Desktop picker alone is not sufficient. Start a new session after adding new catalog entries
+or updating a companion that did not supply that bootstrap. The standalone CLI's shared `cc`
+selector still requires CLI first-party mode to be enabled.
+
+Claude Code 2.1.295 gives an in-session model verification request five seconds to complete.
+Its one-token, non-streaming `Hi` probe is forwarded to the selected provider without the
+CLI's coding-agent system prefix (the probe has no conversation context): OpenCodex
+returns after real provider text arrives and cancels the remaining generation, rather than
+waiting for an entire answer from adapters without an output-limit field. An unavailable
+provider, an error before output, or a slow first byte still prevents confirmation; catalog
+membership alone never fabricates a successful API response.
+
 ## Quickstart
 
 ```bash
@@ -99,6 +124,51 @@ On macOS, auto-connect (`claudeCode.systemEnv`) follows the same resolution, so 
 the proxy starts or you save settings, while `ocx claude` always resolves live.
 
 ## System environment integration (macOS)
+
+## First-party transport (experimental local integration)
+
+Gateway remains the default. An explicit first-party choice keeps Claude Desktop's ordinary
+claude.ai deployment and redirects the Claude Code process through an authenticated loopback
+HTTPS proxy. This uses a local CA trusted by that process through `NODE_EXTRA_CA_CERTS`; it does
+not install a root certificate into the OS store. Corporate TLS-inspection support is documented
+by Anthropic, but routing another vendor's model is not an endorsement or an account-policy guarantee.
+
+With the **local** OCX server running, apply Desktop first-party settings explicitly:
+
+```bash
+ocx claude desktop apply --first-party
+```
+
+Quit and reopen Desktop yourself after a successful apply. A foreign proxy, modified profile,
+or unavailable local listener is reported rather than overwritten. Plain `apply` subsequently
+preserves the selected transport. Select gateway explicitly to return:
+
+```bash
+ocx claude desktop apply --gateway
+```
+
+Terminal Claude Code has independent first-party intent:
+
+```bash
+ocx claude first-party on
+```
+
+```bash
+ocx claude first-party off
+```
+
+Both clients share the owned proxy/CA settings, so turning one off retains them when the other
+still uses first-party. This setting affects new sessions. First-party `ocx claude` does not inject
+a gateway base URL, admission bearer, host-managed authentication marker or gateway discovery flag;
+explicit conflicting proxy/base URL exports are reported. Use `claudeCode.modelMap` or generated
+OCX agent routes for translated models; native, unmapped Claude requests retain native credentials.
+
+**Remote setup:** use the explicit local Claude 1P opt-in in
+[Remote Notch](/guides/remote-notch/#claude-desktop-first-party-companion-experimental) rather than
+these local-server commands. After setup, Notch supervises its dedicated worker alongside the
+existing Codex relay. Connecting Remote Notch alone does not change Claude settings.
+The first-party Desktop real-name picker remains separate and is not yet integrated.
+No OS trust registration is performed by these basic first-party commands.
 
 ## Claude Desktop profile
 

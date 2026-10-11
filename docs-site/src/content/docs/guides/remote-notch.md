@@ -126,6 +126,41 @@ Notch clients on their next refresh. Expanded account rows still support active-
 selection, pause/resume, reauthentication, and Kiro cooldown clearing. No pool policy or
 account state is stored on the PC.
 
+## Claude Desktop first-party companion (experimental)
+
+Remote Notch can also supervise a local Claude first-party worker without changing the Codex
+relay. Launch Notch through the installed package's `ocx-notch` command so it can identify the
+bundled Bun runtime and CLI entry. Running a copied standalone executable does not supply that
+runtime and reports an unavailable companion instead of downloading software.
+
+After connecting the VM, explicitly enable **Claude 1P on this PC** in the connection controls.
+This starts an authenticated local proxy, writes only owned proxy/CA settings for Claude Code,
+and releases the selected owned gateway profile. Quit and reopen Claude Desktop yourself after
+setup. No OS root certificate is installed by this basic first-party workflow. Foreign proxy
+settings or an unrelated Desktop profile are refused rather than replaced.
+
+After successful opt-in, starting Notch reconnects the saved VM and supervises both clients:
+Codex keeps its existing loopback relay; routed Claude requests reach the same VM through a
+separately authenticated local worker. Native unmapped Claude and non-inference requests retain
+their native Anthropic destination. Closing Notch stops the owned worker, so keep it running.
+VM failures return explicit errors for routed models, never subscription fallback.
+
+The VM owns provider credentials, account pools, model visibility and subagent policy. A
+versioned secret-free catalog comes from the server; older compatible servers use the existing
+Claude aliases/catalog API. The worker never receives the VM management or data key in its
+settings, process arguments, or environment. A changed VM binding requires a fresh explicit
+opt-in, and unavailable catalogs are reported.
+
+Basic first-party mode uses the existing model mappings or generated OCX agents. On Windows,
+`ocx-notch --claude-picker-on` additionally enables model names in the local Code picker.
+Windows asks you to confirm a user-scoped, `claude.ai`-constrained root certificate. Restart
+Desktop after setup and keep Notch running. A local PAC sends only `claude.ai` through the
+picker relay; only the `ccd` and `code` bootstrap lists are extended. Chat and cloud Code lists
+remain unchanged. The signing key is stored as user-scoped DPAPI ciphertext. Remove the picker
+profile and certificate with `ocx-notch --claude-picker-off`; later user edits are preserved.
+Validate Desktop login, Chat, Remote Control, a routed request, and
+Codex after the initial setup on each PC. First-party routing is not an account-policy guarantee.
+
 ## Move existing accounts
 
 Back up both OCX configurations and merge existing provider credentials and account

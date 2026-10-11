@@ -3,6 +3,7 @@
 mod api;
 mod callback_relay;
 mod codex_connection;
+mod claude_connection;
 mod data_relay;
 mod model;
 mod models;
@@ -273,6 +274,8 @@ enum ModalHit {
     ConnectionModeRemote,
     ConnectionSave,
     ConnectionDisconnect,
+    ClaudeLocalEnable,
+    ClaudeLocalDisable,
     IssuedKeysOpen,
     IssuedKeyDelete(String),
     Cancel,
@@ -965,6 +968,26 @@ fn main() {
     install_panic_logger();
     match parse_cli(std::env::args().skip(1)) {
         Ok(Cli::Window) => {}
+        Ok(Cli::ClaudeFirstPartyOn) | Ok(Cli::ClaudePickerOn) => {
+            let picker = parse_cli(std::env::args().skip(1)) == Ok(Cli::ClaudePickerOn);
+            let result = if picker { claude_connection::enable_picker() } else { claude_connection::enable() };
+            if let Err(error) = result { eprintln!("{error}"); std::process::exit(1); }
+            println!("Claude first-party setup applied; keeping Notch supervision running");
+        }
+        Ok(Cli::ClaudeFirstPartyOff) | Ok(Cli::ClaudeFirstPartyStatus) | Ok(Cli::ClaudePickerOff) => {
+            let mode = parse_cli(std::env::args().skip(1)).expect("already validated local action");
+            let result = match mode {
+                Cli::ClaudeFirstPartyOn => claude_connection::enable(),
+                Cli::ClaudeFirstPartyOff => claude_connection::disable(),
+                Cli::ClaudePickerOff => claude_connection::disable_picker(),
+                _ => claude_connection::local_status(),
+            };
+            match result {
+                Ok(()) => println!("{}", claude_connection::status()),
+                Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+            }
+            return;
+        }
         Ok(Cli::CodexToken(origin)) => match codex_connection::auth_token(&origin) {
             Ok(token) => {
                 print!("{token}");
@@ -1140,6 +1163,11 @@ fn main() {
 #[derive(Debug, PartialEq, Eq)]
 enum Cli {
     CodexToken(String),
+    ClaudeFirstPartyOn,
+    ClaudePickerOn,
+    ClaudePickerOff,
+    ClaudeFirstPartyOff,
+    ClaudeFirstPartyStatus,
     Reconnect(Option<String>),
     Disconnect,
     DataRelay,
@@ -1166,6 +1194,11 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
         return Ok(Cli::Window);
     };
     let mode = match first.as_str() {
+        "--claude-first-party-on" => Cli::ClaudeFirstPartyOn,
+        "--claude-picker-on" => Cli::ClaudePickerOn,
+        "--claude-picker-off" => Cli::ClaudePickerOff,
+        "--claude-first-party-off" => Cli::ClaudeFirstPartyOff,
+        "--claude-first-party-status" => Cli::ClaudeFirstPartyStatus,
         "--local" => Cli::Local,
         "--reconnect" => Cli::Reconnect(parse_data_origin(&mut args)?),
         "--disconnect" => Cli::Disconnect,
@@ -1223,6 +1256,10 @@ fn run() -> windows::core::Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         if let Ok(existing) = FindWindowW(CLASS_NAME, PCWSTR::null()) {
             revive_existing_window(existing);
+            // A command-line local setup may have created an owned worker before
+            // discovering the existing window. Release that pipe orderly; the
+            // existing instance resumes persisted opt-in on its supervisor tick.
+            claude_connection::release_setup_worker();
             return Ok(());
         }
         let mut lucide_font_count = 0u32;
@@ -1504,6 +1541,9 @@ fn start_workers(
         }
     });
 
+    // Claude is separately opted in locally; remote Codex startup below remains
+    // unchanged and never implicitly enables or rewrites Claude.
+    claude_connection::supervise();
     let telemetry_tx = tx.clone();
     thread::spawn(move || {
         // Codex reaches the server through this loopback relay, so Notch owns
@@ -4587,6 +4627,31 @@ unsafe extern "system" fn window_proc(
                             }
                         });
                     }
+                    ModalHit::ClaudeLocalEnable | ModalHit::ClaudeLocalDisable => {
+                        let enable = action == ModalHit::ClaudeLocalEnable;
+                        let mut allowed = false;
+                        with_app(|app| {
+                            if connection_change_busy(app) { return; }
+                            if let Some(ProviderModal::Connection { submitting, .. }) = &mut app.provider_modal {
+                                if *submitting { return; }
+                                *submitting = true;
+                                allowed = true;
+                            }
+                        });
+                        if allowed {
+                            let window = hwnd.0 as isize;
+                            thread::spawn(move || {
+                                let result = if enable { claude_connection::enable() } else { claude_connection::disable() };
+                                with_app(|app| {
+                                    if let Some(ProviderModal::Connection { submitting, error, .. }) = &mut app.provider_modal {
+                                        *submitting = false;
+                                        *error = result.err();
+                                    }
+                                });
+                                unsafe { let _ = InvalidateRect(HWND(window as _), None, false); }
+                            });
+                        }
+                    }
                     ModalHit::ConnectionSave => unsafe { submit_connection(hwnd, false) },
                     ModalHit::ConnectionDisconnect => unsafe { submit_connection(hwnd, true) },
                     ModalHit::IssuedKeysOpen => unsafe { show_issued_keys_modal(hwnd) },
@@ -7453,6 +7518,13 @@ unsafe fn draw_provider_modal(
                 };
                 draw_native_button(dc, manage, "발급 키 관리", false);
                 app.modal_hits.push((manage, ModalHit::IssuedKeysOpen));
+                // Explicit local consent, never a remote VM settings action.
+                let on = RECT { left: 204, right: 366, ..manage };
+                let off = RECT { left: 374, right: width - 60, ..manage };
+                draw_native_button(dc, on, "이 PC Claude 1P 켜기/재시도", !api::is_remote());
+                draw_native_button(dc, off, "이 PC Claude 1P 끄기", false);
+                if api::is_remote() { app.modal_hits.push((on, ModalHit::ClaudeLocalEnable)); }
+                app.modal_hits.push((off, ModalHit::ClaudeLocalDisable));
                 if api::is_remote() && codex_connection::read_mode() != "disconnected" {
                     let disconnect = RECT {
                         left: 60,
@@ -7464,6 +7536,8 @@ unsafe fn draw_provider_modal(
                         .push((disconnect, ModalHit::ConnectionDisconnect));
                 }
             }
+            set_text_color(dc, 0x009da3ad);
+            draw_text(dc, &claude_connection::status(), RECT { left: 60, top: 600, right: width - 60, bottom: 624 }, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             if let Some(error) = error {
                 set_text_color(dc, 0x0024bffb);
                 draw_text(
@@ -7473,7 +7547,7 @@ unsafe fn draw_provider_modal(
                         left: 60,
                         top: 544,
                         right: width - 60,
-                        bottom: 624,
+                        bottom: 598,
                     },
                     DT_LEFT | DT_WORDBREAK,
                 );

@@ -16,6 +16,61 @@ OpenAI Codex 풀로 라우팅되는 Claude 요청은 Codex, 대시보드, 노치
 적용되고 계정 전환으로 저장되지 않아요. Direct 모드와 계정을 명시한 모델 경로는 풀의
 active 계정을 자동 전환하지 않아요.
 
+## 1P 전송 (실험적 로컬 연결)
+
+기본값은 게이트웨이예요. 로컬 OCX 서버 실행 중 다음 명령을 명시적으로 사용하면
+Desktop의 claude.ai 모드를 유지하고 Code 프로세스만 인증된 로컬 HTTPS 프록시로 연결해요.
+
+```bash
+ocx claude desktop apply --first-party
+```
+
+성공하면 사용자가 직접 Desktop을 완전히 종료하고 다시 열어 주세요. 이후 일반 `apply`는
+선택한 모드를 보존해요. 게이트웨이로 돌아가려면 다음을 사용해요.
+
+```bash
+ocx claude desktop apply --gateway
+```
+
+터미널 1P는 독립적으로 선택해요.
+
+```bash
+ocx claude first-party on
+```
+
+```bash
+ocx claude first-party off
+```
+
+어느 한쪽이 1P를 사용하면 공유 프록시/CA 설정을 유지해요. CA는 `NODE_EXTRA_CA_CERTS`로
+Code 프로세스에만 신뢰시키고 OS 인증서 저장소에는 등록하지 않아요. 기존 외부 프록시와
+수정된 프로필은 덮어쓰지 않아요. 1P 실행은 게이트웨이 base URL이나 인증용 bearer를
+주입하지 않으며, 사용자가 내보낸 충돌 설정은 오류로 알려요. 라우팅 모델은 `modelMap`
+또는 OCX 에이전트 경로를 사용해요. 타사 모델 라우팅이 공식 승인이나 계정 정책 보장은 아니에요.
+
+**원격 설정:** 위 로컬 서버 명령 대신 Notch 연결 화면에서 이 PC의 Claude 1P를
+명시적으로 켜 주세요. 최초 설정 후 Notch가 기존 Codex 릴레이와 Claude 전용 worker를
+함께 관리해요. 원격 연결만 했다고 Claude 설정을 바꾸지는 않아요.
+Windows 앱의 Code 모델 선택기도 연결하려면 `ocx-notch --claude-picker-on`을 실행해요.
+Windows가 이 사용자에게만 적용되는 `claude.ai` 전용 인증서 신뢰를 확인해요.
+설정 후 Desktop을 완전히 종료하고 다시 열어 주세요. Notch는 계속 실행해 두세요.
+로컬 Code 모델 목록에만 OCX 모델을 추가하며 Chat과 클라우드 Code 목록은 바꾸지 않아요.
+인증서 개인키는 Windows 사용자 암호화로 저장해요. 해제는
+`ocx-notch --claude-picker-off`를 사용해요. 기본 1P 연결만 켜면 OS 인증서를 등록하지 않아요.
+일반 Chat은 타사 모델로 라우팅하지 않아요.
+
+Gateway/3P 모드와 달리 1P 세션은 Code 모델 선택기로 세션 중간에 모델을 바꿀 수 있어요.
+Companion은 Desktop 목록뿐 아니라 내부 CLI bootstrap에도 같은 라우팅 ID를 제공해요.
+새 모델을 추가했거나 bootstrap을 제공하지 않던 companion을 업데이트했다면 새 세션을
+시작해 주세요. 독립 CLI의 공유 `cc` 목록 확장은 여전히 CLI 1P 설정을 켜야 적용돼요.
+
+Claude Code 2.1.295의 세션 중간 모델 검증은 5초 안에 끝나야 해요. 한 토큰을 요청하는
+비스트리밍 `Hi` 검증 요청도 선택한 제공자에 실제로 보내되, 대화 문맥이 없는 검증에만
+CLI의 코딩 에이전트 시스템 접두문을 제외해요. 실제 응답 텍스트가 도착하면
+검증 응답을 반환하고 나머지 생성을 취소해요. 출력 제한 필드가 없는 어댑터의 긴 답변을
+끝까지 기다리지 않아요. 제공자 오류나 느린 첫 응답은 여전히 검증 실패가 될 수 있으며,
+카탈로그에 있다는 이유만으로 성공 응답을 만들어내지는 않아요.
+
 ## 빠른 시작
 
 ```bash

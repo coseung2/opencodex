@@ -25,6 +25,30 @@ let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
 const originalFetch = globalThis.fetch;
 
+test("in-session model validation returns real provider output without waiting for an unbounded answer", async () => {
+  let cancelled = false;
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    const body = await req.json() as Record<string, unknown>;
+    expect(body.model).toBe("fixture-model");
+    expect(JSON.stringify(body.messages)).not.toContain("fixture coding-agent prefix");
+    return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "Hello" } }] })}\n\n`));
+    }, cancel() { cancelled = true; } }), { headers: { "content-type": "text/event-stream" } });
+  } });
+  saveConfig({ port: 0, defaultProvider: "fixture", providers: { fixture: { adapter: "openai-chat", baseUrl: upstream.url.toString(), apiKey: "fixture", allowPrivateNetwork: true, liveModels: false } } } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/messages", server.url), { method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(4000), body: JSON.stringify({
+      model: "fixture/fixture-model", max_tokens: 1, system: [{ type: "text", text: "fixture coding-agent prefix" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "Hi", cache_control: { type: "ephemeral" } }] }],
+    }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ type: "message", content: [{ type: "text", text: "H" }], stop_reason: "max_tokens" });
+    for (let index = 0; index < 20 && !cancelled; index++) await Bun.sleep(10);
+    expect(cancelled).toBe(true);
+  } finally { server.stop(true); upstream.stop(true); }
+}, 10000);
+
 test("Claude gateway preserves cached prefix, one-hour markers and native signatures over two HTTP turns", async () => {
   const captures: Array<{ body: any; beta: string | null }> = [];
   const signature = "c2lnbmVkX2VuZHBvaW50X2ZpeHR1cmU=";
@@ -129,6 +153,35 @@ afterEach(() => {
 function mockChatUpstream() {
   return mockChatUpstreamCapturing().server;
 }
+
+test("Claude HTTP turns replay native Responses reasoning to the same authenticated destination", async () => {
+  const captures: Array<Record<string, any>> = [];
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    captures.push(await req.json() as Record<string, any>);
+    const events = [
+      { type: "response.output_item.done", item: { type: "reasoning", id: "rs_http_fixture", encrypted_content: "opaque-http-fixture" } },
+      { type: "response.output_text.delta", delta: "Continue the repository task." },
+      { type: "response.completed", response: { status: "completed", usage: { input_tokens: 12, output_tokens: 4 } } },
+    ];
+    return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  } });
+  saveConfig({ port: 0, defaultProvider: "fixture", providers: {
+    fixture: { adapter: "openai-responses", baseUrl: upstream.url.toString().replace(/\/$/, ""), apiKey: "fixture-key", allowPrivateNetwork: true },
+  } } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const messages: Record<string, unknown>[] = [{ role: "user", content: "Investigate the repository." }];
+    const post = () => fetch(new URL("/v1/messages", server.url), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "fixture/model", max_tokens: 128, thinking: { type: "adaptive" }, messages }) });
+    const first = await post(); expect(first.status).toBe(200);
+    const message = await first.json() as Record<string, any>;
+    expect(message.content.some((block: Record<string, unknown>) => block.type === "thinking" && block.thinking === "")).toBe(true);
+    messages.push({ role: "assistant", content: message.content }, { role: "user", content: "Continue." });
+    const second = await post(); expect(second.status).toBe(200); await second.text();
+    expect(captures[1]!.input.some((item: Record<string, unknown>) => item.type === "reasoning" && item.encrypted_content === "opaque-http-fixture")).toBe(true);
+    expect(JSON.stringify(captures[1])).not.toContain("ocxr1:");
+    expect(captures[0]!.include).toContain("reasoning.encrypted_content");
+  } finally { server.stop(true); upstream.stop(true); }
+}, SERVER_BUDGET_MS);
 
 function mockChatUpstreamCapturing() {
   const captured: Array<Record<string, unknown>> = [];

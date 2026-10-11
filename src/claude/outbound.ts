@@ -10,7 +10,7 @@
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
 import { isTransientUpstreamStatus } from "../lib/upstream-retry";
-import { decodeReasoningEnvelope } from "../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX, type NativeReasoning } from "../responses/reasoning-envelope";
 import {
   isTranslatorBudgetExceededError,
   TRANSLATOR_MAX_TURN_BYTES,
@@ -149,8 +149,9 @@ function webSearchPairFromItem(item: Rec): { id: string; input: Rec; resultConte
   let resultContent: unknown;
   if (completed) {
     const hits: Rec[] = [];
-    if (Array.isArray(item.sources)) {
-      for (const s of item.sources) {
+    const sources = Array.isArray(item.sources) ? item.sources : Array.isArray(action.sources) ? action.sources : [];
+    if (sources.length) {
+      for (const s of sources) {
         if (isRec(s) && typeof s.url === "string" && s.url.length > 0) {
           hits.push({ type: "web_search_result", title: typeof s.title === "string" ? s.title : "", url: s.url });
         }
@@ -195,7 +196,7 @@ interface OpenBlock {
 export function responsesSseToAnthropicSse(
   upstream: ReadableStream<Uint8Array>,
   model: string,
-  opts: { pingIntervalMs?: number; translatorBudget: TranslatorBudget },
+  opts: { pingIntervalMs?: number; translatorBudget: TranslatorBudget; nativeReasoningFor?: (enc: string, id?: string) => NativeReasoning | undefined },
 ): ReadableStream<Uint8Array> {
   const translatorBudget = opts.translatorBudget;
   const pingIntervalMs = opts?.pingIntervalMs ?? 20_000;
@@ -427,6 +428,12 @@ export function responsesSseToAnthropicSse(
             if (!item) break;
             if (item.type === "reasoning" && typeof item.encrypted_content === "string") {
               const envelope = decodeReasoningEnvelope(item.encrypted_content);
+              const native = !item.encrypted_content.startsWith(OCX_REASONING_PREFIX)
+                ? opts.nativeReasoningFor?.(item.encrypted_content, typeof item.id === "string" ? item.id : undefined) : undefined;
+              if (native) {
+                ensureBlock("thinking");
+                open!.signature = encodeReasoningEnvelope({ nat: native });
+              }
               // The signature slot is the only field a Claude-wire client echoes back verbatim,
               // so an envelope carrying hidden text (txt) or a Kiro blob (krc) must claim it too,
               // not just one carrying an Anthropic signature. Without a carrier the replayed
@@ -690,7 +697,7 @@ export function responsesSseToAnthropicSse(
 }
 
 /** Non-streaming: /v1/responses JSON -> Anthropic message JSON. */
-export function responsesJsonToAnthropicMessage(json: unknown, model: string): Rec {
+export function responsesJsonToAnthropicMessage(json: unknown, model: string, nativeReasoningFor?: (enc: string, id?: string) => NativeReasoning | undefined): Rec {
   const body = isRec(json) ? json : {};
   const output = Array.isArray(body.output) ? body.output : [];
   const content: Rec[] = [];
@@ -723,17 +730,19 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
         }
         const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : undefined;
         const envelope = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+        const native = encrypted && !encrypted.startsWith(OCX_REASONING_PREFIX)
+          ? nativeReasoningFor?.(encrypted, typeof raw.id === "string" ? raw.id : undefined) : undefined;
         for (const data of envelope?.red ?? []) content.push({ type: "redacted_thinking", data });
         // Same carrier rule as the streaming path: a Claude-wire client only replays the
         // signature slot, so a txt/krc-only envelope has to claim it or the reasoning is lost.
         const carriesReasoning = envelope?.sig !== undefined || envelope?.txt !== undefined || envelope?.krc !== undefined;
-        if (parts.length > 0 || carriesReasoning) {
+        if (parts.length > 0 || carriesReasoning || native) {
           const hidden = parts.length === 0;
           const wholeEnvelope = carriesReasoning && (envelope!.sig === undefined || (hidden && envelope!.txt !== undefined));
           content.push({
             type: "thinking",
             thinking: parts.length > 0 ? (envelope?.txt ?? parts.join("\n\n")) : "",
-            signature: wholeEnvelope ? encrypted! : (envelope?.sig ?? `ocx${Date.now()}`),
+            signature: native ? encodeReasoningEnvelope({ nat: native }) : wholeEnvelope ? encrypted! : (envelope?.sig ?? `ocx${Date.now()}`),
           });
         }
         break;
@@ -806,6 +815,7 @@ export async function collectAnthropicMessage(
   stream: ReadableStream<Uint8Array>,
   model: string,
   translatorBudget: TranslatorBudget,
+  options: { modelValidationProbe?: boolean } = {},
 ): Promise<Rec> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
@@ -816,6 +826,7 @@ export async function collectAnthropicMessage(
   let stopReason: string | null = "end_turn";
   let usage: Rec = anthropicUsage(undefined);
   let error: Rec | null = null;
+  let probeAnswered = false;
   const replaceRetained = (previous: string, next: string, kind: "live_transient" | "retained_collectors") => {
     const reservation = translatorBudget.reserveTransient(Buffer.byteLength(next), { kind });
     reservation.commitRetained();
@@ -837,6 +848,9 @@ export async function collectAnthropicMessage(
 
   const handle = (name: string, data: Rec) => {
     switch (name) {
+      case "message_start":
+        if (options.modelValidationProbe && isRec(data.message) && isRec(data.message.usage)) usage = { ...data.message.usage };
+        break;
       case "content_block_start":
         closeBlock();
         if (isRec(data.content_block)) openBlock = { ...data.content_block };
@@ -846,7 +860,16 @@ export async function collectAnthropicMessage(
         if (!openBlock) break;
         if (delta.type === "text_delta" && typeof delta.text === "string") {
           const previous = typeof openBlock.text === "string" ? openBlock.text : "";
-          openBlock.text = replaceRetained(previous, previous + delta.text, "retained_collectors");
+          const text = options.modelValidationProbe ? Array.from(delta.text)[0] ?? "" : delta.text;
+          openBlock.text = replaceRetained(previous, previous + text, "retained_collectors");
+          if (options.modelValidationProbe && openBlock.type === "text" && text.length > 0) {
+            // Kiro has no output-limit wire field. A one-token validation must not
+            // wait for its entire answer beyond the SDK's five-second deadline.
+            // Only actual provider text confirms the route, never message_start.
+            probeAnswered = true;
+            stopReason = "max_tokens";
+            usage = { ...usage, output_tokens: 1 };
+          }
         } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
           const previous = typeof openBlock.thinking === "string" ? openBlock.thinking : "";
           openBlock.thinking = replaceRetained(previous, previous + delta.thinking, "retained_collectors");
@@ -875,7 +898,7 @@ export async function collectAnthropicMessage(
   };
 
   try {
-    for (;;) {
+    collect: for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer = replaceRetained(buffer, buffer + decoder.decode(value, { stream: true }), "live_transient");
@@ -893,9 +916,11 @@ export async function collectAnthropicMessage(
         let data: unknown;
         try { data = JSON.parse(dataLine); } catch { continue; }
         if (isRec(data)) handle(eventName, data);
+        if (probeAnswered) break collect;
       }
     }
   } finally {
+    if (probeAnswered) void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
   closeBlock();

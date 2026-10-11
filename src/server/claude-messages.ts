@@ -29,6 +29,10 @@ import {
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
 import { routeModel } from "../router";
+import type { NativeReasoningState } from "../claude/native-reasoning";
+import { nativeAnthropicReasoningProjection } from "../claude/inbound";
+import { carriesMessageThread, messageThreadUnsupportedResponse } from "../claude/message-threads";
+import { isClaudeModelValidationProbe } from "../claude/model-validation";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
@@ -562,6 +566,7 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
+  const nativeReasoningState: NativeReasoningState = { replay: new Map() };
   let effortOverride: ReturnType<typeof extractOcxEffortDirective> = null;
   try {
     anthropicBody = await readAnthropicBody(req, translatorBudget);
@@ -606,7 +611,13 @@ async function handleClaudeMessagesWithBudget(
       if (claudeConversationId) logCtx.conversationId = claudeConversationId;
     }
     if (isRec(anthropicBody) && wantsNativePassthrough(req, config, anthropicBody.model)) {
-      return await anthropicNativePassthrough(req, config, logCtx, logIds, anthropicBody, "/v1/messages");
+      return await anthropicNativePassthrough(req, config, logCtx, logIds, nativeAnthropicReasoningProjection(anthropicBody), "/v1/messages");
+    }
+    // Upstream #5985: a continuation is only a delta. Ask Claude Code to resend
+    // the full conversation instead of translating it as a fresh, empty task.
+    if (carriesMessageThread(anthropicBody)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
+      return messageThreadUnsupportedResponse();
     }
     if (isRec(anthropicBody) && effortOverride) {
       anthropicBody.output_config = { effort: effortOverride };
@@ -616,6 +627,7 @@ async function handleClaudeMessagesWithBudget(
     internalBody = translation.body;
     translatorBudget.chargeRetained(new TextEncoder().encode(JSON.stringify(internalBody)).byteLength, { kind: "request_copies" });
     cacheKeySource = translation.cacheKeySource;
+    nativeReasoningState.replay = translation.nativeReasoningReplay;
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
     const status = overflow ? 413 : err instanceof AnthropicRequestError ? 400 : 500;
@@ -629,6 +641,11 @@ async function handleClaudeMessagesWithBudget(
   }
 
   const requestedModel = (anthropicBody as Rec).model as string;
+  const modelValidationProbe = isClaudeModelValidationProbe(anthropicBody);
+  // The CLI's side query carries its coding-agent system prefix even for "Hi".
+  // It is not conversation context and can delay Kiro's first text past the SDK
+  // deadline. Only routed validation drops it; native passthrough returned above.
+  if (modelValidationProbe) delete internalBody.instructions;
   const stream = internalBody.stream === true;
   // Routed adapters only support streamed turns; always stream internally and fold
   // the translated Anthropic SSE into a message JSON for non-streaming clients.
@@ -742,6 +759,7 @@ async function handleClaudeMessagesWithBudget(
     // Without this the replay would look native and a Responses-scoped wire default
     // would fire, disagreeing with the pre-flight decision above.
     inboundWire: "anthropic",
+    nativeReasoningState,
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForTerminalStatus(status), { terminalStatus: status, closeReason: "terminal" }),
@@ -793,7 +811,8 @@ async function handleClaudeMessagesWithBudget(
 
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream") && response.body) {
-    const anthropicSse = responsesSseToAnthropicSse(response.body, requestedModel, { translatorBudget });
+    const anthropicSse = responsesSseToAnthropicSse(response.body, requestedModel, { translatorBudget,
+      nativeReasoningFor: (enc, id) => nativeReasoningState.mint?.(enc, id) });
     if (stream) {
       return new Response(anthropicSse, {
         status: 200,
@@ -806,7 +825,7 @@ async function handleClaudeMessagesWithBudget(
     }
     let message: Rec;
     try {
-      message = await collectAnthropicMessage(anthropicSse, requestedModel, translatorBudget);
+      message = await collectAnthropicMessage(anthropicSse, requestedModel, translatorBudget, { modelValidationProbe });
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) {
         return anthropicErrorResponse(413, error.message, "request_too_large", error.code);
@@ -853,7 +872,7 @@ async function handleClaudeMessagesWithBudget(
     }
     return anthropicErrorResponse(502, error?.message ?? "upstream request failed", "api_error");
   }
-  const message = responsesJsonToAnthropicMessage(json, requestedModel);
+  const message = responsesJsonToAnthropicMessage(json, requestedModel, (enc, id) => nativeReasoningState.mint?.(enc, id));
   if ((message as Rec).type === "error") {
     return new Response(JSON.stringify(message), {
       status: 529,
@@ -918,6 +937,7 @@ export async function handleClaudeCountTokens(req: Request, config: OcxConfig): 
   if (wantsNativePassthrough(req, config, model)) {
     return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
   }
+  if (carriesMessageThread(raw)) return messageThreadUnsupportedResponse();
   const parts: string[] = [];
   if (raw.system !== undefined) parts.push(typeof raw.system === "string" ? raw.system : JSON.stringify(raw.system));
   if (raw.messages !== undefined) parts.push(JSON.stringify(raw.messages));

@@ -76,6 +76,7 @@ describe("claude inbound translation", () => {
     expect(tools).toHaveLength(2);
     expect(tools[0]).toEqual({
       type: "function", name: "Read", description: "Read a file",
+      strict: false,
       parameters: { type: "object", properties: { file_path: { type: "string" } }, required: ["file_path"] },
     });
     expect(tools[1]).toEqual({ type: "web_search" });
