@@ -116,6 +116,25 @@ async function doneUsage(adapter: ReturnType<typeof createKiroAdapter>, ...frame
 }
 
 describe("kiro adapter — parseStream", () => {
+  test("private answer text is visible before tool stop and cannot be retried after partial output", async () => {
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "answer" }], [bashTool]));
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const wire = new ReadableStream<Uint8Array>({ start(controller) { source = controller; } });
+    source.enqueue(eventFrame({ name: KIRO_COMPLETION_TOOL_NAME, toolUseId: "final-live" }));
+    source.enqueue(eventFrame({ input: '{"answer":"첫 문장 ', name: KIRO_COMPLETION_TOOL_NAME, toolUseId: "final-live" }));
+    const iterator = adapter.parseStream(new Response(wire));
+    let first;
+    for (let index = 0; index < 4; index++) {
+      const next = await iterator.next();
+      if (next.value?.type === "text_delta") { first = next.value; break; }
+    }
+    expect(first).toMatchObject({ type: "text_delta", text: "첫 문장 ", phase: "final_answer" });
+    source.enqueue(encodeMessage({ ":message-type": "exception", ":exception-type": "ThrottlingException" }, enc.encode(JSON.stringify({ message: "Too many requests." }))));
+    source.close();
+    const rest = await collectAdapterEvents(iterator);
+    expect(rest.at(-1)).toMatchObject({ type: "error", retryable: false });
+  });
   test("Kiro event parser preserves usage and context usage frames", async () => {
     expect(parseKiroEvent("metadataEvent", enc.encode(JSON.stringify({ contextUsagePercentage: 25.5 })))).toEqual({
       type: "metadata",
@@ -302,9 +321,8 @@ describe("kiro adapter — parseStream", () => {
 
     // Same-inference prose is superseded by the explicit terminal answer; emitting both is the
     // duplicate-answer loop users see as Kiro rehashing work it has already finished.
-    expect(events.filter(event => event.type === "text_delta")).toEqual([
-      { type: "text_delta", text: "Task complete.", phase: "final_answer" },
-    ]);
+      expect(events.filter(event => event.type === "text_delta").map(event => event.text).join("")).toBe("Task complete.");
+      expect(events.filter(event => event.type === "text_delta").every(event => event.phase === "final_answer")).toBe(true);
     expect(events.some(event => event.type === "tool_call_start" || event.type === "tool_call_delta")).toBe(false);
     expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
     expect(JSON.stringify(events)).not.toContain(KIRO_COMPLETION_TOOL_NAME);
@@ -617,11 +635,8 @@ describe("kiro adapter — parseStream", () => {
     ))));
 
     expect(fetches).toBe(1);
-    expect(events.filter(event => event.type === "text_delta")).toEqual([
-      { type: "text_delta", text: "The file has ", phase: "commentary" },
-      { type: "text_delta", text: "three lines.", phase: "commentary" },
-      { type: "text_delta", text: "The file has three lines.", phase: "final_answer" },
-    ]);
+      expect(events.filter(event => event.type === "text_delta" && event.phase === "commentary").map(event => event.text).join("")).toBe("The file has three lines.");
+      expect(events.filter(event => event.type === "text_delta" && event.phase === "final_answer").map(event => event.text).join("")).toBe("The file has three lines.");
     expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
   });
 
@@ -801,9 +816,8 @@ describe("kiro adapter — parseStream", () => {
       eventFrame({ stopReason: "END_TURN" }, "metadataEvent"),
     ))));
 
-    expect(events.filter(event => event.type === "text_delta")).toEqual([
-      { type: "text_delta", text: "Task complete.", phase: "final_answer" },
-    ]);
+      expect(events.filter(event => event.type === "text_delta").map(event => event.text).join("")).toBe("Task complete.");
+      expect(events.filter(event => event.type === "text_delta").every(event => event.phase === "final_answer")).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
   });
 

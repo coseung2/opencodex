@@ -1,4 +1,5 @@
 import { decodeEventStream } from "../lib/eventstream-decoder";
+import { KiroAnswerStream } from "./kiro-answer-stream";
 import { estimateTokens } from "../lib/token-estimate";
 import { debugProviderDiagnostic } from "../lib/debug";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
@@ -983,6 +984,9 @@ async function* parseKiroAttemptEvents(
   let sawReasoning = false;
   let sawRealTool = false;
   let completionAnswer: string | undefined;
+  const answerStream = new KiroAnswerStream();
+  let streamedAnswer = "";
+  let streamedAnswerBytes = 0;
   let completionCalls = 0;
   let authoritativeUsage: OcxUsage | undefined;
   let stopReason: string | undefined;
@@ -1046,6 +1050,7 @@ async function* parseKiroAttemptEvents(
     // Upstream exception/error frames can arrive after commentary was already staged (and will be
     // flushed before this terminal is yielded). Replaying after that content would duplicate it.
     const emittedOutput = priorEmittedOutput
+      || streamedAnswer.length > 0
       || sawText
       || sawReasoning
       || sawRealTool
@@ -1075,7 +1080,7 @@ async function* parseKiroAttemptEvents(
         usage(),
         providerState(),
         // First-attempt progress was already flushed before this bounded fallback (#520).
-        !priorEmittedOutput,
+        !priorEmittedOutput && streamedAnswer.length === 0,
       );
     }
     return {
@@ -1347,6 +1352,17 @@ async function* parseKiroAttemptEvents(
             budget.releaseRetained(outputCharsBytes, { kind: "retained_collectors" });
             retention.trackReplacement(outputCharsBytes, nextOutputCharsBytes);
             outputCharsBytes = nextOutputCharsBytes;
+            if (open.completion && !sawRealTool) {
+              const delta = answerStream.push(ev.input);
+              if (delta) {
+                const nextBytes = appendedUtf8Bytes(streamedAnswer, streamedAnswerBytes, delta);
+                const reservation = budget.reserveTransient(nextBytes, { kind: "retained_collectors" });
+                streamedAnswer += delta;
+                reservation.commitRetained(); budget.releaseRetained(streamedAnswerBytes, { kind: "retained_collectors" });
+                retention.trackReplacement(streamedAnswerBytes, nextBytes); streamedAnswerBytes = nextBytes;
+                yield { type: "text_delta", text: delta, phase: "final_answer" };
+              }
+            }
           }
           if (ev.stop === true) {
             const flushed = flushOpen();
@@ -1462,7 +1478,8 @@ async function* parseKiroAttemptEvents(
     if (mode === "text_fallback") {
       if (completionAnswer !== undefined) {
         yield* consumeSupersededByCompletion(fallbackEvents);
-        yield { type: "text_delta", text: completionAnswer, phase: "final_answer" };
+        if (!streamedAnswer) yield { type: "text_delta", text: completionAnswer, phase: "final_answer" };
+        else if (streamedAnswer !== completionAnswer) return { assistantText, sawReasoning, terminal: protocolTerminal("Kiro streamed terminal answer did not match its validated JSON") };
         return {
           assistantText,
           sawReasoning,
@@ -1510,7 +1527,8 @@ async function* parseKiroAttemptEvents(
     }
 
     if (completionAnswer !== undefined) {
-      yield { type: "text_delta", text: completionAnswer, phase: "final_answer" };
+      if (!streamedAnswer) yield { type: "text_delta", text: completionAnswer, phase: "final_answer" };
+      else if (streamedAnswer !== completionAnswer) return { assistantText, sawReasoning, terminal: protocolTerminal("Kiro streamed terminal answer did not match its validated JSON") };
       return {
         assistantText,
         sawReasoning,
@@ -1635,6 +1653,7 @@ async function* parseKiroAttemptEvents(
     // the client may already have partial output. Protocol parse throws stay non-retryable even
     // with zero output.
     const emittedOutput = priorEmittedOutput
+      || streamedAnswer.length > 0
       || sawText
       || sawReasoning
       || sawRealTool
