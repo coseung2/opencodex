@@ -9,11 +9,12 @@ import {
   type DesktopFamily,
   type DesktopProfile,
 } from "../claude/desktop-profile";
-import { writeDesktop3pConfig, type Desktop3pConfigMode, parseDesktop3pModeArgs } from "../claude/desktop-3p";
+import { writeDesktop3pConfig, type Desktop3pConfigMode } from "../claude/desktop-3p";
 import { filterCatalogVisibleModels, desktopVisibleNativeSlugs } from "../codex/catalog";
 import { buildClaudeDesktopState, fetchAllModels } from "../server/management-api";
 import { findLiveProxy } from "../server/proxy-liveness";
 import { runtimeRequest } from "./runtime-api";
+import { isDesktopApplyInvocation, parseDesktopApplyTarget } from "../claude/desktop-apply-flags";
 
 function isFamily(value: string | undefined): value is DesktopFamily {
   return !!value && (DESKTOP_FAMILIES as readonly string[]).includes(value);
@@ -21,7 +22,7 @@ function isFamily(value: string | undefined): value is DesktopFamily {
 
 function printDesktopHelp(): void {
   console.log(`Usage:
-  ocx claude desktop [apply] [--static|--hybrid|--discovery-only]
+  ocx claude desktop [apply] [--first-party | --gateway [--static|--hybrid|--discovery-only]]
   ocx claude desktop show [--json]
   ocx claude desktop move <provider/model> <opus|fable|sonnet|haiku> [--default]
   ocx claude desktop default <family> <provider/model|none>
@@ -80,6 +81,19 @@ export async function applyProfile(
     mode,
     state.profile,
   );
+  if (result.written) {
+    config.claudeCode = { ...config.claudeCode, desktopMode: "gateway",
+      desktopProfile: { ...state.profile, ...(result.fingerprint ? { appliedFingerprint: result.fingerprint, appliedAt: new Date().toISOString() } : {}) } };
+    saveConfigPreservingClaudeCode(config);
+    if (config.claudeCode.cliFirstParty !== true) {
+      const { getConfigDir } = await import("../config");
+      const { claudeConfigDir } = await import("../claude/auth-detect");
+      const { claudeInterceptCaCertPath } = await import("../claude/intercept/local-ca");
+      const { removeClaudeInterceptSettings } = await import("../claude/intercept/settings");
+      const removed = removeClaudeInterceptSettings(claudeInterceptCaCertPath(getConfigDir()), claudeConfigDir(process.env));
+      if (!removed.ok) return { ok: true, path: result.path, reason: "first_party_cleanup_pending" };
+    }
+  }
   return { ok: result.written, path: result.path, reason: result.reason };
 }
 
@@ -90,21 +104,25 @@ export async function handleClaudeDesktopCommand(argv: string[], deps: ApplyProf
     return 0;
   }
 
-  // Legacy mode flags remain apply aliases and are parsed before subcommands.
-  const legacyFlags = argv.filter(arg => ["--static", "--hybrid", "--discovery-only"].includes(arg));
-  const applyInvocation = argv.length === 0 || command === "apply" || legacyFlags.length > 0;
-  if (applyInvocation) {
-    const nonMode = argv.filter(arg => !["apply", "--static", "--hybrid", "--discovery-only"].includes(arg));
-    if (nonMode.length > 0) {
-      console.error(`알 수 없는 인자: ${nonMode.join(" ")}`);
-      return 1;
+  if (isDesktopApplyInvocation(argv)) {
+    const parsed = parseDesktopApplyTarget(argv, loadConfig());
+    if ("error" in parsed) { console.error(parsed.error); return 1; }
+    if (parsed.target.transport === "first-party") {
+      try {
+        const live = await (deps.findLiveProxyImpl ?? findLiveProxy)();
+        if (!live) { console.error("Start the local OCX server before applying first-party mode."); return 1; }
+        const result = await runtimeRequest<{ ok: boolean; reason?: string; rollbackComplete?: boolean }>("/api/claude-desktop/apply", {
+          method: "POST", body: JSON.stringify({ transport: "first-party" }),
+        });
+        if (!result.ok) { console.error(`First-party apply failed: ${result.reason ?? "unavailable"}`); return 1; }
+        console.log("Claude Desktop first-party settings applied. Quit and reopen Desktop when ready.");
+        return 0;
+      } catch { console.error("First-party apply unavailable; existing settings were preserved."); return 1; }
     }
-    const parsedMode = parseDesktop3pModeArgs(legacyFlags);
-    if ("error" in parsedMode) { console.error(parsedMode.error); return 1; }
     try {
       const config = loadConfig();
       const state = await buildClaudeDesktopState(config);
-      const result = await applyProfile(state.profile, parsedMode.mode, deps);
+      const result = await applyProfile(state.profile, parsed.target.mode, deps);
       if (!result.ok) {
         console.error(`설정 적용 실패: ${result.reason ?? "unknown error"}`);
         console.error("프로필은 저장되었지만 Claude Desktop 설정 파일에는 반영되지 않았습니다. 프록시 상태를 확인한 뒤 다시 적용해 주세요.");
