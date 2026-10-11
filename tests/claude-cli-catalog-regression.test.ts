@@ -29,6 +29,15 @@ test("CLI catalog paths and entrypoints do not claim Desktop or management reque
   for (const ua of ["claude-code/2.1.278", "claude-cli/2.1.278 (external, cli)"]) expect(claudeCliCatalogEligible(new Request("https://fixture.invalid", { headers: { "user-agent": ua } }))).toBe(true);
   expect(claudeCliCatalogEligible(new Request("https://fixture.invalid", { headers: { "user-agent": "claude-cli/2.1.278 (external, claude-desktop)" } }))).toBe(false);
 });
+test("Desktop-spawned CLI bootstrap admits routed models without claiming Desktop selector catalogs", () => {
+  for (const entrypoint of ["claude-desktop", "claude-desktop-3p", "local-agent"]) {
+    const headers = { "user-agent": `claude-cli/2.1.295 (external, ${entrypoint})` };
+    expect(claudeCliCatalogEligible(new Request("https://fixture.invalid/api/claude_cli/bootstrap", { headers }))).toBe(true);
+    expect(claudeCliCatalogEligible(new Request("https://fixture.invalid/api/model_selector/cc", { headers }))).toBe(false);
+  }
+  expect(claudeCliCatalogEligible(new Request("https://fixture.invalid/api/claude_cli/bootstrap", { headers: { "user-agent": "unrelated-client" } }))).toBe(false);
+});
+
 test("CLI served catalog uses effort-capable native template without rewriting Desktop", () => {
   const surfaces = ["cc", "ccd", "ccr"].map(id => ({ id, models: [
     { id: "claude-haiku", name: "Haiku" },

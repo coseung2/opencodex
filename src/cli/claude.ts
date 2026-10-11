@@ -17,6 +17,7 @@ import type { OcxConfig } from "../types";
 import { configuredAdminToken } from "../lib/admin-secrets";
 import { PROXY_MARKER, ownAdmissionTokens, defaultAuthDetectDeps, detectClaudeAuth, type AuthDetectDeps } from "../claude/auth-detect";
 import { resolveClaudeAuthMode } from "../claude/auth-mode";
+import { configuredClaudeInterceptEnv } from "../claude/intercept/runtime";
 
 export interface ClaudeLaunchEnv {
   [key: string]: string | undefined;
@@ -74,9 +75,10 @@ export function buildClaudeEnv(
     if (env[name] !== undefined && env[name] !== "") return; // user wins
     env[name] = value;
   };
-  setDefault("ANTHROPIC_BASE_URL", `http://127.0.0.1:${port}`);
+  const firstParty = config.claudeCode?.cliFirstParty === true;
+  if (!firstParty) setDefault("ANTHROPIC_BASE_URL", `http://127.0.0.1:${port}`);
   const existingBaseUrl = env.ANTHROPIC_BASE_URL;
-  if (existingBaseUrl) {
+  if (existingBaseUrl && !firstParty) {
     try {
       const parsed = new URL(existingBaseUrl);
       const isLoopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
@@ -94,7 +96,7 @@ export function buildClaudeEnv(
   // the user's Claude login. Only inject a token when the proxy actually requires an
   // admission key; otherwise Claude Code keeps its own OAuth and sends it to us —
   // native claude models then pass through verbatim (see server/claude-messages.ts).
-  if ((config.apiKeys?.length ?? 0) > 0) {
+  if (!firstParty && (config.apiKeys?.length ?? 0) > 0) {
     setDefault("ANTHROPIC_AUTH_TOKEN", config.apiKeys![0].key);
   }
   // Detection reads the SANITIZED launch env — the exact object spawned below — so the
@@ -112,7 +114,7 @@ export function buildClaudeEnv(
     env: () => env as NodeJS.ProcessEnv,
     ownTokens: ownAdmissionTokens(config),
   }));
-  if (!env.ANTHROPIC_AUTH_TOKEN && resolved.markerMode === "proxy") {
+  if (!firstParty && !env.ANTHROPIC_AUTH_TOKEN && resolved.markerMode === "proxy") {
     env.ANTHROPIC_AUTH_TOKEN = PROXY_MARKER;
   }
   if (resolved.origin === "auto-unknown") {
@@ -124,7 +126,7 @@ export function buildClaudeEnv(
   // proxy is essential; Design/Remote Control are secondary features.
   // Connectors still work because they check OAuth state ($o()), not base URL (Gd()).
   // Native /model picker discovery ("From gateway", Claude Code >= 2.1.129).
-  setDefault("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+  if (!firstParty) setDefault("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
   // Host-managed routing guard (devlog 260720_claude_authmode_persist/020): with
   // this flag in the spawn env, Claude Code strips provider-managed vars
   // (ANTHROPIC_BASE_URL/AUTH_TOKEN/API_KEY, model slots) from settings-sourced
@@ -136,7 +138,7 @@ export function buildClaudeEnv(
   // Claude Code 2.1.206+ also treats this as a host-auth assertion. Injecting it
   // without a host token makes a valid claude.ai subscription look logged out,
   // so the guard is only safe when opencodex actually owns authentication.
-  if (env.ANTHROPIC_AUTH_TOKEN) {
+  if (!firstParty && env.ANTHROPIC_AUTH_TOKEN) {
     setDefault("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "1");
   }
   // Opt-in effort forcing (devlog 136 B6): opus-shaped aliases already carry
@@ -245,10 +247,21 @@ export async function cmdClaude(args: string[]): Promise<number> {
   }
   const contextWindows = await fetchClaudeContextWindows(config, port);
   const env = buildClaudeEnv(config, port, process.env, contextWindows);
+  if (config.claudeCode?.cliFirstParty === true) {
+    const prepared = configuredClaudeInterceptEnv(config, port);
+    if (!prepared) { console.error("First-party listener credentials unavailable; existing settings were preserved."); return 1; }
+    if (env.ANTHROPIC_BASE_URL && env.ANTHROPIC_BASE_URL !== "https://api.anthropic.com") {
+      console.error("First-party launch conflicts with an exported ANTHROPIC_BASE_URL; remove that override explicitly."); return 1;
+    }
+    for (const [key, value] of Object.entries(prepared)) {
+      if (env[key] && env[key] !== value) { console.error("First-party launch conflicts with existing proxy or CA settings."); return 1; }
+      env[key] = value;
+    }
+  }
   // Pre-write the CLI's gateway-model cache (devlog 030): without a token the CLI
   // never refreshes it, so the picker would keep showing yesterday's aliases.
   try {
-    const cachePath = await refreshGatewayModelCacheFromProxy(port);
+    const cachePath = config.claudeCode?.cliFirstParty === true ? undefined : await refreshGatewayModelCacheFromProxy(port);
     if (cachePath === null) {
       console.error("⚠ Gateway model cache could not be refreshed; the model picker may be stale.");
     }

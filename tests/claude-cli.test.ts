@@ -27,6 +27,13 @@ const AUTH_PRESENT = {
 };
 
 describe("ocx claude env assembly", () => {
+  test("first-party launch does not inject gateway auth or discovery", () => {
+    const env = buildClaudeEnv(cfg({ claudeCode: { cliFirstParty: true }, apiKeys: [{ id: "test", name: "test", key: "fixture-admission", createdAt: "2026-01-01" }] }), 10100, {}, {}, AUTH_PRESENT);
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
+    expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBeUndefined();
+  });
   test("injects base URL, discovery flag and model slots — NO auth token by default (subscription mode)", () => {
     const env = buildClaudeEnv(cfg({
       claudeCode: { model: "claude-ocx-gemini--gemini-3-pro", smallFastModel: "gemini/gemini-3-flash" },

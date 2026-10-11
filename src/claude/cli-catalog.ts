@@ -11,8 +11,12 @@ export function claudeCliCatalogKind(method: string, path: string): "selector" |
 }
 export function claudeCliCatalogEligible(request: Request): boolean {
   const ua = request.headers.get("user-agent") ?? "";
+  const bootstrap = claudeCliCatalogKind(request.method, new URL(request.url).pathname) === "bootstrap";
   return /^claude-code\/[^\s]+$/.test(ua)
-    || /^claude-cli\/[^\s()]+ \(external, (?:cli|terminal|sdk-cli)(?:, [^,()]+)*\)$/.test(ua);
+    || /^claude-cli\/[^\s()]+ \(external, (?:cli|terminal|sdk-cli)(?:, [^,()]+)*\)$/.test(ua)
+    // Desktop's renderer picker and its child CLI must know the same routes. The
+    // shared cc selector still belongs only to standalone CLI intent.
+    || bootstrap && /^claude-cli\/[^\s()]+ \(external, (?:claude-desktop|claude-desktop-3p|local-agent)(?:, [^,()]+)*\)$/.test(ua);
 }
 
 /** Unknown/error catalogs remain untouched. Only the local CLI surface is rewritten. */

@@ -49,6 +49,11 @@ import { removeOwnedConfigState } from "../lib/config-ownership";
 const args = process.argv.slice(2);
 const command = args[0];
 
+if (command === "__claude-first-party-edge") {
+  const { runClaudeEdgeWorker } = await import("./claude-edge-worker");
+  process.exit(await runClaudeEdgeWorker(args.slice(1)).catch(() => 1));
+}
+
 if (command === "--version" || command === "-v" || command === "version") {
   printVersion();
   process.exit(0);
@@ -1115,6 +1120,11 @@ switch (command) {
       const { handleClaudeDesktopCommand } = await import("./claude-desktop");
       const exitCode = await handleClaudeDesktopCommand(args.slice(2));
       if (exitCode !== 0) process.exit(exitCode);
+      break;
+    }
+    if (args[1] === "first-party") {
+      const { handleClaudeFirstPartyCommand } = await import("./claude-first-party");
+      process.exitCode = await handleClaudeFirstPartyCommand(args.slice(2));
       break;
     }
     if (args[1] === "config") {
