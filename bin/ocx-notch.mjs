@@ -3,7 +3,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_NAME = "@coseung2/opencodex";
@@ -128,12 +129,48 @@ if (process.argv.includes("--subagent-catalog")) {
   process.exit(status);
 }
 
+// Resolve only installed runtimes. Notch startup must never download or run a
+// package installer, and native launch paths must not depend on cwd or PATH.
+async function companionRuntimeEnv() {
+  let isRealBunBinary;
+  try { ({ isRealBunBinary } = await import("../src/lib/bun-binary-validator.mjs")); }
+  catch { return {}; }
+  const isolatedEntry = resolve(here, "..", "vendor", "claude-first-party", "src", "cli", "index.ts");
+  const entry = existsSync(isolatedEntry) ? isolatedEntry : resolve(here, "..", "src", "cli", "index.ts");
+  let bun = null;
+  const override = process.env.OPENCODEX_BUN_PATH?.trim();
+  if (override && isRealBunBinary(resolve(override))) bun = resolve(override);
+  if (!bun) {
+    try {
+      const require = createRequire(import.meta.url);
+      const directory = dirname(require.resolve("bun/package.json"));
+      for (const name of ["bun.exe", "bun"]) {
+        const candidate = resolve(directory, "bin", name);
+        if (isRealBunBinary(candidate)) { bun = candidate; break; }
+      }
+    } catch { /* Codex-only Notch remains usable without the installed runtime. */ }
+  }
+  if (!bun || !existsSync(entry)) return {};
+  return { OCX_NOTCH_BUN_PATH: bun, OCX_NOTCH_CLI_ENTRY: entry };
+}
+
+// Ignore inherited handoffs unless revalidated by this package launcher.
+const launchEnv = { ...process.env, OCX_PACKAGE_VERSION: packageVersion() };
+delete launchEnv.OCX_NOTCH_BUN_PATH;
+delete launchEnv.OCX_NOTCH_CLI_ENTRY;
+Object.assign(launchEnv, await companionRuntimeEnv());
+
+const localClaudeAction = process.argv.slice(2).some(arg => ["--claude-first-party-on", "--claude-first-party-off", "--claude-first-party-status", "--claude-picker-on", "--claude-picker-off"].includes(arg));
+if (localClaudeAction) {
+  if (process.argv.length !== 3) fail("Claude local actions cannot be combined with other options.");
+  const result = spawnSync(nativeBinary, process.argv.slice(2), { env: launchEnv, stdio: "inherit", windowsHide: true });
+  if (result.error) fail("could not execute the local Claude companion action.");
+  process.exit(result.status ?? 1);
+}
+
 const child = spawn(nativeBinary, process.argv.slice(2), {
   detached: true,
-  env: {
-    ...process.env,
-    OCX_PACKAGE_VERSION: packageVersion(),
-  },
+  env: launchEnv,
   stdio: "ignore",
   windowsHide: true,
 });
