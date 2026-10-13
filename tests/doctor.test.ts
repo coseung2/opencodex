@@ -22,26 +22,21 @@ import { collectOrcaCodexHomeDiagnostic } from "../src/codex/home";
 const TEST_DIR = join(import.meta.dir, ".tmp-doctor-test");
 const TEST_CODEX_HOME = join(TEST_DIR, "codex");
 const TEST_OPENCODEX_HOME = join(TEST_DIR, "opencodex");
+const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 let prevOpencodexHome: string | undefined;
 let prevCodexHome: string | undefined;
-let prevHttpsProxy: string | undefined;
-let prevLowerHttpsProxy: string | undefined;
 let prevProxyRef: string | undefined;
 
 describe("doctor", () => {
   beforeEach(() => {
     prevOpencodexHome = process.env.OPENCODEX_HOME;
     prevCodexHome = process.env.CODEX_HOME;
-    prevHttpsProxy = process.env.HTTPS_PROXY;
-    prevLowerHttpsProxy = process.env.https_proxy;
     prevProxyRef = process.env.OCX_TEST_PROXY_REF;
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_CODEX_HOME, { recursive: true });
     mkdirSync(TEST_OPENCODEX_HOME, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_OPENCODEX_HOME;
     process.env.CODEX_HOME = TEST_CODEX_HOME;
-    delete process.env.HTTPS_PROXY;
-    delete process.env.https_proxy;
     delete process.env.OCX_TEST_PROXY_REF;
   });
 
@@ -50,10 +45,6 @@ describe("doctor", () => {
     else process.env.OPENCODEX_HOME = prevOpencodexHome;
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = prevCodexHome;
-    if (prevHttpsProxy === undefined) delete process.env.HTTPS_PROXY;
-    else process.env.HTTPS_PROXY = prevHttpsProxy;
-    if (prevLowerHttpsProxy === undefined) delete process.env.https_proxy;
-    else process.env.https_proxy = prevLowerHttpsProxy;
     if (prevProxyRef === undefined) delete process.env.OCX_TEST_PROXY_REF;
     else process.env.OCX_TEST_PROXY_REF = prevProxyRef;
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -234,16 +225,61 @@ describe("doctor", () => {
     expect(info.isDrvfs).toBe(false);
   });
 
-  test("collectProxyEnv reports presence without leaking the value", () => {
-    let rows = collectProxyEnv();
-    expect(rows.find(r => r.key === "HTTPS_PROXY")!.present).toBe(false);
+  // Bun 1.4.0 on Windows can retain a lowercase process.env alias after both
+  // spellings are deleted. Use explicit maps, not mutations of inherited proxies.
+  test.each(PROXY_ENV_KEYS)(
+    "collectProxyEnv reports %s presence without leaking the value",
+    (key) => {
+      const absent = PROXY_ENV_KEYS.map(key => ({ key, present: false }));
+      expect(collectProxyEnv({})).toEqual(absent);
+      for (const spelling of [key, key.toLowerCase()]) {
+        const rows = collectProxyEnv({ [spelling]: "http://user:secret@proxy.example.test:8080" });
+        expect(rows).toEqual(absent.map(row => ({ ...row, present: row.key === key })));
+        // The row exposes only a boolean; the secret value is never carried.
+        expect(JSON.stringify(rows)).not.toContain("secret");
+      }
+      const blank = collectProxyEnv({ [key]: "", [key.toLowerCase()]: " \t " });
+      expect(blank).toEqual(absent);
+      const lower = collectProxyEnv({ [key]: " \t ", [key.toLowerCase()]: "http://user:secret@proxy.example.test:8080" });
+      expect(lower).toEqual(absent.map(row => ({ ...row, present: row.key === key })));
+      expect(JSON.stringify(lower)).not.toContain("secret");
+    },
+  );
 
-    process.env.HTTPS_PROXY = "http://user:secret@proxy.example.test:8080";
-    rows = collectProxyEnv();
-    const https = rows.find(r => r.key === "HTTPS_PROXY")!;
-    expect(https.present).toBe(true);
-    // The row exposes only a boolean; the secret value is never carried.
-    expect(JSON.stringify(rows)).not.toContain("secret");
+  test("collectProxyEnv defaults to the process environment in a fresh child", () => {
+    const proxyKeys = new Set(PROXY_ENV_KEYS.map(key => key.toLowerCase()));
+    const baseEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !proxyKeys.has(key.toLowerCase())),
+    );
+    const doctorUrl = new URL("../src/cli/doctor.ts", import.meta.url).href;
+    const script = `import { collectProxyEnv } from ${JSON.stringify(doctorUrl)};
+      console.log(JSON.stringify(collectProxyEnv()));`;
+    const absent = PROXY_ENV_KEYS.map(key => ({ key, present: false }));
+    const fixtures = [
+      {},
+      { HTTPS_PROXY: "http://user:secret@proxy.example.test:8080" },
+      { https_proxy: "http://user:secret@proxy.example.test:8080" },
+    ];
+    for (const proxyEnv of fixtures) {
+      // Strip aliases before spawning: the child starts clean, without depending
+      // on the runtime's deletion/cache behavior or modifying the parent env.
+      const child = Bun.spawnSync([process.execPath, "-e", script], {
+        cwd: TEST_DIR,
+        env: { ...baseEnv, ...proxyEnv },
+        timeout: 5_000,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(child.exitCode).toBe(0);
+      const output = new TextDecoder().decode(child.stdout);
+      expect(JSON.parse(output)).toEqual(absent.map(row => ({
+        ...row,
+        present: row.key === "HTTPS_PROXY" && Object.keys(proxyEnv).length > 0,
+      })));
+      expect(output).not.toContain("secret");
+      expect(new TextDecoder().decode(child.stderr)).not.toContain("secret");
+    }
   });
 
   test("parseProcessEnvBlock supports proxy presence without carrying secret values", () => {
