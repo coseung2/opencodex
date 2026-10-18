@@ -76,6 +76,26 @@ test("remote context metadata controls marking and blocked policy", () => {
   expect(defs.find(def => def.name === "ocx-gpt-6-astra")!.model).toEndWith("[1m]");
   expect(defs.every(def => def.blockedSkills.includes("claude-api"))).toBe(true);
 });
+test("a chosen model listed only in the subagent list still gets an agent", () => {
+  const d = dir();
+  const c = { ...catalog(), available: [...catalog().chosen] };
+  c.injection.available = c.injection.available.filter(row => row.namespaced !== "opencode-go/deepseek-v4.1-flash");
+  let skipped: string[] = ["unset"];
+  const files = syncNotchAgentCatalog(c, d, ids => { skipped = ids; });
+  expect(skipped).toEqual([]);
+  expect(files).toHaveLength(4);
+  const deepseek = files.find(file => file.includes("deepseek"))!;
+  expect(readFileSync(join(d, "agents", deepseek), "utf8")).toContain("<!-- ocx-route: claude-ocx-opencode-go--deepseek-v4.1-flash -->");
+});
+test("a chosen model the VM no longer lists drops only that agent", () => {
+  const d = dir();
+  const c = catalog();
+  c.injection.available = c.injection.available.filter(row => row.namespaced !== "opencode-go/deepseek-v4.1-flash");
+  let skipped: string[] = [];
+  const files = syncNotchAgentCatalog(c, d, ids => { skipped = ids; });
+  expect(skipped).toEqual(["opencode-go/deepseek-v4.1-flash"]);
+  expect(files).toHaveLength(3);
+});
 test("duplicate identities and malformed policy fail validation", () => {
   const c = catalog();
   c.injection.available.push(c.injection.available[0]!);

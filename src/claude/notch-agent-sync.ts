@@ -12,7 +12,7 @@ function identifier(value: unknown): value is string {
 }
 function invalid(): never { throw new Error("Invalid VM Notch agent catalog; existing definitions retained."); }
 
-export function buildNotchAgentDefs(input: unknown, configDir: string) {
+export function buildNotchAgentDefs(input: unknown, configDir: string, onSkipped?: (ids: string[]) => void) {
   if (!record(input) || input.schemaVersion !== 1 || input.source !== "remote") invalid();
   if (!Array.isArray(input.chosen) || input.chosen.length > 5 || !input.chosen.every(identifier)) invalid();
   const chosen = input.chosen as string[];
@@ -27,7 +27,23 @@ export function buildNotchAgentDefs(input: unknown, configDir: string) {
       provider: row.provider, model: row.model, native,
     };
   }
-  if (chosen.some(id => !entries[id])) invalid();
+  // The roster follows the VM's subagent list. A pick the injection list omits (it carries
+  // only one row per public slug) still resolves from that list's `provider/model` slug.
+  const listed = new Set(Array.isArray(input.available) ? input.available.filter(identifier) : []);
+  for (const id of chosen) {
+    if (entries[id] || !listed.has(id)) continue;
+    const slash = id.indexOf("/");
+    const provider = id.slice(0, slash);
+    if (slash <= 0 || !/^[a-zA-Z0-9_-]+$/.test(provider) || slash === id.length - 1) continue;
+    (entries as Record<string, { provider: string; model: string; native: boolean }>)[id] = {
+      provider, model: id.slice(slash + 1), native: false,
+    };
+  }
+  // A pick the VM no longer lists drops only that agent. Refuse when nothing resolves, so a
+  // broken catalog cannot prune every existing definition.
+  const resolvable = chosen.filter(id => entries[id]);
+  if (chosen.length > 0 && resolvable.length === 0) invalid();
+  onSkipped?.(chosen.filter(id => !entries[id]));
   // Require the allowlisted policy extension, never guess from local OCX settings.
   if (!record(input.claudeCode)) invalid();
   const policy = input.claudeCode;
@@ -61,13 +77,13 @@ export function buildNotchAgentDefs(input: unknown, configDir: string) {
       windows[key] = value;
     }
   }
-  const config = { port: 10100, defaultProvider: "openai", providers: {}, subagentModels: chosen, claudeCode } as OcxConfig;
+  const config = { port: 10100, defaultProvider: "openai", providers: {}, subagentModels: resolvable, claudeCode } as OcxConfig;
   if (claudeCode.enabled === false || claudeCode.injectAgents === false) return [];
   return buildClaudeAgentDefs(config, windows, configDir, { includeSelf: false, resolvedEntries: entries });
 }
 
-export function syncNotchAgentCatalog(input: unknown, configDir: string): string[] {
-  const defs = buildNotchAgentDefs(input, configDir);
+export function syncNotchAgentCatalog(input: unknown, configDir: string, onSkipped?: (ids: string[]) => void): string[] {
+  const defs = buildNotchAgentDefs(input, configDir, onSkipped);
   // Check every selected target before writes; a user-authored collision is not success.
   for (const def of defs) {
     if (!/^ocx-[a-z0-9-]+\.md$/.test(def.file)) invalid();
