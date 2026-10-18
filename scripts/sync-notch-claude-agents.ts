@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { syncNotchAgentCatalog } from "../src/claude/notch-agent-sync";
 
+const CATALOG_QUERY_TIMEOUT_MS = 40_000;
+const STALE_LOCK_MS = CATALOG_QUERY_TIMEOUT_MS + 30_000;
 const args = process.argv.slice(2);
 const hook = args.includes("--hook");
 function option(name: string): string | undefined {
@@ -20,6 +22,11 @@ try {
   const configDir = option("--config-dir") ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
   mkdirSync(configDir, { recursive: true });
   lock = join(configDir, ".notch-agent-sync.lock");
+  // A hook killed at its timeout never reaches `finally`, so its lock outlives it and blocks
+  // every later sync. No run lasts past the catalog query timeout; older locks are stale.
+  try {
+    if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) unlinkSync(lock);
+  } catch { /* no lock, or another run replaced it */ }
   try { fd = openSync(lock, "wx", 0o600); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       if (!hook) console.log("Native agent synchronization already running.");
@@ -37,7 +44,7 @@ try {
     scratch = mkdtempSync(join(tmpdir(), "ocx-native-agents-"));
     const output = join(scratch, "catalog.json");
     const result = spawnSync(binary, ["--subagent-catalog-output", output], {
-      timeout: 40_000, windowsHide: true, encoding: "utf8", maxBuffer: 1_048_576,
+      timeout: CATALOG_QUERY_TIMEOUT_MS, windowsHide: true, encoding: "utf8", maxBuffer: 1_048_576,
     });
     // Native stderr can contain private connection details; never relay it.
     if (result.error || result.status !== 0) throw new Error("VM Notch catalog query failed; existing definitions retained.");
@@ -46,8 +53,9 @@ try {
   if (text.length > 2_097_152) throw new Error("VM catalog exceeds the synchronization limit.");
   let catalog: unknown;
   try { catalog = JSON.parse(text); } catch { throw new Error("Invalid VM catalog JSON; existing definitions retained."); }
-  const files = syncNotchAgentCatalog(catalog, configDir);
-  if (!hook) console.log(JSON.stringify({ source: "remote", count: files.length, agents: files }));
+  let skipped: string[] = [];
+  const files = syncNotchAgentCatalog(catalog, configDir, ids => { skipped = ids; });
+  if (!hook) console.log(JSON.stringify({ source: "remote", count: files.length, agents: files, skipped }));
 } catch (error) {
   const message = error instanceof Error && !/(?:[A-Za-z]:\\|https?:\/\/)/.test(error.message)
     ? error.message : "VM native agent synchronization failed; existing definitions retained.";
